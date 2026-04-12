@@ -324,33 +324,50 @@ export default function SkuInsights() {
 
   // Stock risk: join inventory with spend data
   const stockRiskRows = useMemo(() => {
+    const totalSpend = skuSummary.reduce((t, x) => t + safeNum(x.spend), 0);
     return skuSummary.map(s => {
       const inv = inventoryMap[s.label.toUpperCase()] || {};
       const stock = inv.stock ?? null;
-      const dailyPurchases = s.purchases / 7; // 7D purchases / 7 days
+      const price = safeNum(inv.price);
+      const dailyPurchases = s.purchases / 7; // 7D purchases ÷ 7 days
       const daysRunway = (stock != null && dailyPurchases > 0) ? Math.round(stock / dailyPurchases) : null;
-      const totalSpend = skuSummary.reduce((t, x) => t + safeNum(x.spend), 0);
+      const weeksOfSupply = (stock != null && dailyPurchases > 0) ? +(stock / (dailyPurchases * 7)).toFixed(1) : null;
       const spendShare = totalSpend > 0 ? safeNum(s.spend) / totalSpend * 100 : 0;
+
+      // Reorder point: flag when ≤ 14 days of supply remain
+      const reorderPoint = dailyPurchases > 0 ? Math.ceil(dailyPurchases * 14) : null;
+      const needsReorder = stock !== null && reorderPoint !== null && stock <= reorderPoint && stock > 0;
+
+      // Lost revenue: out-of-stock SKUs × daily demand × price × 14 days (forward estimate)
+      const lostRevenue = (stock !== null && stock <= 0 && dailyPurchases > 0 && price > 0)
+        ? dailyPurchases * price * 14
+        : 0;
 
       // Risk score: high spend + low stock = critical
       let riskLevel = 'ok';
-      if (stock === null)                           riskLevel = 'unknown';
-      else if (stock <= 0)                          riskLevel = 'out';
-      else if (spendShare >= 5 && stock < 10)       riskLevel = 'critical';
-      else if (spendShare >= 2 && stock < 20)       riskLevel = 'high';
+      if (stock === null)                                             riskLevel = 'unknown';
+      else if (stock <= 0)                                           riskLevel = 'out';
+      else if (spendShare >= 5 && stock < 10)                        riskLevel = 'critical';
+      else if (spendShare >= 2 && stock < 20)                        riskLevel = 'high';
       else if (stock < 30 || (daysRunway !== null && daysRunway < 7)) riskLevel = 'medium';
 
       return {
         sku: s.label,
         productName: inv.title || '—',
+        price,
         stock,
         spend: s.spend,
         spendShare,
         roas: s.roas,
         cpr: s.cpr,
         purchases: s.purchases,
+        revenue: s.revenue,
         dailyPurchases,
         daysRunway,
+        weeksOfSupply,
+        reorderPoint,
+        needsReorder,
+        lostRevenue,
         riskLevel,
       };
     }).sort((a, b) => {
@@ -543,16 +560,49 @@ export default function SkuInsights() {
 
           {/* Risk summary */}
           {hasInventory && (() => {
-            const out      = stockRiskRows.filter(r => r.riskLevel === 'out');
-            const critical = stockRiskRows.filter(r => r.riskLevel === 'critical');
-            const high     = stockRiskRows.filter(r => r.riskLevel === 'high');
+            const out         = stockRiskRows.filter(r => r.riskLevel === 'out');
+            const critical    = stockRiskRows.filter(r => r.riskLevel === 'critical');
+            const high        = stockRiskRows.filter(r => r.riskLevel === 'high');
+            const reorders    = stockRiskRows.filter(r => r.needsReorder);
             const spendAtRisk = [...out, ...critical, ...high].reduce((s, r) => s + r.spend, 0);
+            const totalLostRev = stockRiskRows.reduce((s, r) => s + r.lostRevenue, 0);
             return (
-              <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
-                <MetricCard label="Out of Stock" value={out.length}      icon={AlertTriangle} color="red"    />
-                <MetricCard label="Critical Risk" value={critical.length} icon={AlertTriangle} color="red"    />
-                <MetricCard label="High Risk"    value={high.length}     icon={ShoppingBag}   color="amber"  />
-                <MetricCard label="Spend at Risk" value={fmt.currency(spendAtRisk)} icon={DollarSign} color="amber" />
+              <div className="grid grid-cols-2 xl:grid-cols-3 gap-4">
+                <MetricCard label="Out of Stock" value={out.length} sub={`${critical.length} critical · ${high.length} high risk`} icon={AlertTriangle} color="red" />
+                <MetricCard label="Need Reorder Now" value={reorders.length} sub="≤ 14 days supply left" icon={ShoppingBag} color="amber" />
+                <MetricCard label="Spend at Risk" value={fmt.currency(spendAtRisk)} sub={totalLostRev > 0 ? `~${fmt.currency(totalLostRev)} est. lost rev (14d)` : undefined} icon={DollarSign} color="amber" />
+              </div>
+            );
+          })()}
+
+          {/* Restock alert panel */}
+          {hasInventory && (() => {
+            const urgentReorders = stockRiskRows.filter(r => r.needsReorder || r.riskLevel === 'out' || r.riskLevel === 'critical');
+            if (!urgentReorders.length) return null;
+            return (
+              <div className="bg-amber-950/20 border border-amber-800/40 rounded-xl p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <AlertTriangle size={14} className="text-amber-400" />
+                  <h3 className="text-sm font-semibold text-amber-300">Restock Alert — {urgentReorders.length} SKU{urgentReorders.length > 1 ? 's' : ''} need attention</h3>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
+                  {urgentReorders.slice(0, 9).map(r => (
+                    <div key={r.sku} className="flex items-start gap-2 bg-gray-900/60 rounded-lg px-3 py-2">
+                      <div className="w-2 h-2 rounded-full mt-1 shrink-0"
+                        style={{ background: r.riskLevel === 'out' ? '#ef4444' : r.riskLevel === 'critical' ? '#f87171' : '#fbbf24' }} />
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-slate-200 truncate">{r.sku}</div>
+                        <div className="text-[10px] text-slate-500 truncate">{r.productName}</div>
+                        <div className="text-[10px] mt-0.5 flex gap-2 flex-wrap">
+                          <span className="text-slate-400">Stock: <span className={r.stock <= 0 ? 'text-red-400 font-bold' : 'text-amber-400'}>{r.stock <= 0 ? 'OUT' : r.stock}</span></span>
+                          {r.reorderPoint && <span className="text-slate-400">Reorder: <span className="text-white">{r.reorderPoint} units</span></span>}
+                          {r.daysRunway !== null && r.daysRunway > 0 && <span className="text-slate-400">{r.daysRunway}d left</span>}
+                          {r.lostRevenue > 0 && <span className="text-red-400">{fmt.currency(r.lostRevenue)} est. lost</span>}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             );
           })()}
@@ -567,7 +617,7 @@ export default function SkuInsights() {
               <table className="w-full text-xs">
                 <thead>
                   <tr className="border-b border-gray-800 bg-gray-900">
-                    {['Risk','SKU','Product','Stock','Days Runway','Spend','Spend %','ROAS','CPR','Daily Conv'].map(h => (
+                    {['Risk','SKU','Product','Stock','Days Left','Weeks Supply','Reorder Qty','Lost Rev (14d)','Spend','Spend %','ROAS','CPR','Daily Conv'].map(h => (
                       <th key={h} className="px-3 py-2.5 text-left text-slate-500 font-semibold whitespace-nowrap">{h}</th>
                     ))}
                   </tr>
@@ -575,26 +625,28 @@ export default function SkuInsights() {
                 <tbody>
                   {stockRiskRows.map((r, i) => {
                     const RISK = {
-                      out:      { label: 'Out',      bg: 'bg-red-950/60',     text: 'text-red-400',     dot: '#ef4444' },
-                      critical: { label: 'Critical', bg: 'bg-red-950/40',     text: 'text-red-300',     dot: '#f87171' },
-                      high:     { label: 'High',     bg: 'bg-amber-950/40',   text: 'text-amber-400',   dot: '#fbbf24' },
-                      medium:   { label: 'Medium',   bg: 'bg-yellow-950/20',  text: 'text-yellow-500',  dot: '#eab308' },
-                      unknown:  { label: 'No Data',  bg: '',                  text: 'text-slate-600',   dot: '#475569' },
-                      ok:       { label: 'OK',       bg: '',                  text: 'text-emerald-400', dot: '#34d399' },
+                      out:      { label: 'Out',      bg: 'bg-red-950/60',     dot: '#ef4444' },
+                      critical: { label: 'Critical', bg: 'bg-red-950/40',     dot: '#f87171' },
+                      high:     { label: 'High',     bg: 'bg-amber-950/40',   dot: '#fbbf24' },
+                      medium:   { label: 'Medium',   bg: 'bg-yellow-950/20',  dot: '#eab308' },
+                      unknown:  { label: 'No Data',  bg: '',                  dot: '#475569' },
+                      ok:       { label: 'OK',       bg: '',                  dot: '#34d399' },
                     };
                     const risk = RISK[r.riskLevel] || RISK.ok;
-                    const totalSpend = skuSummary.reduce((s, x) => s + safeNum(x.spend), 0);
                     return (
                       <tr key={r.sku} className={`border-t border-gray-800/40 ${risk.bg} ${i % 2 === 0 && !risk.bg ? 'bg-gray-950/40' : ''}`}>
                         <td className="px-3 py-2.5">
-                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${risk.text} bg-current/10`}
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold"
                             style={{ background: risk.dot + '22', color: risk.dot }}>
                             {risk.label}
                           </span>
                         </td>
-                        <td className="px-3 py-2.5 font-semibold text-slate-200 whitespace-nowrap">{r.sku}</td>
-                        <td className="px-3 py-2.5 text-slate-400 max-w-[160px] truncate" title={r.productName}>{r.productName}</td>
-                        <td className="px-3 py-2.5">
+                        <td className="px-3 py-2.5 font-semibold text-slate-200 whitespace-nowrap">
+                          {r.sku}
+                          {r.needsReorder && <span className="ml-1.5 text-[9px] px-1 py-0.5 bg-amber-500/20 text-amber-400 rounded font-bold">REORDER</span>}
+                        </td>
+                        <td className="px-3 py-2.5 text-slate-400 max-w-[150px] truncate" title={r.productName}>{r.productName}</td>
+                        <td className="px-3 py-2.5 tabular-nums">
                           {r.stock === null ? <span className="text-slate-600">—</span>
                             : r.stock <= 0 ? <span className="text-red-400 font-bold">0 ✗</span>
                             : <span className={r.stock < 20 ? 'text-amber-400 font-semibold' : 'text-emerald-400'}>{r.stock}</span>}
@@ -605,10 +657,24 @@ export default function SkuInsights() {
                             : r.daysRunway <= 7 ? <span className="text-amber-400 font-semibold">{r.daysRunway}d</span>
                             : <span className="text-slate-400">{r.daysRunway}d</span>}
                         </td>
+                        <td className="px-3 py-2.5 tabular-nums text-slate-500 text-[10px]">
+                          {r.weeksOfSupply === null ? '—'
+                            : r.weeksOfSupply < 1 ? <span className="text-red-400 font-semibold">{r.weeksOfSupply}w</span>
+                            : r.weeksOfSupply < 2 ? <span className="text-amber-400">{r.weeksOfSupply}w</span>
+                            : <span className="text-slate-400">{r.weeksOfSupply}w</span>}
+                        </td>
+                        <td className="px-3 py-2.5 tabular-nums text-slate-500 text-[10px]">
+                          {r.reorderPoint !== null ? r.reorderPoint : '—'}
+                        </td>
+                        <td className="px-3 py-2.5 tabular-nums text-[11px]">
+                          {r.lostRevenue > 0
+                            ? <span className="text-red-400 font-semibold">{fmt.currency(r.lostRevenue)}</span>
+                            : <span className="text-slate-700">—</span>}
+                        </td>
                         <td className="px-3 py-2.5 tabular-nums text-slate-300">{fmt.currency(r.spend)}</td>
                         <td className="px-3 py-2.5 tabular-nums">
                           <div className="flex items-center gap-1.5">
-                            <div className="w-16 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                            <div className="w-14 h-1.5 bg-gray-800 rounded-full overflow-hidden">
                               <div className="h-full bg-brand-500 rounded-full"
                                 style={{ width: `${Math.min(r.spendShare * 4, 100)}%` }} />
                             </div>
