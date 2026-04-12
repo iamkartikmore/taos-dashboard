@@ -31,11 +31,12 @@ function lsSet(key, value) {
 /* ─── DEFAULTS ───────────────────────────────────────────────────── */
 
 const DEFAULT_CONFIG = {
-  token:        '',
-  apiVersion:   'v21.0',
-  accounts:     [],   // [{ key: string, id: string }]
-  shopifyShop:  '',   // e.g. "theaffordableorganicstore"
-  shopifyToken: '',   // Shopify Admin API access token
+  token:              '',
+  apiVersion:         'v21.0',
+  accounts:           [],   // [{ key: string, id: string }]
+  shopifyShop:        '',   // e.g. "txk12s-ny"
+  shopifyClientId:    '',   // Shopify Custom App client_id
+  shopifyClientSecret:'',   // Shopify Custom App client_secret (shpss_...)
 };
 
 const DEFAULT_LISTS = {

@@ -77,12 +77,12 @@ export default function Setup() {
   };
 
   const handleFetchInventory = async () => {
-    if (!config.shopifyShop || !config.shopifyToken) return;
+    if (!config.shopifyShop || !config.shopifyClientId || !config.shopifyClientSecret) return;
     setInventoryFetching(true);
     setInventoryResult(null);
     setInventoryStatus('loading');
     try {
-      const map = await fetchShopifyInventory(config.shopifyShop, config.shopifyToken);
+      const map = await fetchShopifyInventory(config.shopifyShop, config.shopifyClientId, config.shopifyClientSecret);
       setInventoryMap(map);
       const count = Object.keys(map).length;
       setInventoryResult({ ok: true, count });
@@ -288,18 +288,28 @@ export default function Setup() {
                 />
               </div>
               <div>
-                <label className="text-xs text-slate-400 mb-1 block">Shopify Admin API Token</label>
+                <label className="text-xs text-slate-400 mb-1 block">Client ID</label>
+                <input
+                  type="text"
+                  value={config.shopifyClientId || ''}
+                  onChange={e => { setConfig({ ...config, shopifyClientId: e.target.value }); flashSaved(); }}
+                  placeholder="bc70bfdc89f06d5810b5bed1c..."
+                  className="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Client Secret</label>
                 <input
                   type="password"
-                  value={config.shopifyToken || ''}
-                  onChange={e => { setConfig({ ...config, shopifyToken: e.target.value }); flashSaved(); }}
-                  placeholder="shpat_..."
+                  value={config.shopifyClientSecret || ''}
+                  onChange={e => { setConfig({ ...config, shopifyClientSecret: e.target.value }); flashSaved(); }}
+                  placeholder="shpss_..."
                   className="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
               </div>
               <button
                 onClick={handleFetchInventory}
-                disabled={inventoryFetching || !config.shopifyShop || !config.shopifyToken}
+                disabled={inventoryFetching || !config.shopifyShop || !config.shopifyClientId || !config.shopifyClientSecret}
                 className="flex items-center gap-2 px-4 py-2 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 rounded-lg text-sm font-medium text-white transition-all"
               >
                 {inventoryFetching ? <Spinner size="sm" /> : <ShoppingBag size={14} />}

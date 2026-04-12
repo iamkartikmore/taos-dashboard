@@ -21,13 +21,23 @@ app.post('/api/meta/fetch', async (req, res) => {
 });
 
 // Shopify inventory proxy — fetches all active products with stock levels
-// Requires Shopify Admin API token with read_products + read_inventory scopes.
+// Uses client_credentials OAuth (DAWBU-style Custom App) to get access token first.
 app.post('/api/shopify/inventory', async (req, res) => {
-  const { shop, token } = req.body;
-  if (!shop || !token) return res.status(400).json({ error: 'shop and token required' });
+  const { shop, clientId, clientSecret } = req.body;
+  if (!shop || !clientId || !clientSecret) return res.status(400).json({ error: 'shop, clientId and clientSecret required' });
   try {
-    const headers = { 'X-Shopify-Access-Token': token };
     const shopDomain = shop.replace(/\.myshopify\.com$/, '');
+
+    // Step 0: Exchange client_credentials for an access token
+    const tokenResp = await axios.post(
+      `https://${shopDomain}.myshopify.com/admin/oauth/access_token`,
+      { client_id: clientId, client_secret: clientSecret, grant_type: 'client_credentials' },
+      { timeout: 15000 }
+    );
+    const accessToken = tokenResp.data?.access_token;
+    if (!accessToken) return res.status(401).json({ error: 'Failed to obtain access token from Shopify' });
+
+    const headers = { 'X-Shopify-Access-Token': accessToken };
     const allProducts = [];
 
     // Step 1: Pull all products (variants include inventory_quantity for single-location stores)

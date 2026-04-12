@@ -150,11 +150,11 @@ export async function pullAccount({ ver, token, accountKey, accountId }, onProgr
 
 /* ─── SHOPIFY INVENTORY ──────────────────────────────────────────── */
 
-export async function fetchShopifyInventory(shop, token) {
+export async function fetchShopifyInventory(shop, clientId, clientSecret) {
   const res = await fetch('/api/shopify/inventory', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ shop, token }),
+    body: JSON.stringify({ shop, clientId, clientSecret }),
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'Shopify API error');
