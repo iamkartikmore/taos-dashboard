@@ -176,6 +176,14 @@ export const useStore = create((set, get) => ({
   appendLog: msg => set(s => ({ fetchLog: [...s.fetchLog.slice(-199), msg] })),
   clearLog:  ()  => set({ fetchLog: [] }),
 
+  /* ── Session-only: Shopify orders ───────────────────────────────── */
+  shopifyOrders:       [],
+  shopifyOrdersStatus: 'idle',   // idle | loading | success | error
+  shopifyOrdersWindow: '7d',
+  shopifyOrdersError:  null,
+  setShopifyOrders: (orders, window) => set({ shopifyOrders: orders, shopifyOrdersStatus: 'success', shopifyOrdersWindow: window }),
+  setShopifyOrdersStatus: (s, err = null) => set({ shopifyOrdersStatus: s, shopifyOrdersError: err }),
+
   /* ── Session-only: breakdown data ───────────────────────────────── */
   breakdownRows:   {},    // { base:[], age:[], gender:[], ... } — normalized
   breakdownStatus: 'idle', // idle | loading | success | error

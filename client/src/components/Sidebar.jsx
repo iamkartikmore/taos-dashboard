@@ -1,7 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
-  Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2,
+  Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -19,7 +19,8 @@ const NAV = [
   { to: '/video',     icon: Play,            label: 'Video Insights',  group: 'intel' },
   { to: '/sku',       icon: Package,         label: 'SKU Intelligence', group: 'intel' },
   { to: '/flat',       icon: Database,   label: 'Raw Flat Data',        group: 'intel' },
-  { to: '/breakdowns', icon: BarChart2,  label: 'Breakdown Analytics',  group: 'intel' },
+  { to: '/breakdowns', icon: BarChart2,    label: 'Breakdown Analytics',  group: 'intel' },
+  { to: '/shopify',    icon: ShoppingBag, label: 'Shopify Orders',       group: 'intel' },
 ];
 
 const GROUP_LABELS = {

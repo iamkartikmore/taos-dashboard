@@ -90,6 +90,50 @@ app.post('/api/shopify/inventory', async (req, res) => {
   }
 });
 
+// Shopify orders — accepts since/until ISO strings, paginates, returns all orders
+app.post('/api/shopify/orders', async (req, res) => {
+  const { shop, clientId, clientSecret, since, until } = req.body;
+  if (!shop || !clientId || !clientSecret) return res.status(400).json({ error: 'shop, clientId, clientSecret required' });
+  try {
+    const shopDomain = shop.replace(/\.myshopify\.com$/, '');
+    const tokenResp = await axios.post(
+      `https://${shopDomain}.myshopify.com/admin/oauth/access_token`,
+      { client_id: clientId, client_secret: clientSecret, grant_type: 'client_credentials' },
+      { timeout: 15000 }
+    );
+    const accessToken = tokenResp.data?.access_token;
+    if (!accessToken) return res.status(401).json({ error: 'Failed to obtain access token' });
+
+    const headers = { 'X-Shopify-Access-Token': accessToken };
+    const fields = [
+      'id','name','created_at','financial_status','fulfillment_status','cancelled_at',
+      'total_price','subtotal_price','total_discounts','total_tax',
+      'customer','line_items','discount_codes','billing_address','shipping_address',
+      'source_name','refunds','tags',
+    ].join(',');
+
+    let qs = `limit=250&status=any&fields=${fields}`;
+    if (since) qs += `&created_at_min=${since}`;
+    if (until) qs += `&created_at_max=${until}`;
+
+    const allOrders = [];
+    let url = `https://${shopDomain}.myshopify.com/admin/api/2024-01/orders.json?${qs}`;
+    while (url) {
+      const resp = await axios.get(url, { headers, timeout: 60000 });
+      allOrders.push(...(resp.data.orders || []));
+      const link = resp.headers['link'] || '';
+      const m = link.match(/<([^>]+)>;\s*rel="next"/);
+      url = m ? m[1] : null;
+      if (url) await new Promise(r => setTimeout(r, 350));
+    }
+
+    res.json({ orders: allOrders, count: allOrders.length });
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: err.response?.data?.errors || err.message });
+  }
+});
+
 // Health check
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 

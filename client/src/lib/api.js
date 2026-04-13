@@ -185,6 +185,19 @@ export async function fetchShopifyInventory(shop, clientId, clientSecret) {
   return map;
 }
 
+/* ─── SHOPIFY ORDERS ─────────────────────────────────────────────── */
+
+export async function fetchShopifyOrders(shop, clientId, clientSecret, since, until) {
+  const res = await fetch('/api/shopify/orders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ shop, clientId, clientSecret, since, until }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'Shopify orders error');
+  return json.orders || [];
+}
+
 /* ─── VERIFY TOKEN ───────────────────────────────────────────────── */
 
 export async function verifyToken(token, ver = 'v21.0') {
