@@ -97,6 +97,11 @@ export default function Board() {
     { key: 'adName',       label: 'Ad',         width: 200, render: v => <span className="text-slate-200 font-medium">{v}</span> },
     { key: 'campaignName', label: 'Campaign',   width: 170, render: v => <span className="text-slate-400 text-xs">{v}</span> },
     { key: 'accountKey',   label: 'Account',    width: 80  },
+    { key: 'budget',       label: 'Budget',     align: 'right', width: 110,
+      render: (v, row) => v > 0
+        ? <span className="tabular-nums"><span className="font-semibold text-slate-200">{fmt.currency(v)}</span><span className="text-[10px] text-slate-500 ml-1">{row.budgetType}/{row.budgetLevel}</span></span>
+        : <span className="text-slate-700">—</span>
+    },
     { key: 'spend',        label: 'Spend',      align: 'right', width: 90,  render: v => <span className="font-semibold">{fmt.currency(v)}</span> },
     { key: 'metaRoas',     label: 'ROAS',       align: 'right', width: 70,
       render: v => <span className={safeNum(v) >= 4 ? 'text-emerald-400 font-bold' : safeNum(v) >= 2.5 ? 'text-amber-400' : 'text-red-400'}>{fmt.roas(v)}</span> },
@@ -150,8 +155,9 @@ export default function Board() {
         <>
           {/* Aggregate metrics */}
           {agg && (
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-              <MetricCard label="Ads"       value={fmt.number(rows.length)} color={cfg.color} />
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+              <MetricCard label="Ads"       value={fmt.number(rows.length)}    color={cfg.color} />
+              <MetricCard label="Budget"    value={agg.budget > 0 ? fmt.currency(agg.budget) : '—'} color={cfg.color} />
               <MetricCard label="Spend"     value={fmt.currency(agg.spend)}    color={cfg.color} />
               <MetricCard label="Revenue"   value={fmt.currency(agg.revenue)}  color={cfg.color} />
               <MetricCard label="ROAS"      value={fmt.roas(agg.roas)}         color={cfg.color} />
