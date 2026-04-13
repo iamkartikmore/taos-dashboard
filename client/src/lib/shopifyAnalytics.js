@@ -74,10 +74,21 @@ function percentile(arr, pct) {
 export function processShopifyOrders(orders, inventoryMap = {}) {
   if (!orders?.length) return null;
 
-  const active    = orders.filter(o => !o.cancelled_at);
   const cancelled = orders.filter(o => !!o.cancelled_at);
+  // Sort active orders by date so within-window first-seen detection is accurate
+  const active = orders
+    .filter(o => !o.cancelled_at)
+    .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
   const N = active.length;
   let totalRev = 0, totalDisc = 0, totalItems = 0, totalShipping = 0;
+
+  // Pre-build: customers who appear 2+ times in this window.
+  // Their 2nd+ order is a REPEAT even if lifetime orders_count = 1
+  // (covers cases where orders_count isn't returned, or guest-checkout repeat buyers).
+  const custWindowCount = {};
+  active.forEach(o => { if (o.customer?.id) custWindowCount[o.customer.id] = (custWindowCount[o.customer.id] || 0) + 1; });
+  // Track first-seen per customer as we iterate (orders are date-sorted)
+  const custSeenInWindow = new Set();
 
   // Accumulator maps
   const custMap     = {};
@@ -103,8 +114,18 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
     const ship   = p(o.total_shipping_price_set?.shop_money?.amount) || p(o.shipping_lines?.[0]?.price);
     const date   = o.created_at?.slice(0, 10);
     const hour   = o.created_at ? new Date(o.created_at).getHours() : null;
-    const isNew  = (o.customer?.orders_count || 1) <= 1;
     const cid    = o.customer?.id;
+
+    // isNew = true if this order represents a first-time customer acquisition.
+    // Priority:
+    //   1. lifetime orders_count > 1  → definitively repeat (most reliable)
+    //   2. same customer ID already seen earlier in this window → repeat within window
+    //   3. guest checkout (no cid) or first occurrence → new
+    const lifetimeOrders = o.customer?.orders_count;
+    const isNew = lifetimeOrders != null
+      ? lifetimeOrders <= 1 && !custSeenInWindow.has(cid)
+      : !custSeenInWindow.has(cid);   // orders_count absent → within-window fallback
+    if (cid) custSeenInWindow.add(cid);
 
     totalRev      += rev;
     totalDisc     += disc;
