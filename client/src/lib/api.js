@@ -203,6 +203,7 @@ export async function fetchShopifyOrders(shop, clientId, clientSecret, since, un
   const decoder = new TextDecoder();
   let buffer = '';
   let result = null;
+  const accOrders = [];  // accumulate batch events — avoids one giant SSE payload
 
   while (true) {
     const { done, value } = await reader.read();
@@ -218,11 +219,14 @@ export async function fetchShopifyOrders(shop, clientId, clientSecret, since, un
         const data = JSON.parse(dataLine.slice(6));
         if (data.type === 'log' || data.type === 'page') {
           onLog?.(data.msg);
+        } else if (data.type === 'batch') {
+          // Small batch of orders (50 at a time) — accumulate
+          accOrders.push(...(data.orders || []));
         } else if (data.type === 'error') {
           throw new Error(data.msg);
         } else if (data.type === 'done') {
-          result = data;
-          // Still read remaining log messages after 'done'
+          // done only carries stats — orders already accumulated via batch events
+          result = { ...data, orders: accOrders };
         }
       } catch (e) {
         if (e.message && !e.message.includes('JSON')) throw e;
@@ -231,7 +235,7 @@ export async function fetchShopifyOrders(shop, clientId, clientSecret, since, un
   }
 
   if (!result) throw new Error('Stream ended without completion signal');
-  return { orders: result.orders || [], count: result.count || 0, pages: result.pages || 1, fetchMs: result.fetchMs || 0 };
+  return { orders: result.orders, count: result.count || accOrders.length, pages: result.pages || 1, fetchMs: result.fetchMs || 0 };
 }
 
 /* ─── VERIFY TOKEN ───────────────────────────────────────────────── */

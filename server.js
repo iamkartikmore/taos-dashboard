@@ -211,8 +211,16 @@ app.post('/api/shopify/orders/stream', async (req, res) => {
       if (url) await new Promise(r => setTimeout(r, 350));
     }
 
-    emit({ type: 'log', msg: `Transferring ${allOrders.length} orders to client...` });
-    emit({ type: 'done', orders: allOrders, count: allOrders.length, pages: page, fetchMs: Date.now() - startMs });
+    // Send orders in small batches — a single giant JSON blob (6k+ orders) breaks SSE
+    // because it gets split across TCP chunks and the parser never sees a complete event.
+    const BATCH = 50;
+    const totalBatches = Math.ceil(allOrders.length / BATCH);
+    emit({ type: 'log', msg: `Transferring ${allOrders.length} orders in ${totalBatches} batches...` });
+    for (let i = 0; i < allOrders.length; i += BATCH) {
+      emit({ type: 'batch', orders: allOrders.slice(i, i + BATCH), offset: i });
+    }
+    // Lightweight done — no order payload, just stats
+    emit({ type: 'done', count: allOrders.length, pages: page, fetchMs: Date.now() - startMs });
     emit({ type: 'log', msg: `✓ Complete — ${allOrders.length} orders · ${page} pages · ${((Date.now() - startMs)/1000).toFixed(1)}s` });
   } catch (err) {
     emit({ type: 'error', msg: String(err.response?.data?.errors || err.message) });
