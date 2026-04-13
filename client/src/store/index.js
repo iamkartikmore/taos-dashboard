@@ -133,6 +133,8 @@ export const useStore = create((set, get) => ({
   /* ── Session-only: fetched Meta data ────────────────────────────── */
   rawAccounts:  [],
   enrichedRows: [],
+  adsetMap:     {},   // adsetId → adset object (for budget lookup)
+  campaignMap:  {},   // campaignId → campaign object (for budget lookup)
   fetchStatus:  'idle',   // idle | loading | success | error
   fetchLog:     [],
   fetchError:   null,
@@ -148,8 +150,14 @@ export const useStore = create((set, get) => ({
   setRawAccounts: accounts => {
     const all7d  = accounts.flatMap(a => a.insights7d   || []);
     const all30d = accounts.flatMap(a => a.insights30d  || []);
-    const enriched = buildEnrichedRows(all7d, all30d, get().manualMap);
-    set({ rawAccounts: accounts, enrichedRows: enriched, lastFetchAt: Date.now() });
+    const adsetMap    = {};
+    const campaignMap = {};
+    accounts.forEach(a => {
+      (a.adsets    || []).forEach(s => { adsetMap[s.id]    = s; });
+      (a.campaigns || []).forEach(c => { campaignMap[c.id] = c; });
+    });
+    const enriched = buildEnrichedRows(all7d, all30d, get().manualMap, adsetMap, campaignMap);
+    set({ rawAccounts: accounts, enrichedRows: enriched, adsetMap, campaignMap, lastFetchAt: Date.now() });
   },
 
   rebuildEnriched: () => {
@@ -158,6 +166,8 @@ export const useStore = create((set, get) => ({
       s.rawAccounts.flatMap(a => a.insights7d   || []),
       s.rawAccounts.flatMap(a => a.insights30d  || []),
       s.manualMap,
+      s.adsetMap    || {},
+      s.campaignMap || {},
     );
     set({ enrichedRows });
   },

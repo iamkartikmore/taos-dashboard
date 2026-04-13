@@ -378,6 +378,13 @@ export default function AdDetailDrawer({ row, onClose }) {
               <div className="text-[11px] text-slate-500 mt-1">
                 {row.campaignName} <span className="text-slate-700">›</span> {row.adSetName}
               </div>
+              {row.budget > 0 && (
+                <div className="mt-1 flex items-center gap-1.5">
+                  <span className="text-[10px] text-slate-600">Budget:</span>
+                  <span className="text-[11px] font-semibold text-slate-300">{fmt.currency(row.budget)}</span>
+                  <span className="text-[9px] text-slate-600 capitalize">{row.budgetType}/{row.budgetLevel}</span>
+                </div>
+              )}
             </div>
             <button onClick={onClose} className="text-slate-500 hover:text-slate-200 p-1 mt-0.5 shrink-0">
               <X size={18} />

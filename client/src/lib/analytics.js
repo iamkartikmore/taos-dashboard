@@ -306,7 +306,7 @@ export function classifyDecision(r, manual) {
 
 /* ─── BUILD FLAT ENRICHED ROWS ───────────────────────────────────── */
 
-export function buildEnrichedRows(insights7d, insights30d, manualMap) {
+export function buildEnrichedRows(insights7d, insights30d, manualMap, adsetMap = {}, campaignMap = {}) {
   const rows30 = {};
   insights30d.forEach(r => { rows30[r.adId] = r; });
 
@@ -335,6 +335,21 @@ export function buildEnrichedRows(insights7d, insights30d, manualMap) {
     const t30    = rows30[r.adId] || null;
     const accKey = r.accountKey || r.accountId;
     const med    = accountMedians[accKey] || {};
+
+    // Budget: adset-level first, fall back to campaign-level (CBO)
+    // Meta returns budgets in minor currency units (paise for INR) — divide by 100
+    const adset    = adsetMap[r.adSetId]     || {};
+    const campaign = campaignMap[r.campaignId] || {};
+    let budget = 0, budgetType = '', budgetLevel = '';
+    if (safeNum(adset.daily_budget) > 0) {
+      budget = safeNum(adset.daily_budget) / 100; budgetType = 'daily';    budgetLevel = 'adset';
+    } else if (safeNum(adset.lifetime_budget) > 0) {
+      budget = safeNum(adset.lifetime_budget) / 100; budgetType = 'lifetime'; budgetLevel = 'adset';
+    } else if (safeNum(campaign.daily_budget) > 0) {
+      budget = safeNum(campaign.daily_budget) / 100; budgetType = 'daily';    budgetLevel = 'campaign';
+    } else if (safeNum(campaign.lifetime_budget) > 0) {
+      budget = safeNum(campaign.lifetime_budget) / 100; budgetType = 'lifetime'; budgetLevel = 'campaign';
+    }
 
     const trendSignal    = deriveTrendSignal(r, t30);
     const currentQuality = deriveCurrentQuality(r);
@@ -381,6 +396,11 @@ export function buildEnrichedRows(insights7d, insights30d, manualMap) {
       currentQuality,
       trendSignal,
       decision,
+
+      // Budget (adset or campaign level)
+      budget,
+      budgetType,
+      budgetLevel,
     };
   });
 }

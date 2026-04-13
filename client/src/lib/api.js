@@ -103,7 +103,7 @@ export async function fetchCampaigns(ver, token, accountId) {
   const act = actId(accountId);
   return fetchAllPages(`${META_BASE}/${ver}/${act}/campaigns`, {
     access_token: token,
-    fields: 'id,name,status,effective_status,objective',
+    fields: 'id,name,status,effective_status,objective,daily_budget,lifetime_budget',
     limit: 500,
   });
 }

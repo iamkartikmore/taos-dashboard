@@ -20,6 +20,11 @@ export default function FlatData() {
     { key: 'adName',           label: 'Ad',              width: 220, render: v => <span className="text-slate-200 break-words whitespace-normal leading-snug" title={v}>{v}</span> },
     { key: 'adSetName',        label: 'Ad Set',          width: 180, render: v => <span className="text-slate-400 text-xs">{v}</span> },
     { key: 'campaignName',     label: 'Campaign',        width: 180, render: v => <span className="text-slate-400 text-xs">{v}</span> },
+    { key: 'budget',           label: 'Budget',          align: 'right', width: 110,
+      render: (v, row) => v > 0
+        ? <span className="tabular-nums"><span className="font-semibold text-slate-200">{fmt.currency(v)}</span><span className="text-[10px] text-slate-500 ml-1">{row.budgetType}/{row.budgetLevel}</span></span>
+        : <span className="text-slate-700">—</span>
+    },
     { key: 'decision',         label: 'Decision',        width: 130, render: v => <Badge label={v} /> },
     { key: 'currentQuality',   label: 'Quality',         width: 90,  render: v => <Badge label={v} size="xs" /> },
     { key: 'trendSignal',      label: 'Trend',           width: 150, render: v => <Badge label={v} size="xs" /> },
