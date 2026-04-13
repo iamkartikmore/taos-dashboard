@@ -6,9 +6,10 @@ import { normalizeBreakdownRow } from '../lib/breakdownAnalytics';
 // We use localStorage directly so persistence never silently fails
 // regardless of which Zustand version npm resolved.
 
-const LS_CONFIG = 'taos_config';
-const LS_MANUAL = 'taos_manual';
-const LS_LISTS  = 'taos_lists';
+const LS_CONFIG    = 'taos_config';
+const LS_MANUAL    = 'taos_manual';
+const LS_LISTS     = 'taos_lists';
+const LS_INVENTORY = 'taos_inventory';
 
 function lsGet(key, fallback) {
   try {
@@ -137,11 +138,11 @@ export const useStore = create((set, get) => ({
   fetchError:   null,
   lastFetchAt:  null,
 
-  /* ── Session-only: Shopify inventory ─────────────────────────────── */
+  /* ── Persisted: Shopify inventory ────────────────────────────────── */
   // SKU (uppercase) → { title, stock, price, productType }
-  inventoryMap: {},
-  inventoryStatus: 'idle',  // idle | loading | success | error
-  setInventoryMap: map => set({ inventoryMap: map, inventoryStatus: 'success' }),
+  inventoryMap: lsGet(LS_INVENTORY, {}),
+  inventoryStatus: Object.keys(lsGet(LS_INVENTORY, {})).length > 0 ? 'success' : 'idle',
+  setInventoryMap: map => { lsSet(LS_INVENTORY, map); set({ inventoryMap: map, inventoryStatus: 'success' }); },
   setInventoryStatus: s => set({ inventoryStatus: s }),
 
   setRawAccounts: accounts => {

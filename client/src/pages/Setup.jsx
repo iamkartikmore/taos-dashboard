@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key, Users, BookOpen, Upload, ShoppingBag } from 'lucide-react';
 import { useStore } from '../store';
 import { pullAccount, verifyToken, fetchShopifyInventory } from '../lib/api';
+import { BREAKDOWN_SPECS, pullAllBreakdowns } from '../lib/breakdownApi';
 import { parseCsv, csvRowsToManualMap, detectListsFromCsvRows } from '../lib/csvImport';
 import Spinner from '../components/ui/Spinner';
 
@@ -16,6 +17,7 @@ export default function Setup() {
     enrichedRows,
     dynamicLists, mergeDynamicLists,
     inventoryStatus, setInventoryMap, setInventoryStatus,
+    setBreakdownData, setBreakdownStatus,
   } = useStore();
 
   const LISTS = dynamicLists;
@@ -104,6 +106,7 @@ export default function Setup() {
     appendLog('Starting pull...');
 
     try {
+      // Step 1: Pull insights for all windows
       const results = [];
       for (const acc of accounts) {
         const result = await pullAccount(
@@ -114,7 +117,22 @@ export default function Setup() {
       }
       setRawAccounts(results);
       setFetchStatus('success');
-      appendLog('✅ Done!');
+      appendLog('✅ Insights done! Now pulling 7D breakdowns...');
+
+      // Step 2: Auto-pull all breakdowns for 7D window
+      setBreakdownStatus('loading');
+      const bdResult = await pullAllBreakdowns(
+        {
+          ver:      config.apiVersion,
+          token:    config.token,
+          accounts,
+          specs:    BREAKDOWN_SPECS,
+          window:   '7D',
+        },
+        msg => appendLog(msg),
+      );
+      setBreakdownData(bdResult);
+      appendLog('✅ Breakdowns done!');
     } catch (e) {
       setFetchStatus('error', e.message);
       appendLog('❌ Error: ' + e.message);
