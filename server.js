@@ -178,50 +178,48 @@ app.post('/api/shopify/orders/stream', async (req, res) => {
     emit({ type: 'log', msg: '✓ Authenticated' });
 
     const headers = { 'X-Shopify-Access-Token': accessToken };
+    // Only fetch fields actually used in analytics — skip bulky unused ones
+    // (shipping_lines, note_attributes, tags, subtotal_price, total_tax, etc.)
     const fields = [
-      'id','name','created_at','closed_at','cancelled_at','cancel_reason',
-      'financial_status','fulfillment_status',
-      'total_price','subtotal_price','total_discounts','total_tax','total_shipping_price_set',
-      'customer','line_items','discount_codes','billing_address','shipping_address',
-      'source_name','referring_site','landing_site','processing_method',
+      'id','created_at','cancelled_at','cancel_reason',
+      'total_price','total_discounts','total_shipping_price_set',
+      'customer','line_items','discount_codes',
+      'billing_address','shipping_address',
+      'source_name','referring_site',
       'payment_gateway','payment_gateway_names',
-      'refunds','tags','note_attributes',
-      'fulfillments','shipping_lines',
+      'refunds','fulfillments',
     ].join(',');
 
     let qs = `limit=250&status=any&fields=${fields}`;
     if (since) qs += `&created_at_min=${encodeURIComponent(since)}`;
     if (until) qs += `&created_at_max=${encodeURIComponent(until)}`;
 
-    const allOrders = [];
+    // Stream each page to the client as it arrives — never accumulate all orders
+    // in server memory. Peak memory = one page (250 orders) at a time.
     let url = `https://${shopDomain}.myshopify.com/admin/api/2024-01/orders.json?${qs}`;
     let page = 0;
+    let totalOrders = 0;
 
     while (url) {
       page++;
-      emit({ type: 'log', msg: `Fetching page ${page}... (${allOrders.length} orders so far)` });
+      emit({ type: 'log', msg: `Fetching page ${page}... (${totalOrders} so far)` });
       const resp = await axios.get(url, { headers, timeout: 60000 });
       const batch = resp.data.orders || [];
-      allOrders.push(...batch);
-      emit({ type: 'page', page, batchCount: batch.length, total: allOrders.length,
-        msg: `✓ Page ${page}: +${batch.length} orders → ${allOrders.length} total` });
+      totalOrders += batch.length;
+
+      // Emit this page immediately — don't buffer
+      emit({ type: 'batch', orders: batch, offset: (page - 1) * 250 });
+      emit({ type: 'page', page, batchCount: batch.length, total: totalOrders,
+        msg: `✓ Page ${page}: +${batch.length} orders → ${totalOrders} total` });
+
       const link = resp.headers['link'] || '';
       const m = link.match(/<([^>]+)>;\s*rel="next"/);
       url = m ? m[1] : null;
       if (url) await new Promise(r => setTimeout(r, 350));
     }
 
-    // Send orders in small batches — a single giant JSON blob (6k+ orders) breaks SSE
-    // because it gets split across TCP chunks and the parser never sees a complete event.
-    const BATCH = 50;
-    const totalBatches = Math.ceil(allOrders.length / BATCH);
-    emit({ type: 'log', msg: `Transferring ${allOrders.length} orders in ${totalBatches} batches...` });
-    for (let i = 0; i < allOrders.length; i += BATCH) {
-      emit({ type: 'batch', orders: allOrders.slice(i, i + BATCH), offset: i });
-    }
-    // Lightweight done — no order payload, just stats
-    emit({ type: 'done', count: allOrders.length, pages: page, fetchMs: Date.now() - startMs });
-    emit({ type: 'log', msg: `✓ Complete — ${allOrders.length} orders · ${page} pages · ${((Date.now() - startMs)/1000).toFixed(1)}s` });
+    emit({ type: 'done', count: totalOrders, pages: page, fetchMs: Date.now() - startMs });
+    emit({ type: 'log', msg: `✓ Complete — ${totalOrders} orders · ${page} pages · ${((Date.now() - startMs)/1000).toFixed(1)}s` });
   } catch (err) {
     emit({ type: 'error', msg: String(err.response?.data?.errors || err.message) });
   }
