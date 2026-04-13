@@ -195,7 +195,7 @@ export async function fetchShopifyOrders(shop, clientId, clientSecret, since, un
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'Shopify orders error');
-  return json.orders || [];
+  return { orders: json.orders || [], count: json.count || 0, pages: json.pages || 1, fetchMs: json.fetchMs || 0 };
 }
 
 /* ─── VERIFY TOKEN ───────────────────────────────────────────────── */
