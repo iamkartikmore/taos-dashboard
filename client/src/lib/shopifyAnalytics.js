@@ -382,6 +382,46 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
     .sort((a, b) => b.count - a.count)
     .slice(0, 40);
 
+  /* ── CAC Reducer Scoring ─────────────────────────────────────────── */
+  // How much each SKU helps reduce Customer Acquisition Cost:
+  //
+  //  Acquisition power  (0–35 pts): % of buyers who are NEW customers.
+  //                                  High = this SKU is an acquisition vehicle.
+  //  Discount efficiency (0–25 pts): Lower discount rate = converts without bribing.
+  //                                  High = CAC isn't inflated by promos.
+  //  LTV unlock          (0–25 pts): How often this SKU appears as the "from" SKU
+  //                                  in repeat-purchase sequences. Buying this SKU
+  //                                  leads customers back → spreads fixed CAC over
+  //                                  multiple orders.
+  //  Volume reliability  (0–15 pts): Enough orders to trust the signal (>= 20 orders).
+
+  const seqFromCount = {};
+  sequenceList.forEach(s => { seqFromCount[s.from] = (seqFromCount[s.from] || 0) + s.count; });
+  const maxSeqFrom = Math.max(...Object.values(seqFromCount), 1);
+  const maxOrders  = Math.max(...skuList.map(s => s.orders), 1);
+
+  skuList.forEach(s => {
+    const acqScore   = (s.newPct / 100) * 35;
+    const discEff    = ((100 - Math.min(s.discountRate, 100)) / 100) * 25;
+    const ltvScore   = ((seqFromCount[s.sku] || 0) / maxSeqFrom) * 25;
+    const volScore   = (Math.min(s.orders, 20) / 20) * 15;
+    const total      = Math.round(acqScore + discEff + ltvScore + volScore);
+
+    s.cacScore       = total;
+    s.cacAcqScore    = Math.round(acqScore);
+    s.cacDiscScore   = Math.round(discEff);
+    s.cacLtvScore    = Math.round(ltvScore);
+    s.cacVolScore    = Math.round(volScore);
+    s.cacFromCount   = seqFromCount[s.sku] || 0;
+    // Interpretation label
+    s.cacLabel       = total >= 75 ? 'Top Reducer'
+                     : total >= 55 ? 'Strong'
+                     : total >= 35 ? 'Moderate'
+                     : 'Weak';
+  });
+
+  const cacReducers = [...skuList].sort((a, b) => b.cacScore - a.cacScore).slice(0, 30);
+
   // Fulfillment stats
   fulfillTimes.sort((a, b) => a - b);
   const fulfillStats = fulfillTimes.length ? {
@@ -491,7 +531,7 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
       dailyRevenue:        totalRev / days,
       dailyOrders:         N / days,
     },
-    skuList, rfmData, segments, topCustomers,
+    skuList, cacReducers, rfmData, segments, topCustomers,
     discList, dailyTrend, hourlyData,
     geoList, cityList, srcList,
     payList, referList, cancelList,

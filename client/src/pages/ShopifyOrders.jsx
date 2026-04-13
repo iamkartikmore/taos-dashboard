@@ -175,31 +175,29 @@ export default function ShopifyOrders() {
 
   const canFetch = config.shopifyShop && config.shopifyClientId && config.shopifyClientSecret;
 
-  const log = msg => setFetchLog(prev => [...prev, `${new Date().toLocaleTimeString()} — ${msg}`]);
+  const addLog = msg => setFetchLog(prev => [...prev, `${new Date().toLocaleTimeString()} — ${msg}`]);
 
   const handleFetch = async () => {
     if (!canFetch) return;
     setLoading(true); setError(null);
     setFetchLog([]);
+    setShowLog(true);
     setShopifyOrdersStatus('loading');
     try {
-      log(`Authenticating with ${config.shopifyShop}...`);
       const { since, until } = getWindowDates(win, customSince, customUntil);
-      log(`Fetching orders from ${since.slice(0, 10)} → ${(until || '').slice(0, 10)}...`);
+      addLog(`Window: ${since.slice(0,10)} → ${(until||'').slice(0,10)}`);
+      // fetchShopifyOrders now uses SSE — each server log line calls addLog in real-time
       const result = await fetchShopifyOrders(
         config.shopifyShop, config.shopifyClientId, config.shopifyClientSecret,
         since, until,
+        msg => addLog(msg),   // ← SSE real-time callback
       );
-      log(`✓ ${result.count.toLocaleString()} orders · ${result.pages} page(s) · ${(result.fetchMs / 1000).toFixed(1)}s`);
-      log(`Processing analytics...`);
+      addLog(`Processing ${result.count.toLocaleString()} orders through analytics engine...`);
       setShopifyOrders(result.orders, win);
-      log(`✓ Done`);
-      setShowLog(true);
     } catch (e) {
       setError(e.message);
-      log(`✗ Error: ${e.message}`);
+      addLog(`✗ Error: ${e.message}`);
       setShopifyOrdersStatus('error', e.message);
-      setShowLog(true);
     } finally {
       setLoading(false);
     }
@@ -214,12 +212,13 @@ export default function ShopifyOrders() {
     [shopifyOrders, inventoryMap],
   );
 
-  // Add analytics summary to log when data is ready
+  // Analytics summary appended once data is processed
   useEffect(() => {
-    if (data && fetchLog.some(l => l.includes('Processing analytics'))) {
+    if (data && fetchLog.some(l => l.includes('analytics engine'))) {
       setFetchLog(prev => [...prev,
-        `  SKUs: ${data.skuList.length} · Customers: ${data.overview.uniqueCustomers.toLocaleString()} · Pairs: ${data.crossSellList.length}`,
-        `  Triplets: ${data.tripletList.length} · Sequences: ${data.sequenceList.length}`,
+        `✓ Analytics complete`,
+        `  ${data.skuList.length} SKUs · ${data.overview.uniqueCustomers.toLocaleString()} customers · ${data.crossSellList.length} SKU pairs`,
+        `  Triplets: ${data.tripletList.length} · Sequences: ${data.sequenceList.length} · CAC reducers scored`,
       ]);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -546,6 +545,7 @@ export default function ShopifyOrders() {
                     { id:'pairs',     label:'Pairs + Lift' },
                     { id:'triplets',  label:'Triplets' },
                     { id:'sequences', label:'Purchase Sequences' },
+                    { id:'cac',       label:'CAC Reducers' },
                   ].map(v => (
                     <button key={v.id} onClick={() => setComboView(v.id)}
                       className={`px-3 py-1.5 rounded text-xs font-medium transition-all ${
@@ -571,6 +571,24 @@ export default function ShopifyOrders() {
                     { key:'to', label:'Next SKU' },
                     { key:'toName', label:'Next Product' },
                     { key:'count', label:'Customers' },
+                  ])} />
+                )}
+                {comboView === 'cac' && (
+                  <ExportBtn onClick={() => exportCSV('cac-reducers.csv', data.cacReducers, [
+                    { key:'sku', label:'SKU' },
+                    { key:'productName', label:'Product' },
+                    { key:'cacScore', label:'CAC Score' },
+                    { key:'cacLabel', label:'Label' },
+                    { key:'cacAcqScore', label:'Acquisition pts' },
+                    { key:'cacDiscScore', label:'Discount Efficiency pts' },
+                    { key:'cacLtvScore', label:'LTV Unlock pts' },
+                    { key:'cacVolScore', label:'Volume pts' },
+                    { key:'newPct', label:'New Cust %', fn: r => dec(r.newPct,1) },
+                    { key:'discountRate', label:'Discount %', fn: r => dec(r.discountRate,1) },
+                    { key:'cacFromCount', label:'Sequence Lead Count' },
+                    { key:'orders', label:'Orders' },
+                    { key:'revenue', label:'Revenue', fn: r => dec(r.revenue,0) },
+                    { key:'aov', label:'AOV', fn: r => dec(r.aov,0) },
                   ])} />
                 )}
               </div>
@@ -681,6 +699,160 @@ export default function ShopifyOrders() {
                   {data.sequenceList.length === 0 && (
                     <div className="text-center text-slate-600 py-12 text-sm">No repeat purchase sequences in this window.</div>
                   )}
+                </div>
+              )}
+
+              {/* ── CAC REDUCERS ─────────────────────────────────────── */}
+              {comboView === 'cac' && (
+                <div className="space-y-4">
+                  {/* Score explanation */}
+                  <div className="bg-gray-900 border border-gray-800 rounded-xl p-5 space-y-3">
+                    <div className="text-sm font-semibold text-white">How the CAC Reducer Score works</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+                      {[
+                        { label: 'Acquisition Power', pts: '0–35', color: '#a78bfa',
+                          desc: '% of this SKU\'s buyers who are new customers. High = this SKU actively brings in first-time buyers.' },
+                        { label: 'Discount Efficiency', pts: '0–25', color: '#22c55e',
+                          desc: 'Inverse of discount rate. High = converts without needing a coupon. Low discount rate = CAC isn\'t inflated by promos.' },
+                        { label: 'LTV Unlock', pts: '0–25', color: '#f59e0b',
+                          desc: 'How often this SKU appears as the starting point in repeat-purchase sequences. Buying it leads customers to reorder — so fixed CAC is spread across more orders.' },
+                        { label: 'Volume Reliability', pts: '0–15', color: '#38bdf8',
+                          desc: 'Enough orders to trust the signal. Scores ramp from 0→15 as the SKU reaches 20+ orders in this window.' },
+                      ].map(c => (
+                        <div key={c.label} className="bg-gray-800/50 rounded-lg p-3 space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-semibold" style={{ color: c.color }}>{c.label}</span>
+                            <span className="text-[10px] text-slate-500 font-mono">{c.pts} pts</span>
+                          </div>
+                          <p className="text-[10px] text-slate-500 leading-relaxed">{c.desc}</p>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-slate-600">
+                      Score 75–100 = Top Reducer · 55–74 = Strong · 35–54 = Moderate · &lt;35 = Weak.
+                      <span className="ml-2">CAC = ad spend ÷ new customers acquired. SKUs that bring in more new customers, convert without discounts, and trigger repeat orders reduce blended CAC.</span>
+                    </p>
+                  </div>
+
+                  {/* Top reducers visual */}
+                  <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                    <Card>
+                      <ST>Top 12 — CAC Reducer Score</ST>
+                      <ResponsiveContainer width="100%" height={300}>
+                        <BarChart data={data.cacReducers.slice(0,12)} layout="vertical" barSize={14}>
+                          <XAxis type="number" domain={[0,100]} tick={{ fill:'#64748b', fontSize:10 }} tickLine={false} />
+                          <YAxis type="category" dataKey="sku" tick={{ fill:'#94a3b8', fontSize:10 }} tickLine={false} width={90} />
+                          <Tooltip content={({ active, payload }) => {
+                            if (!active || !payload?.length) return null;
+                            const s = payload[0]?.payload;
+                            return (
+                              <div className="bg-gray-900 border border-gray-700 rounded-lg p-3 text-xs space-y-1 shadow-xl">
+                                <div className="text-white font-semibold">{s.sku}</div>
+                                <div className="text-slate-400 max-w-[200px] truncate">{s.productName}</div>
+                                <div className="flex gap-3 mt-1">
+                                  <span style={{ color:'#a78bfa' }}>Acq: {s.cacAcqScore}</span>
+                                  <span style={{ color:'#22c55e' }}>Disc: {s.cacDiscScore}</span>
+                                  <span style={{ color:'#f59e0b' }}>LTV: {s.cacLtvScore}</span>
+                                  <span style={{ color:'#38bdf8' }}>Vol: {s.cacVolScore}</span>
+                                </div>
+                                <div className="text-slate-400">New cust: {dec(s.newPct,1)}% · Disc rate: {dec(s.discountRate,1)}%</div>
+                                <div className="text-slate-400">Leads to {s.cacFromCount} repeat transitions</div>
+                              </div>
+                            );
+                          }} />
+                          <Bar dataKey="cacScore" radius={[0,4,4,0]}>
+                            {data.cacReducers.slice(0,12).map((s, i) => (
+                              <Cell key={i} fill={
+                                s.cacScore >= 75 ? '#22c55e' :
+                                s.cacScore >= 55 ? '#f59e0b' :
+                                s.cacScore >= 35 ? '#2d7cf6' : '#374151'
+                              } />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </Card>
+
+                    <Card>
+                      <ST>Score Breakdown — Top 8</ST>
+                      <div className="space-y-4">
+                        {data.cacReducers.slice(0,8).map(s => (
+                          <div key={s.sku}>
+                            <div className="flex items-center justify-between mb-1">
+                              <div>
+                                <span className="font-mono text-[10px] text-slate-300">{s.sku}</span>
+                                <span className="ml-2 text-[10px] text-slate-500 truncate">{s.productName.slice(0,30)}</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold"
+                                  style={{
+                                    background: s.cacScore >= 75 ? '#22c55e22' : s.cacScore >= 55 ? '#f59e0b22' : '#2d7cf622',
+                                    color:      s.cacScore >= 75 ? '#22c55e'   : s.cacScore >= 55 ? '#f59e0b'   : '#2d7cf6',
+                                  }}>
+                                  {s.cacScore} — {s.cacLabel}
+                                </span>
+                              </div>
+                            </div>
+                            {/* Stacked score bar */}
+                            <div className="flex h-2 rounded-full overflow-hidden gap-px">
+                              <div style={{ width:`${s.cacAcqScore/100*100}%`, background:'#a78bfa' }} title={`Acquisition: ${s.cacAcqScore}`} />
+                              <div style={{ width:`${s.cacDiscScore/100*100}%`, background:'#22c55e' }} title={`Disc Efficiency: ${s.cacDiscScore}`} />
+                              <div style={{ width:`${s.cacLtvScore/100*100}%`, background:'#f59e0b' }} title={`LTV Unlock: ${s.cacLtvScore}`} />
+                              <div style={{ width:`${s.cacVolScore/100*100}%`, background:'#38bdf8' }} title={`Volume: ${s.cacVolScore}`} />
+                              <div className="flex-1 bg-gray-800" />
+                            </div>
+                            <div className="flex gap-3 mt-0.5 text-[9px] text-slate-600">
+                              <span style={{ color:'#a78bfa88' }}>Acq {s.cacAcqScore}</span>
+                              <span style={{ color:'#22c55e88' }}>Disc {s.cacDiscScore}</span>
+                              <span style={{ color:'#f59e0b88' }}>LTV {s.cacLtvScore}</span>
+                              <span style={{ color:'#38bdf888' }}>Vol {s.cacVolScore}</span>
+                              <span className="ml-auto">{dec(s.newPct,0)}% new · {dec(s.discountRate,0)}% disc · {s.cacFromCount} seq</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </Card>
+                  </div>
+
+                  {/* Full table */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-gray-800">
+                          {['#','SKU','Product','Score','Label','Acq','Disc','LTV','Vol','New%','Disc%','Seq Leads','Orders','Revenue','AOV'].map(h => (
+                            <th key={h} className="text-left px-2 py-2 text-[10px] text-slate-500 font-semibold uppercase tracking-wider whitespace-nowrap">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.cacReducers.map((s, i) => (
+                          <tr key={s.sku} className="border-b border-gray-800/40 hover:bg-gray-800/30">
+                            <td className="px-2 py-1.5 text-slate-600 tabular-nums">{i+1}</td>
+                            <td className="px-2 py-1.5 font-mono text-[10px] text-slate-300">{s.sku}</td>
+                            <td className="px-2 py-1.5 text-slate-400 max-w-[160px] truncate">{s.productName}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums font-bold text-white">{s.cacScore}</td>
+                            <td className="px-2 py-1.5">
+                              <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold"
+                                style={{
+                                  background: s.cacScore >= 75 ? '#22c55e22' : s.cacScore >= 55 ? '#f59e0b22' : s.cacScore >= 35 ? '#2d7cf622' : '#37415122',
+                                  color:      s.cacScore >= 75 ? '#22c55e'   : s.cacScore >= 55 ? '#f59e0b'   : s.cacScore >= 35 ? '#2d7cf6'   : '#64748b',
+                                }}>{s.cacLabel}</span>
+                            </td>
+                            <td className="px-2 py-1.5 text-right tabular-nums" style={{ color:'#a78bfa' }}>{s.cacAcqScore}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums" style={{ color:'#22c55e' }}>{s.cacDiscScore}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums" style={{ color:'#f59e0b' }}>{s.cacLtvScore}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums" style={{ color:'#38bdf8' }}>{s.cacVolScore}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums text-slate-400">{dec(s.newPct,1)}%</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums text-slate-400">{dec(s.discountRate,1)}%</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums text-slate-400">{num(s.cacFromCount)}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums text-slate-400">{num(s.orders)}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums text-emerald-400">{cur(s.revenue)}</td>
+                            <td className="px-2 py-1.5 text-right tabular-nums text-slate-400">{cur(s.aov)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </motion.div>

@@ -141,6 +141,85 @@ app.post('/api/shopify/orders', async (req, res) => {
   }
 });
 
+// Shopify orders — SSE streaming version (real-time page-by-page progress)
+app.post('/api/shopify/orders/stream', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable nginx/proxy buffering
+  res.flushHeaders();
+
+  const emit = obj => {
+    res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    if (typeof res.flush === 'function') res.flush();
+  };
+
+  const { shop, clientId, clientSecret, since, until } = req.body;
+  if (!shop || !clientId || !clientSecret) {
+    emit({ type: 'error', msg: 'shop, clientId, clientSecret required' });
+    return res.end();
+  }
+
+  const startMs = Date.now();
+  try {
+    const shopDomain = shop.replace(/\.myshopify\.com$/, '');
+    emit({ type: 'log', msg: `Connecting to ${shopDomain}.myshopify.com...` });
+
+    const tokenResp = await axios.post(
+      `https://${shopDomain}.myshopify.com/admin/oauth/access_token`,
+      { client_id: clientId, client_secret: clientSecret, grant_type: 'client_credentials' },
+      { timeout: 15000 }
+    );
+    const accessToken = tokenResp.data?.access_token;
+    if (!accessToken) {
+      emit({ type: 'error', msg: 'Failed to obtain Shopify access token — check client_id / client_secret' });
+      return res.end();
+    }
+    emit({ type: 'log', msg: '✓ Authenticated' });
+
+    const headers = { 'X-Shopify-Access-Token': accessToken };
+    const fields = [
+      'id','name','created_at','closed_at','cancelled_at','cancel_reason',
+      'financial_status','fulfillment_status',
+      'total_price','subtotal_price','total_discounts','total_tax','total_shipping_price_set',
+      'customer','line_items','discount_codes','billing_address','shipping_address',
+      'source_name','referring_site','landing_site','processing_method',
+      'payment_gateway','payment_gateway_names',
+      'refunds','tags','note_attributes',
+      'fulfillments','shipping_lines',
+    ].join(',');
+
+    let qs = `limit=250&status=any&fields=${fields}`;
+    if (since) qs += `&created_at_min=${encodeURIComponent(since)}`;
+    if (until) qs += `&created_at_max=${encodeURIComponent(until)}`;
+
+    const allOrders = [];
+    let url = `https://${shopDomain}.myshopify.com/admin/api/2024-01/orders.json?${qs}`;
+    let page = 0;
+
+    while (url) {
+      page++;
+      emit({ type: 'log', msg: `Fetching page ${page}... (${allOrders.length} orders so far)` });
+      const resp = await axios.get(url, { headers, timeout: 60000 });
+      const batch = resp.data.orders || [];
+      allOrders.push(...batch);
+      emit({ type: 'page', page, batchCount: batch.length, total: allOrders.length,
+        msg: `✓ Page ${page}: +${batch.length} orders → ${allOrders.length} total` });
+      const link = resp.headers['link'] || '';
+      const m = link.match(/<([^>]+)>;\s*rel="next"/);
+      url = m ? m[1] : null;
+      if (url) await new Promise(r => setTimeout(r, 350));
+    }
+
+    emit({ type: 'log', msg: `Transferring ${allOrders.length} orders to client...` });
+    emit({ type: 'done', orders: allOrders, count: allOrders.length, pages: page, fetchMs: Date.now() - startMs });
+    emit({ type: 'log', msg: `✓ Complete — ${allOrders.length} orders · ${page} pages · ${((Date.now() - startMs)/1000).toFixed(1)}s` });
+  } catch (err) {
+    emit({ type: 'error', msg: String(err.response?.data?.errors || err.message) });
+  }
+  res.end();
+});
+
 // Health check
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 

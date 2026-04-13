@@ -185,17 +185,53 @@ export async function fetchShopifyInventory(shop, clientId, clientSecret) {
   return map;
 }
 
-/* ─── SHOPIFY ORDERS ─────────────────────────────────────────────── */
+/* ─── SHOPIFY ORDERS — SSE streaming (real-time page-by-page logs) ─ */
 
-export async function fetchShopifyOrders(shop, clientId, clientSecret, since, until) {
-  const res = await fetch('/api/shopify/orders', {
+export async function fetchShopifyOrders(shop, clientId, clientSecret, since, until, onLog) {
+  const res = await fetch('/api/shopify/orders/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ shop, clientId, clientSecret, since, until }),
   });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.error || 'Shopify orders error');
-  return { orders: json.orders || [], count: json.count || 0, pages: json.pages || 1, fetchMs: json.fetchMs || 0 };
+
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.error || `HTTP ${res.status}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let result = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // SSE events are separated by double newlines
+    const events = buffer.split('\n\n');
+    buffer = events.pop(); // last chunk may be incomplete
+    for (const event of events) {
+      const dataLine = event.split('\n').find(l => l.startsWith('data: '));
+      if (!dataLine) continue;
+      try {
+        const data = JSON.parse(dataLine.slice(6));
+        if (data.type === 'log' || data.type === 'page') {
+          onLog?.(data.msg);
+        } else if (data.type === 'error') {
+          throw new Error(data.msg);
+        } else if (data.type === 'done') {
+          result = data;
+          // Still read remaining log messages after 'done'
+        }
+      } catch (e) {
+        if (e.message && !e.message.includes('JSON')) throw e;
+      }
+    }
+  }
+
+  if (!result) throw new Error('Stream ended without completion signal');
+  return { orders: result.orders || [], count: result.count || 0, pages: result.pages || 1, fetchMs: result.fetchMs || 0 };
 }
 
 /* ─── VERIFY TOKEN ───────────────────────────────────────────────── */
