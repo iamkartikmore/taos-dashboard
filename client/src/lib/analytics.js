@@ -421,6 +421,18 @@ export function aggregateMetrics(rows) {
   const ic          = rows.reduce((s, r) => s + safeNum(r.ic), 0);
   const outbound    = rows.reduce((s, r) => s + safeNum(r.outboundClicks), 0);
 
+  // Budget: deduplicated by adset/campaign to avoid counting same budget multiple times
+  const seenAdsets = new Set(), seenCampaigns = new Set();
+  let budget = 0;
+  rows.forEach(r => {
+    if (safeNum(r.budget) <= 0) return;
+    if (r.budgetLevel === 'adset' && r.adSetId && !seenAdsets.has(r.adSetId)) {
+      seenAdsets.add(r.adSetId); budget += safeNum(r.budget);
+    } else if (r.budgetLevel === 'campaign' && r.campaignId && !seenCampaigns.has(r.campaignId)) {
+      seenCampaigns.add(r.campaignId); budget += safeNum(r.budget);
+    }
+  });
+
   // ROAS: spend-weighted average of Meta's purchase_roas field
   const roasRows   = rows.filter(r => safeNum(r.metaRoas) > 0 && safeNum(r.spend) > 0);
   const roasSpend  = roasRows.reduce((s, r) => s + safeNum(r.spend), 0);
@@ -437,6 +449,7 @@ export function aggregateMetrics(rows) {
 
   return {
     spend, purchases, revenue, impressions, clicks, lpv, atc, ic,
+    budget,
     roas, cpr,
     cpm:          safeDivide(spend, impressions) * 1000,
     ctr:          safeDivide(clicks, impressions) * 100,
@@ -466,7 +479,17 @@ export function buildPatternSummary(rows, groupKey) {
   return Object.entries(groups)
     .map(([label, items]) => {
       const agg = aggregateMetrics(items);
-      return { label, count: items.length, ...agg };
+      // Deduplicate budgets by source — avoid double-counting shared adset/campaign budgets
+      const seen = new Set();
+      let totalBudget = 0;
+      items.forEach(r => {
+        if (!r.budget || r.budget <= 0) return;
+        const key = r.budgetLevel === 'adset'
+          ? `adset_${r.adSetId}`
+          : `campaign_${r.campaignId}`;
+        if (!seen.has(key)) { seen.add(key); totalBudget += r.budget; }
+      });
+      return { label, count: items.length, totalBudget, ...agg };
     })
     .sort((a, b) => b.roas - a.roas);
 }

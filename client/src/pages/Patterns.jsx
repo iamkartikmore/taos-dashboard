@@ -63,7 +63,7 @@ function PatternChart({ title, groupKey, color = '#2d7cf6', metric = 'roas', met
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b border-gray-800">
-              {['Label','Ads','Spend','ROAS','CPR','Purchases','Conv%'].map(h => (
+              {['Label','Ads','Budget','Spend','ROAS','CPR','Purchases','Conv%'].map(h => (
                 <th key={h} className="px-2 py-1.5 text-left text-slate-500 font-semibold">{h}</th>
               ))}
             </tr>
@@ -73,6 +73,7 @@ function PatternChart({ title, groupKey, color = '#2d7cf6', metric = 'roas', met
               <tr key={d.label} className={i % 2 === 0 ? 'bg-gray-950/30' : ''}>
                 <td className="px-2 py-1.5 font-medium text-slate-200">{d.label}</td>
                 <td className="px-2 py-1.5 text-slate-400">{d.count}</td>
+                <td className="px-2 py-1.5 tabular-nums text-slate-300">{d.budget > 0 ? fmt.currency(d.budget) : <span className="text-slate-700">—</span>}</td>
                 <td className="px-2 py-1.5 tabular-nums">{fmt.currency(d.spend)}</td>
                 <td className="px-2 py-1.5 tabular-nums font-semibold text-violet-300">{fmt.roas(d.roas)}</td>
                 <td className="px-2 py-1.5 tabular-nums">{fmt.currency(d.cpr)}</td>

@@ -209,7 +209,7 @@ export default function Overview() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-gray-800">
-                  {['Account','Ads','Spend','Revenue','ROAS','CPR','CTR','LPV Rate','ATC Rate'].map(h => (
+                  {['Account','Ads','Budget','Spend','Revenue','ROAS','CPR','CTR','LPV Rate','ATC Rate'].map(h => (
                     <th key={h} className="px-3 py-2 text-left text-slate-500 font-semibold uppercase tracking-wide">{h}</th>
                   ))}
                 </tr>
@@ -219,6 +219,7 @@ export default function Overview() {
                   <tr key={a.key} className={i % 2 === 0 ? 'bg-gray-950/40' : ''}>
                     <td className="px-3 py-2.5 font-medium text-brand-300">{a.key}</td>
                     <td className="px-3 py-2.5 text-slate-400">{a.adCount}</td>
+                    <td className="px-3 py-2.5 tabular-nums font-semibold text-emerald-400">{a.budget > 0 ? fmt.currency(a.budget) : <span className="text-slate-700">—</span>}</td>
                     <td className="px-3 py-2.5 tabular-nums">{fmt.currency(a.spend)}</td>
                     <td className="px-3 py-2.5 tabular-nums">{fmt.currency(a.revenue)}</td>
                     <td className="px-3 py-2.5 tabular-nums font-semibold text-violet-300">{fmt.roas(a.roas)}</td>

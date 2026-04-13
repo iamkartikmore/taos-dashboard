@@ -509,7 +509,7 @@ export default function SkuInsights() {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-gray-800">
-                  {['SKU','Product Name','Stock','Ads','Spend','Revenue','ROAS','CPR','Purchases','AOV','Conv%','Collections'].map(h => (
+                  {['SKU','Product Name','Stock','Ads','Budget','Spend','Revenue','ROAS','CPR','Purchases','AOV','Conv%','Collections'].map(h => (
                     <th key={h} className="px-2 py-2 text-left text-slate-500 font-semibold whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -525,6 +525,7 @@ export default function SkuInsights() {
                       </td>
                       <td className="px-2 py-2"><StockBadge stock={inv?.stock} /></td>
                       <td className="px-2 py-2 text-slate-400">{d.count}</td>
+                      <td className="px-2 py-2 tabular-nums text-slate-300">{d.budget > 0 ? fmt.currency(d.budget) : <span className="text-slate-700">—</span>}</td>
                       <td className="px-2 py-2 tabular-nums">{fmt.currency(d.spend)}</td>
                       <td className="px-2 py-2 tabular-nums">{fmt.currency(d.revenue)}</td>
                       <td className="px-2 py-2 tabular-nums font-semibold" style={{ color: roasColor(d.roas) }}>
