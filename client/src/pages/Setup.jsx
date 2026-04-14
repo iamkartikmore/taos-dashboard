@@ -2,7 +2,7 @@ import { useState, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key, Users, BookOpen, Upload, ShoppingBag } from 'lucide-react';
 import { useStore } from '../store';
-import { pullAccount, verifyToken, fetchShopifyInventory } from '../lib/api';
+import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders } from '../lib/api';
 import { BREAKDOWN_SPECS, pullAllBreakdowns } from '../lib/breakdownApi';
 import { parseCsv, csvRowsToManualMap, detectListsFromCsvRows } from '../lib/csvImport';
 import Spinner from '../components/ui/Spinner';
@@ -18,6 +18,7 @@ export default function Setup() {
     dynamicLists, mergeDynamicLists,
     inventoryStatus, setInventoryMap, setInventoryStatus,
     setBreakdownData, setBreakdownStatus,
+    shopifyOrdersStatus, setShopifyOrders, setShopifyOrdersStatus,
   } = useStore();
 
   const LISTS = dynamicLists;
@@ -26,6 +27,9 @@ export default function Setup() {
   const [verifyResult, setVerifyResult] = useState(null);
   const [inventoryFetching, setInventoryFetching] = useState(false);
   const [inventoryResult, setInventoryResult]     = useState(null);
+  const [ordersFetching, setOrdersFetching]       = useState(false);
+  const [ordersResult, setOrdersResult]           = useState(null);
+  const [ordersDays, setOrdersDays]               = useState(365);
   const [activeManualAd, setActiveManualAd] = useState(null);
   const [manualSearch, setManualSearch] = useState('');
   const [activeTab, setActiveTab] = useState('credentials');
@@ -93,6 +97,23 @@ export default function Setup() {
       setInventoryResult({ ok: false, message: e.message });
     } finally {
       setInventoryFetching(false);
+    }
+  };
+
+  const handleFetchOrders = async () => {
+    if (!config.shopifyShop || !config.shopifyClientId || !config.shopifyClientSecret) return;
+    setOrdersFetching(true);
+    setOrdersResult(null);
+    setShopifyOrdersStatus('loading');
+    try {
+      const orders = await fetchShopifyOrders(config.shopifyShop, config.shopifyClientId, config.shopifyClientSecret, ordersDays);
+      setShopifyOrders(orders, ordersDays);
+      setOrdersResult({ ok: true, count: orders.length });
+    } catch (e) {
+      setShopifyOrdersStatus('error');
+      setOrdersResult({ ok: false, message: e.message });
+    } finally {
+      setOrdersFetching(false);
     }
   };
 
@@ -344,6 +365,49 @@ export default function Setup() {
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Shopify Orders — Analytics Data */}
+          <div className="bg-gray-900 rounded-xl border border-gray-800 p-5 space-y-4">
+            <div className="flex items-center gap-2 text-white font-semibold">
+              <ShoppingBag size={16} className="text-violet-400" /> Shopify Analytics Data
+              <span className="text-xs font-normal text-slate-500 ml-1">— orders, customers, RFM, cohorts</span>
+            </div>
+            <p className="text-xs text-slate-500">
+              Pulls all orders for the selected period. Used for SKU sales velocity, customer RFM scoring, cohort retention, discount analysis, geography, and timing insights.
+            </p>
+            <div className="flex items-center gap-3">
+              <label className="text-xs text-slate-400 shrink-0">Date range</label>
+              <select
+                value={ordersDays}
+                onChange={e => setOrdersDays(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-violet-500"
+              >
+                <option value={30}>Last 30 days</option>
+                <option value={90}>Last 90 days</option>
+                <option value={180}>Last 180 days</option>
+                <option value={365}>Last 365 days</option>
+                <option value="all">All time</option>
+              </select>
+            </div>
+            <button
+              onClick={handleFetchOrders}
+              disabled={ordersFetching || !config.shopifyShop || !config.shopifyClientId || !config.shopifyClientSecret}
+              className="flex items-center gap-2 px-4 py-2 bg-violet-700 hover:bg-violet-600 disabled:opacity-40 rounded-lg text-sm font-medium text-white transition-all"
+            >
+              {ordersFetching ? <Spinner size="sm" /> : <ShoppingBag size={14} />}
+              {ordersFetching ? 'Fetching orders...' : 'Fetch Shopify Analytics Data'}
+            </button>
+            {ordersResult && (
+              <div className={`flex items-center gap-2 text-sm px-3 py-2 rounded-lg ${ordersResult.ok ? 'bg-violet-900/30 text-violet-300' : 'bg-red-900/30 text-red-300'}`}>
+                {ordersResult.ok
+                  ? <><CheckCircle size={14} /> Loaded <strong>{ordersResult.count}</strong> orders — go to Shopify Analytics to explore</>
+                  : <><AlertCircle size={14} /> {ordersResult.message}</>}
+              </div>
+            )}
+            {shopifyOrdersStatus === 'success' && !ordersResult && (
+              <div className="text-xs text-slate-500 px-1">Orders already loaded — re-fetch to refresh.</div>
+            )}
           </div>
 
           {/* Pull button */}

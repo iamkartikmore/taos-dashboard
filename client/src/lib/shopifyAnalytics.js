@@ -1,3 +1,17 @@
+/* ─── RFM SEGMENT COLOURS (used by both ShopifyOrders and ShopifyInsights) ── */
+
+export const RFM_SEGMENT_COLORS = {
+  'Champions':      '#22c55e',
+  'Loyal':          '#34d399',
+  'Potential Loyal':'#3b82f6',
+  'New':            '#60a5fa',
+  'Promising':      '#a78bfa',
+  'At Risk':        '#f59e0b',
+  "Can't Lose":     '#fb923c',
+  'Dormant':        '#ef4444',
+  'Others':         '#64748b',
+};
+
 /* ─── DATE WINDOWS ───────────────────────────────────────────────── */
 
 export function getWindowDates(w, cSince, cUntil) {
@@ -564,4 +578,338 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
     fulfillStats,
     ltvBuckets, freqBuckets,
   };
+}
+
+/* ─── SHOPIFY INSIGHTS ADAPTER FUNCTIONS ────────────────────────── */
+// These functions are used by ShopifyInsights.jsx (the 7-tab analytics page).
+// Each does a focused single-pass over the raw orders array and returns
+// the exact shape the page expects. They are fast enough to run inside
+// React's useMemo without noticeable lag even on ~10 000 orders.
+
+const _pad = n => String(n).padStart(2, '0');
+
+/* ── 1. Order summary KPIs ──────────────────────────────────────── */
+export function buildOrderSummary(orders) {
+  if (!orders?.length) return {
+    totalOrders:0, revenue:0, aov:0, uniqueCustomers:0,
+    repeatOrders:0, repeatRate:0, refundedOrders:0, refundRate:0,
+    discountUsageRate:0, discountImpact:0, newCustomers:0,
+  };
+  const active = orders.filter(o => !o.cancelled_at);
+  const N = active.length;
+  let revenue = 0, discount = 0;
+  const custSet = new Set();
+  let repeatOrders = 0, refundedOrders = 0, discOrders = 0, newCusts = 0;
+  active.forEach(o => {
+    revenue  += p(o.total_price);
+    discount += p(o.total_discounts);
+    const key = (o.email||o.customer?.email||'').toLowerCase().trim() || (o.customer?.id ? `c${o.customer.id}` : null);
+    if (key) custSet.add(key);
+    if ((o.customer?.orders_count||1) > 1) repeatOrders++;
+    if ((o.refunds||[]).length > 0) refundedOrders++;
+    if (p(o.total_discounts) > 0) discOrders++;
+    if ((o.customer?.orders_count||1) <= 1) newCusts++;
+  });
+  return {
+    totalOrders: N, revenue, aov: N>0?revenue/N:0,
+    uniqueCustomers: custSet.size,
+    repeatOrders, repeatRate: N>0?repeatOrders/N*100:0,
+    refundedOrders, refundRate: N>0?refundedOrders/N*100:0,
+    discountUsageRate: N>0?discOrders/N*100:0,
+    discountImpact: revenue>0?discount/revenue*100:0,
+    newCustomers: newCusts,
+  };
+}
+
+/* ── 2. SKU sales analytics ─────────────────────────────────────── */
+export function buildSkuSalesAnalytics(orders, inventoryMap = {}) {
+  if (!orders?.length) return [];
+  const now = new Date();
+  const cutoff7d  = new Date(now - 7  * 86400000).toISOString();
+  const cutoff30d = new Date(now - 30 * 86400000).toISOString();
+  const active = orders.filter(o => !o.cancelled_at);
+  const skuMap = {};
+  active.forEach(o => {
+    const is7d  = (o.created_at||'') >= cutoff7d;
+    const is30d = (o.created_at||'') >= cutoff30d;
+    (o.line_items||[]).forEach(item => {
+      const sku  = (item.sku||'').trim().toUpperCase() || `pid_${item.product_id}`;
+      const qty  = item.quantity || 1;
+      const gross = p(item.price) * qty;
+      const iDisc = p(item.total_discount);
+      const net   = gross - iDisc;
+      if (!skuMap[sku]) skuMap[sku] = {
+        sku, name: item.title||sku,
+        units:0, revenue:0, discount:0, gross:0, orders:0,
+        units7d:0, revenue7d:0, units30d:0, revenue30d:0,
+        refundedUnits:0, refundedRevenue:0,
+      };
+      const s = skuMap[sku];
+      s.units+=qty; s.revenue+=net; s.discount+=iDisc; s.gross+=gross; s.orders++;
+      if (is7d)  { s.units7d+=qty;  s.revenue7d+=net;  }
+      if (is30d) { s.units30d+=qty; s.revenue30d+=net; }
+    });
+    (o.refunds||[]).forEach(rf => {
+      (rf.refund_line_items||[]).forEach(rli => {
+        const sku = ((rli.line_item?.sku||'').trim().toUpperCase()) || `pid_${rli.line_item?.product_id}`;
+        if (skuMap[sku]) { skuMap[sku].refundedUnits+=rli.quantity||0; skuMap[sku].refundedRevenue+=p(rli.subtotal); }
+      });
+    });
+  });
+  return Object.values(skuMap).map(s => {
+    const inv = inventoryMap[s.sku] || {};
+    const dv30 = s.units30d / 30;
+    const stock = inv.stock ?? null;
+    return {
+      sku: s.sku,
+      stockTitle: inv.title || s.name,
+      unitsSold: s.units,
+      revenue: s.revenue,
+      revenue30d: s.revenue30d,
+      units30d: s.units30d,
+      dailyVelocity7d:  +(s.units7d/7).toFixed(2),
+      dailyVelocity30d: +dv30.toFixed(2),
+      stock,
+      daysOfStock: stock!==null && dv30>0 ? Math.round(stock/dv30) : null,
+      refundRate:  s.units>0 ? s.refundedUnits/s.units*100 : 0,
+      discountRate: s.gross>0 ? s.discount/s.gross*100 : 0,
+    };
+  }).sort((a,b) => b.revenue - a.revenue);
+}
+
+/* ── 3. RFM ─────────────────────────────────────────────────────── */
+function _rfmQuintile(items, getValue, lowerBetter = false) {
+  const sorted = [...items].sort((a,b) => lowerBetter ? getValue(a)-getValue(b) : getValue(b)-getValue(a));
+  const n = sorted.length;
+  const map = new Map();
+  sorted.forEach((x,i) => map.set(x.id, Math.max(1, Math.ceil((1-i/n)*5))));
+  return map;
+}
+
+export function computeRfm(orders) {
+  if (!orders?.length) return [];
+  const active = orders.filter(o => !o.cancelled_at);
+  const custMap = {};
+  active.forEach(o => {
+    const email = (o.email||o.customer?.email||'').toLowerCase().trim();
+    const key   = email || (o.customer?.id ? `c${o.customer.id}` : null);
+    if (!key) return;
+    const date = o.created_at?.slice(0,10);
+    const city = o.billing_address?.city || o.shipping_address?.city || '';
+    const skus = (o.line_items||[]).map(i=>(i.sku||'').trim().toUpperCase()).filter(Boolean);
+    const rev  = p(o.total_price);
+    if (!custMap[key]) custMap[key] = {
+      id: key, email,
+      name: `${o.customer?.first_name||''} ${o.customer?.last_name||''}`.trim() || email.split('@')[0],
+      city, orders:0, revenue:0,
+      lifetimeOrders: o.customer?.orders_count||1,
+      lifetimeRevenue: p(o.customer?.total_spent),
+      firstDate: date, lastDate: date, skuSet: new Set(),
+    };
+    const c = custMap[key];
+    c.orders++; c.revenue+=rev;
+    if (date > c.lastDate) c.lastDate = date;
+    if (date < c.firstDate) c.firstDate = date;
+    skus.forEach(s => c.skuSet.add(s));
+  });
+  const today = new Date();
+  const custList = Object.values(custMap).map(c => ({
+    ...c,
+    recencyDays: c.lastDate ? Math.round((today - new Date(c.lastDate))/86400000) : 999,
+    lifespan: c.firstDate&&c.lastDate&&c.firstDate!==c.lastDate
+      ? Math.round((new Date(c.lastDate)-new Date(c.firstDate))/86400000) : 0,
+    totalSpent:  c.lifetimeRevenue||c.revenue,
+    orderCount:  c.lifetimeOrders||c.orders,
+    uniqueSkus:  c.skuSet.size,
+    aov:         c.orders>0?c.revenue/c.orders:0,
+  }));
+  const rMap = _rfmQuintile(custList, c=>c.recencyDays, true);
+  const fMap = _rfmQuintile(custList, c=>c.orderCount);
+  const mMap = _rfmQuintile(custList, c=>c.totalSpent);
+  const seg = (r,f,m) => {
+    if (r>=4&&f>=4&&m>=4) return 'Champions';
+    if (f>=4&&m>=4)       return 'Loyal';
+    if (r>=4&&f<=2)       return 'New';
+    if (r>=3&&f>=2&&m>=3) return 'Potential Loyal';
+    if (r<=2&&f>=3&&m>=3) return 'At Risk';
+    if (r<=1&&m>=4)       return "Can't Lose";
+    if (r<=2&&f<=2)       return 'Dormant';
+    if (r>=3&&f<=2&&m<=2) return 'Promising';
+    return 'Others';
+  };
+  return custList.map(c => {
+    const r=rMap.get(c.id)||1, f=fMap.get(c.id)||1, m=mMap.get(c.id)||1;
+    const segment = seg(r,f,m);
+    return { ...c, r, f, m, rScore:r, fScore:f, mScore:m, segment, segmentColor: RFM_SEGMENT_COLORS[segment]||'#64748b' };
+  }).sort((a,b) => b.totalSpent-a.totalSpent);
+}
+
+/* ── 4. Cohort retention ────────────────────────────────────────── */
+export function buildCohortData(orders) {
+  if (!orders?.length) return [];
+  const active = orders.filter(o => !o.cancelled_at);
+  const custFirstMonth = {}, custMonths = {};
+  active.forEach(o => {
+    const email = (o.email||o.customer?.email||'').toLowerCase().trim();
+    const key   = email || (o.customer?.id ? `c${o.customer.id}` : null);
+    if (!key||!o.created_at) return;
+    const mo = o.created_at.slice(0,7);
+    if (!custFirstMonth[key]||mo<custFirstMonth[key]) custFirstMonth[key] = mo;
+    if (!custMonths[key]) custMonths[key] = new Set();
+    custMonths[key].add(mo);
+  });
+  const cohortMap = {};
+  Object.entries(custFirstMonth).forEach(([key,cohort]) => {
+    if (!cohortMap[cohort]) cohortMap[cohort] = { cohortSize:0, customers:[] };
+    cohortMap[cohort].cohortSize++;
+    cohortMap[cohort].customers.push(key);
+  });
+  const months = Object.keys(cohortMap).sort();
+  return months.map(cohort => {
+    const { cohortSize, customers } = cohortMap[cohort];
+    const row = { month:cohort, cohortSize };
+    for (let mi = 0; mi < 12; mi++) {
+      const [y,m] = cohort.split('-').map(Number);
+      const target = new Date(y, m-1+mi);
+      if (target > new Date()) { row[`m${mi}`] = null; continue; }
+      const tKey = `${target.getFullYear()}-${_pad(target.getMonth()+1)}`;
+      const retained = customers.filter(k => custMonths[k]?.has(tKey)).length;
+      row[`m${mi}`] = cohortSize>0 ? Math.round(retained/cohortSize*100) : null;
+    }
+    return row;
+  });
+}
+
+/* ── 5. Discount analysis ───────────────────────────────────────── */
+export function buildDiscountAnalysis(orders) {
+  if (!orders?.length) return [];
+  const active = orders.filter(o => !o.cancelled_at);
+  const map = {};
+  active.forEach(o => {
+    const rev  = p(o.total_price);
+    const codes = o.discount_codes||[];
+    if (codes.length===0) {
+      const k = '(no discount)';
+      if (!map[k]) map[k]={code:k,orders:0,revenue:0,discount:0};
+      map[k].orders++; map[k].revenue+=rev;
+    } else {
+      codes.forEach(dc => {
+        const code = dc.code||'(unknown)';
+        if (!map[code]) map[code]={code,orders:0,revenue:0,discount:0};
+        map[code].orders++; map[code].revenue+=rev; map[code].discount+=p(dc.amount);
+      });
+    }
+  });
+  return Object.values(map).map(d=>({
+    code: d.code, orders: d.orders, revenue: d.revenue,
+    avgDiscount: d.orders>0?d.discount/d.orders:0,
+    aov: d.orders>0?d.revenue/d.orders:0,
+    discountRate: d.revenue>0?d.discount/d.revenue*100:0,
+  })).sort((a,b)=>b.revenue-a.revenue);
+}
+
+/* ── 6. AOV analysis ────────────────────────────────────────────── */
+export function buildAovAnalysis(orders) {
+  if (!orders?.length) return { byItemCount:[], byMonth:[] };
+  const active = orders.filter(o => !o.cancelled_at);
+  const icMap = {}, moMap = {};
+  active.forEach(o => {
+    const rev   = p(o.total_price);
+    const disc  = p(o.total_discounts);
+    const items = (o.line_items||[]).reduce((s,i)=>s+(i.quantity||1),0);
+    const label = items>=5?'5+':String(items);
+    if (!icMap[label]) icMap[label]={label,orders:0,total:0};
+    icMap[label].orders++; icMap[label].total+=rev;
+    const mo = o.created_at?.slice(0,7);
+    if (mo) {
+      if (!moMap[mo]) moMap[mo]={label:mo,orders:0,total:0,totalDisc:0};
+      moMap[mo].orders++; moMap[mo].total+=rev; moMap[mo].totalDisc+=disc;
+    }
+  });
+  const byItemCount = ['1','2','3','4','5+'].map(l => {
+    const d = icMap[l]||{orders:0,total:0};
+    return { label:`${l} item${l==='1'?'':'s'}`, orders:d.orders, aov:d.orders>0?d.total/d.orders:0 };
+  });
+  const byMonth = Object.values(moMap).sort((a,b)=>a.label.localeCompare(b.label)).map(m=>({
+    label:m.label, orders:m.orders, aov:m.orders>0?m.total/m.orders:0, discounts:m.totalDisc,
+  }));
+  return { byItemCount, byMonth };
+}
+
+/* ── 7. Geo analysis ────────────────────────────────────────────── */
+export function buildGeoAnalysis(orders) {
+  if (!orders?.length) return { byState:[], byCity:[] };
+  const active = orders.filter(o => !o.cancelled_at);
+  const stMap={}, ctMap={};
+  active.forEach(o => {
+    const rev   = p(o.total_price);
+    const email = (o.email||o.customer?.email||'').toLowerCase().trim();
+    const key   = email || (o.customer?.id?`c${o.customer.id}`:null);
+    const state = o.billing_address?.province||o.shipping_address?.province||'Unknown';
+    const city  = o.billing_address?.city    ||o.shipping_address?.city    ||'Unknown';
+    if (!stMap[state]) stMap[state]={label:state,orders:0,revenue:0,custSet:new Set()};
+    stMap[state].orders++; stMap[state].revenue+=rev; if(key) stMap[state].custSet.add(key);
+    if (!ctMap[city])  ctMap[city] ={label:city, orders:0,revenue:0,custSet:new Set()};
+    ctMap[city].orders++;  ctMap[city].revenue+=rev;  if(key) ctMap[city].custSet.add(key);
+  });
+  const totalRev = active.reduce((s,o)=>s+p(o.total_price),0)||1;
+  const fin = map => Object.values(map).map(r=>({
+    label:r.label, orders:r.orders, revenue:r.revenue,
+    aov: r.orders>0?r.revenue/r.orders:0,
+    customers: r.custSet.size,
+    revenueShare: r.revenue/totalRev*100,
+  })).sort((a,b)=>b.revenue-a.revenue).slice(0,20);
+  return { byState:fin(stMap), byCity:fin(ctMap) };
+}
+
+/* ── 8. Timing analysis ─────────────────────────────────────────── */
+export function buildTimingAnalysis(orders) {
+  if (!orders?.length) return { byHour:[], byDay:[] };
+  const active = orders.filter(o => !o.cancelled_at);
+  const hMap={}, dMap={};
+  const DAYS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  active.forEach(o => {
+    if (!o.created_at) return;
+    const dt = new Date(o.created_at);
+    const rev= p(o.total_price);
+    const h  = dt.getHours(), d = dt.getDay();
+    if (!hMap[h]) hMap[h]={hour:h,label:`${_pad(h)}:00`,orders:0,revenue:0};
+    hMap[h].orders++; hMap[h].revenue+=rev;
+    if (!dMap[d]) dMap[d]={day:d,label:DAYS[d],orders:0,revenue:0};
+    dMap[d].orders++; dMap[d].revenue+=rev;
+  });
+  const byHour = Array.from({length:24},(_,h)=>({
+    hour:h, label:`${_pad(h)}:00`,
+    orders:hMap[h]?.orders||0, revenue:hMap[h]?.revenue||0,
+    aov: hMap[h]?.orders>0 ? hMap[h].revenue/hMap[h].orders : 0,
+  }));
+  const byDay = Array.from({length:7},(_,d)=>({
+    day:d, label:DAYS[d],
+    orders:dMap[d]?.orders||0, revenue:dMap[d]?.revenue||0,
+    aov: dMap[d]?.orders>0 ? dMap[d].revenue/dMap[d].orders : 0,
+  }));
+  return { byHour, byDay };
+}
+
+/* ── 9. Revenue trend by month ──────────────────────────────────── */
+export function buildRevenueTrend(orders) {
+  if (!orders?.length) return [];
+  const active = orders.filter(o => !o.cancelled_at)
+    .sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||''));
+  const map = {};
+  const seenCust = {};
+  active.forEach(o => {
+    const mo  = o.created_at?.slice(0,7);
+    if (!mo) return;
+    if (!map[mo]) map[mo]={month:mo,orders:0,revenue:0,newCustomers:0,repeatCustomers:0};
+    map[mo].orders++; map[mo].revenue+=p(o.total_price);
+    const email = (o.email||o.customer?.email||'').toLowerCase().trim();
+    const key   = email || (o.customer?.id?`c${o.customer.id}`:null);
+    const isNew = (o.customer?.orders_count||1)<=1 && !(key && seenCust[key]);
+    if (key) seenCust[key] = true;
+    if (isNew) map[mo].newCustomers++; else map[mo].repeatCustomers++;
+  });
+  return Object.values(map).sort((a,b)=>a.month.localeCompare(b.month)).map(m=>({
+    ...m, aov: m.orders>0?m.revenue/m.orders:0,
+  }));
 }

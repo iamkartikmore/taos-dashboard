@@ -20,7 +20,8 @@ const NAV = [
   { to: '/sku',       icon: Package,         label: 'SKU Intelligence', group: 'intel' },
   { to: '/flat',       icon: Database,   label: 'Raw Flat Data',        group: 'intel' },
   { to: '/breakdowns', icon: BarChart2,    label: 'Breakdown Analytics',  group: 'intel' },
-  { to: '/shopify',    icon: ShoppingBag, label: 'Shopify Orders',       group: 'intel' },
+  { to: '/shopify',          icon: ShoppingBag, label: 'Shopify Orders',       group: 'intel' },
+  { to: '/shopify-insights', icon: BarChart3,   label: 'Shopify Analytics',    group: 'intel' },
 ];
 
 const GROUP_LABELS = {

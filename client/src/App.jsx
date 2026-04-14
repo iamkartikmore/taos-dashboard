@@ -11,6 +11,7 @@ import VideoInsights from './pages/VideoInsights';
 import SkuInsights from './pages/SkuInsights';
 import Breakdowns from './pages/Breakdowns';
 import ShopifyOrders from './pages/ShopifyOrders';
+import ShopifyInsights from './pages/ShopifyInsights';
 
 export default function App() {
   return (
@@ -30,7 +31,8 @@ export default function App() {
           <Route path="/sku"       element={<SkuInsights />} />
           <Route path="/flat"       element={<FlatData />} />
           <Route path="/breakdowns" element={<Breakdowns />} />
-          <Route path="/shopify"    element={<ShopifyOrders />} />
+          <Route path="/shopify"          element={<ShopifyOrders />} />
+          <Route path="/shopify-insights" element={<ShopifyInsights />} />
           <Route path="*"           element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
