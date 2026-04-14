@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { buildEnrichedRows } from '../lib/analytics';
 import { normalizeBreakdownRow } from '../lib/breakdownAnalytics';
+import { mergeCustomerCache } from '../lib/shopifyAnalytics';
 
 /* ─── LOCALSTORAGE ──────────────────────────────────────────────── */
 const LS_BRANDS = 'taos_brands_v2';
@@ -8,6 +9,7 @@ const LS_ACTIVE = 'taos_active_brands';
 const LS_MANUAL = 'taos_manual';
 const LS_LISTS  = 'taos_lists';
 const LS_INV    = 'taos_inventory_v2';   // { [brandId]: inventoryMap }
+const LS_CUST = 'taos_customers'; // { [brandId]: { [email]: CustomerRecord } }
 
 function lsGet(key, fallback) {
   try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; } catch { return fallback; }
@@ -69,6 +71,7 @@ export const useStore = create((set, get) => {
 
   // Restore persisted per-brand inventory
   const storedInv = lsGet(LS_INV, {});
+  const customerCache = lsGet(LS_CUST, {});
   const initialBrandData = {};
   // Also migrate old single-store taos_inventory
   const oldInv = lsGet('taos_inventory', null);
@@ -247,7 +250,13 @@ export const useStore = create((set, get) => {
     setBrandOrders: (brandId, orders, window) => {
       const tagged = (orders || []).map(o => ({ ...o, _brandId: brandId }));
       const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), orders: tagged, ordersWindow: window, ordersStatus: 'success' } };
-      set({ brandData });
+      // Merge customer data into persistent cache
+      const existingCache  = lsGet(LS_CUST, {});
+      const brandCache     = existingCache[brandId] || {};
+      const updatedBrandCache = mergeCustomerCache(brandCache, orders || []);
+      const newCache = { ...existingCache, [brandId]: updatedBrandCache };
+      lsSet(LS_CUST, newCache);
+      set({ brandData, customerCache: newCache });
       _rebuild({ brandData });
     },
 
@@ -263,6 +272,7 @@ export const useStore = create((set, get) => {
     campaignMap:   {},
     inventoryMap:  {},
     shopifyOrders: [],
+    customerCache: customerCache,
 
     rebuildEnriched: () => _rebuild(),
 

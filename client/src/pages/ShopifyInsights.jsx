@@ -6,7 +6,7 @@ import {
 } from 'recharts';
 import {
   ShoppingBag, Users, TrendingUp, DollarSign, RefreshCw,
-  Package, MapPin, Clock, Tag, AlertTriangle,
+  Package, MapPin, Clock, Tag, AlertTriangle, Download,
 } from 'lucide-react';
 import { useStore } from '../store';
 import {
@@ -35,6 +35,21 @@ const roasColor = v => {
 };
 
 const COLORS = ['#3b82f6','#22c55e','#f59e0b','#a78bfa','#f472b6','#34d399','#fb923c','#60a5fa','#e879f9','#4ade80','#c084fc','#38bdf8'];
+
+function exportCSV(filename, rows, cols) {
+  if (!rows?.length) return;
+  const header = cols.map(c => `"${c.label}"`).join(',');
+  const lines  = rows.map(r => cols.map(c => {
+    const v = c.fn ? c.fn(r) : (r[c.key] ?? '');
+    return `"${String(v).replace(/"/g, '""')}"`;
+  }).join(','));
+  const csv = [header, ...lines].join('\n');
+  const a = Object.assign(document.createElement('a'), {
+    href: URL.createObjectURL(new Blob(['\uFEFF'+csv], { type: 'text/csv;charset=utf-8' })),
+    download: filename,
+  });
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}
 
 /* ─── MINI TOOLTIP ──────────────────────────────────────────────── */
 const ChartTip = ({ active, payload, label, fields = [] }) => {
@@ -71,10 +86,34 @@ const TABS = [
   { id: 'discounts',  label: 'Discounts',        icon: Tag         },
   { id: 'geo',        label: 'Geography',        icon: MapPin      },
   { id: 'timing',     label: 'Timing',           icon: Clock       },
+  { id: 'combos',    label: 'Cross-Sell',      icon: DollarSign  },
 ];
 
 export default function ShopifyInsights() {
-  const { shopifyOrders, shopifyOrdersStatus, inventoryMap, enrichedRows } = useStore();
+  const { shopifyOrders, brands, activeBrandIds, brandData, customerCache, inventoryMap, enrichedRows } = useStore();
+  // Merge customer cache across all active brands into one lookup map
+  const mergedCache = useMemo(() => {
+    if (!customerCache) return {};
+    const active = (brands||[]).filter(b => (activeBrandIds||[]).includes(b.id));
+    const merged = {};
+    active.forEach(b => {
+      const bc = customerCache[b.id] || {};
+      Object.entries(bc).forEach(([email, rec]) => {
+        if (!merged[email]) { merged[email] = { ...rec }; return; }
+        // Merge: take max of lifetime stats, earliest firstSeen, latest lastSeen
+        const e = merged[email];
+        if (rec.firstSeen && (!e.firstSeen || rec.firstSeen < e.firstSeen)) e.firstSeen = rec.firstSeen;
+        if (rec.lastSeen  && (!e.lastSeen  || rec.lastSeen  > e.lastSeen))  e.lastSeen  = rec.lastSeen;
+        e.orders += rec.orders;
+        e.spent  += rec.spent;
+        e.lifetimeOrders = Math.max(e.lifetimeOrders||0, rec.lifetimeOrders||0) || null;
+        e.lifetimeSpent  = Math.max(e.lifetimeSpent||0,  rec.lifetimeSpent||0)  || null;
+        if (!e.name || e.name === e.email?.split('@')[0]) e.name = rec.name;
+        if (!e.city) e.city = rec.city;
+      });
+    });
+    return merged;
+  }, [customerCache, brands, activeBrandIds]);
   const [tab, setTab]   = useState('overview');
   const [rfmSeg, setRfmSeg] = useState('All');
   const [geoView, setGeoView] = useState('state');
@@ -82,13 +121,60 @@ export default function ShopifyInsights() {
   // Build all analytics from orders
   const summary    = useMemo(() => buildOrderSummary(shopifyOrders),                       [shopifyOrders]);
   const skuSales   = useMemo(() => buildSkuSalesAnalytics(shopifyOrders, inventoryMap),    [shopifyOrders, inventoryMap]);
-  const rfmData    = useMemo(() => computeRfm(shopifyOrders),                              [shopifyOrders]);
+  const rfmData    = useMemo(() => computeRfm(shopifyOrders, mergedCache),                 [shopifyOrders, mergedCache]);
   const cohorts    = useMemo(() => buildCohortData(shopifyOrders),                         [shopifyOrders]);
   const discounts  = useMemo(() => buildDiscountAnalysis(shopifyOrders),                   [shopifyOrders]);
   const aovData    = useMemo(() => buildAovAnalysis(shopifyOrders),                        [shopifyOrders]);
   const geoData    = useMemo(() => buildGeoAnalysis(shopifyOrders),                        [shopifyOrders]);
   const timing     = useMemo(() => buildTimingAnalysis(shopifyOrders),                     [shopifyOrders]);
   const revTrend   = useMemo(() => buildRevenueTrend(shopifyOrders),                       [shopifyOrders]);
+
+  const combosData = useMemo(() => {
+    if (!shopifyOrders?.length) return { pairs:[], triplets:[], sequences:[] };
+    const active = shopifyOrders.filter(o => !o.cancelled_at);
+    const N = active.length;
+    const crossSell = {}, tripMap = {}, seqMap = {}, skuOrd = {}, custOrds = {};
+    active.forEach(o => {
+      const skus = [...new Set((o.line_items||[]).map(i=>(i.sku||'').trim().toUpperCase()).filter(Boolean))];
+      skus.forEach(s => { skuOrd[s] = (skuOrd[s]||0) + 1; });
+      for (let i=0;i<skus.length;i++)
+        for (let j=i+1;j<skus.length;j++) {
+          const k=[skus[i],skus[j]].sort().join('|');
+          crossSell[k]=(crossSell[k]||0)+1;
+        }
+      if (skus.length>=3)
+        for (let i=0;i<skus.length;i++)
+          for (let j=i+1;j<skus.length;j++)
+            for (let k=j+1;k<skus.length;k++) {
+              const key=[skus[i],skus[j],skus[k]].sort().join('||');
+              tripMap[key]=(tripMap[key]||0)+1;
+            }
+      const email=(o.email||o.customer?.email||'').toLowerCase().trim();
+      const ck = email||(o.customer?.id?`c${o.customer.id}`:null);
+      if (ck) { if(!custOrds[ck]) custOrds[ck]=[]; custOrds[ck].push({date:o.created_at||'',skus}); }
+    });
+    Object.values(custOrds).forEach(ordList => {
+      if (ordList.length<2) return;
+      ordList.sort((a,b)=>a.date.localeCompare(b.date));
+      for (let i=0;i<ordList.length-1;i++)
+        ordList[i].skus.forEach(f => ordList[i+1].skus.forEach(t => {
+          if (f!==t) { const k=`${f}|||${t}`; seqMap[k]=(seqMap[k]||0)+1; }
+        }));
+    });
+    const skuName = {};
+    shopifyOrders.forEach(o=>(o.line_items||[]).forEach(i=>{ const s=(i.sku||'').trim().toUpperCase(); if(s&&!skuName[s]) skuName[s]=i.title||s; }));
+    const pairs = Object.entries(crossSell).filter(([,c])=>c>=2)
+      .map(([pair,count])=>{ const [s1,s2]=pair.split('|'); const lift=N>0?(count*N)/((skuOrd[s1]||1)*(skuOrd[s2]||1)):0;
+        return {sku1:s1,sku2:s2,name1:skuName[s1]||s1,name2:skuName[s2]||s2,count,lift:+lift.toFixed(2),conf1:+(count/(skuOrd[s1]||1)*100).toFixed(1),conf2:+(count/(skuOrd[s2]||1)*100).toFixed(1),supportPct:+(count/N*100).toFixed(2)}; })
+      .sort((a,b)=>b.lift-a.lift).slice(0,60);
+    const triplets = Object.entries(tripMap).filter(([,c])=>c>=2)
+      .map(([combo,count])=>({combo,skus:combo.split('||').map(s=>skuName[s]||s),count,supportPct:+(count/N*100).toFixed(2)}))
+      .sort((a,b)=>b.count-a.count).slice(0,30);
+    const sequences = Object.entries(seqMap)
+      .map(([key,count])=>{ const [from,to]=key.split('|||'); return {from,to,fromName:skuName[from]||from,toName:skuName[to]||to,count}; })
+      .filter(s=>s.count>=2).sort((a,b)=>b.count-a.count).slice(0,40);
+    return { pairs, triplets, sequences };
+  }, [shopifyOrders]);
 
   // Meta SKU summary for cross-reference
   const metaSkuMap = useMemo(() => {
@@ -127,20 +213,24 @@ export default function ShopifyInsights() {
     rfmSeg === 'All' ? rfmData : rfmData.filter(c => c.segment === rfmSeg),
   [rfmData, rfmSeg]);
 
-  if (shopifyOrdersStatus === 'idle') {
-    return (
-      <div className="flex flex-col items-center justify-center h-64 text-slate-500 gap-3">
-        <ShoppingBag size={40} className="opacity-30" />
-        <p className="text-sm">No Shopify data loaded.</p>
-        <p className="text-xs text-slate-600">Go to Study Manual → Shopify Analytics Data → Fetch Shopify Analytics Data</p>
-      </div>
-    );
-  }
-  if (shopifyOrdersStatus === 'loading') {
+  // Derive loading/empty state from brand data (multi-brand store doesn't use shopifyOrdersStatus)
+  const isLoading = (brands||[]).some(b => activeBrandIds?.includes(b.id) && brandData?.[b.id]?.ordersStatus === 'loading');
+  const isEmpty   = !shopifyOrders?.length;
+
+  if (isLoading) {
     return (
       <div className="flex items-center justify-center h-64 gap-3 text-slate-400">
         <RefreshCw size={20} className="animate-spin" />
         <span className="text-sm">Fetching Shopify orders…</span>
+      </div>
+    );
+  }
+  if (isEmpty) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 text-slate-500 gap-3">
+        <ShoppingBag size={40} className="opacity-30" />
+        <p className="text-sm">No Shopify data loaded.</p>
+        <p className="text-xs text-slate-600">Go to Study Manual → Pull Everything first.</p>
       </div>
     );
   }
@@ -155,7 +245,10 @@ export default function ShopifyInsights() {
         </div>
         <div>
           <h1 className="text-2xl font-bold text-white">Shopify Analytics</h1>
-          <p className="text-sm text-slate-500 mt-1">{fmt.number(shopifyOrders.length)} orders analysed · {fmt.number(summary.uniqueCustomers)} customers</p>
+          <p className="text-sm text-slate-500 mt-1">
+            {fmt.number(shopifyOrders.length)} orders · {fmt.number(summary.uniqueCustomers)} customers in window
+            {Object.keys(mergedCache).length > 0 && ` · ${fmt.number(Object.keys(mergedCache).length)} in lifetime cache`}
+          </p>
         </div>
       </div>
 
@@ -232,8 +325,21 @@ export default function ShopifyInsights() {
         <motion.div initial={{ opacity:0, y:12 }} animate={{ opacity:1, y:0 }} className="space-y-5">
           <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
             <div className="px-5 py-3 border-b border-gray-800 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-white">SKU Sales Intelligence</h2>
-              <span className="text-[10px] text-slate-500">{skuSales.length} SKUs · sorted by 30D revenue</span>
+              <div>
+                <h2 className="text-sm font-semibold text-white">SKU Sales Intelligence</h2>
+                <span className="text-[10px] text-slate-500">{skuSales.length} SKUs · sorted by 30D revenue</span>
+              </div>
+              <button onClick={() => exportCSV('sku_sales.csv', skuSales, [
+                { key:'sku', label:'SKU' }, { key:'stockTitle', label:'Product' },
+                { key:'unitsSold', label:'Units Sold' }, { key:'revenue', label:'Revenue' },
+                { key:'revenue30d', label:'30D Revenue' }, { key:'dailyVelocity7d', label:'7D/day' },
+                { key:'dailyVelocity30d', label:'30D/day' }, { key:'stock', label:'Stock' },
+                { key:'daysOfStock', label:'Days Stock' }, { key:'refundRate', label:'Refund%' },
+                { key:'discountRate', label:'Discount%' },
+              ])} className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-xs text-slate-300 transition-all">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export CSV
+              </button>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
@@ -330,8 +436,18 @@ export default function ShopifyInsights() {
 
           {/* Customer table */}
           <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-            <div className="px-5 py-3 border-b border-gray-800">
+            <div className="px-5 py-3 border-b border-gray-800 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-white">Customer RFM Table — {filteredRfm.length} customers</h2>
+              <button onClick={() => exportCSV('rfm_customers.csv', filteredRfm, [
+                { key:'email', label:'Email' }, { key:'name', label:'Name' },
+                { key:'segment', label:'Segment' }, { key:'r', label:'R' }, { key:'f', label:'F' }, { key:'m', label:'M' },
+                { key:'orderCount', label:'Orders' }, { key:'totalSpent', label:'Total Spent' },
+                { key:'aov', label:'AOV' }, { key:'recencyDays', label:'Days Since' },
+                { key:'lifespan', label:'Lifespan Days' }, { key:'city', label:'City' },
+              ])} className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-xs text-slate-300 transition-all">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export CSV
+              </button>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
@@ -649,6 +765,135 @@ export default function ShopifyInsights() {
               </div>
             </div>
           </div>
+        </motion.div>
+      )}
+
+      {/* ── CROSS-SELL ─────────────────────────────────────────────── */}
+      {tab === 'combos' && (
+        <motion.div initial={{ opacity:0, y:12 }} animate={{ opacity:1, y:0 }} className="space-y-5">
+          {/* Pairs */}
+          <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+            <div className="px-5 py-3 border-b border-gray-800 flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold text-white">Top Cross-Sell Pairs</h2>
+                <p className="text-xs text-slate-500 mt-0.5">Lift {'>'} 1 = bought together more than chance. Confidence = % of SKU-A buyers who also bought SKU-B.</p>
+              </div>
+              <button onClick={() => exportCSV('cross_sell_pairs.csv', combosData.pairs, [
+                {key:'sku1',label:'SKU 1'},{key:'name1',label:'Product 1'},{key:'sku2',label:'SKU 2'},{key:'name2',label:'Product 2'},
+                {key:'count',label:'Co-Purchases'},{key:'lift',label:'Lift'},{key:'conf1',label:'Conf A→B%'},{key:'conf2',label:'Conf B→A%'},{key:'supportPct',label:'Support%'},
+              ])} className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-xs text-slate-300 transition-all">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Export
+              </button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead><tr className="border-b border-gray-800 bg-gray-900/80">
+                  {['SKU A','Product A','SKU B','Product B','Together','Lift','Conf A→B','Conf B→A','Support'].map(h=>(
+                    <th key={h} className="px-3 py-2.5 text-left text-slate-500 font-semibold whitespace-nowrap">{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>
+                  {combosData.pairs.slice(0,50).map((r,i)=>(
+                    <tr key={i} className={`border-t border-gray-800/40 ${i%2===0?'bg-gray-950/40':''}`}>
+                      <td className="px-3 py-2.5 font-semibold text-slate-200">{r.sku1}</td>
+                      <td className="px-3 py-2.5 text-slate-400 max-w-[140px] truncate">{r.name1}</td>
+                      <td className="px-3 py-2.5 font-semibold text-slate-200">{r.sku2}</td>
+                      <td className="px-3 py-2.5 text-slate-400 max-w-[140px] truncate">{r.name2}</td>
+                      <td className="px-3 py-2.5 tabular-nums text-slate-300">{r.count}</td>
+                      <td className="px-3 py-2.5 tabular-nums font-bold" style={{color:r.lift>=5?'#22c55e':r.lift>=2?'#f59e0b':'#64748b'}}>{r.lift}x</td>
+                      <td className="px-3 py-2.5 tabular-nums text-slate-400">{r.conf1}%</td>
+                      <td className="px-3 py-2.5 tabular-nums text-slate-400">{r.conf2}%</td>
+                      <td className="px-3 py-2.5 tabular-nums text-slate-500">{r.supportPct}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Top 20 pairs chart */}
+          {combosData.pairs.length > 0 && (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+              <h2 className="text-sm font-semibold text-white mb-4">Top 20 Pairs — Lift Score</h2>
+              <ResponsiveContainer width="100%" height={Math.max(240, Math.min(combosData.pairs.length,20)*28)}>
+                <BarChart data={combosData.pairs.slice(0,20).map(r=>({...r,label:`${r.sku1}+${r.sku2}`}))} layout="vertical" margin={{right:48}}>
+                  <XAxis type="number" tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickLine={false}/>
+                  <YAxis type="category" dataKey="label" width={160} tick={{fill:'#94a3b8',fontSize:10}} axisLine={false} tickLine={false}/>
+                  <Tooltip content={<ChartTip fields={[{key:'lift',label:'Lift',fmtFn:v=>`${v}x`},{key:'count',label:'Co-purchases',fmtFn:fmt.number}]}/>}/>
+                  <Bar dataKey="lift" radius={[0,4,4,0]}>
+                    {combosData.pairs.slice(0,20).map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {/* Triplets */}
+          {combosData.triplets.length > 0 && (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+              <div className="px-5 py-3 border-b border-gray-800 flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-white">Triplet Combos — 3 SKUs Bought Together</h2>
+                <button onClick={() => exportCSV('triplets.csv', combosData.triplets, [
+                  {key:'skus',label:'SKUs',fn:r=>r.skus.join(' + ')},{key:'count',label:'Count'},{key:'supportPct',label:'Support%'},
+                ])} className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-xs text-slate-300 transition-all">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Export
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr className="border-b border-gray-800"><th className="px-3 py-2.5 text-left text-slate-500 font-semibold">Combo</th><th className="px-3 py-2.5 text-left text-slate-500 font-semibold">Orders</th><th className="px-3 py-2.5 text-left text-slate-500 font-semibold">Support%</th></tr></thead>
+                  <tbody>
+                    {combosData.triplets.map((r,i)=>(
+                      <tr key={i} className={`border-t border-gray-800/40 ${i%2===0?'bg-gray-950/40':''}`}>
+                        <td className="px-3 py-2.5 text-slate-300">{r.skus.join(' + ')}</td>
+                        <td className="px-3 py-2.5 tabular-nums text-slate-400">{r.count}</td>
+                        <td className="px-3 py-2.5 tabular-nums text-slate-500">{r.supportPct}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Purchase sequences */}
+          {combosData.sequences.length > 0 && (
+            <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+              <div className="px-5 py-3 border-b border-gray-800 flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-white">Repeat Purchase Sequences</h2>
+                  <p className="text-xs text-slate-500 mt-0.5">Customers who bought A then B — shows natural upsell paths</p>
+                </div>
+                <button onClick={() => exportCSV('sequences.csv', combosData.sequences, [
+                  {key:'from',label:'From SKU'},{key:'fromName',label:'From Product'},{key:'to',label:'To SKU'},{key:'toName',label:'To Product'},{key:'count',label:'Count'},
+                ])} className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg text-xs text-slate-300 transition-all">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Export
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr className="border-b border-gray-800">
+                    {['From SKU','From Product','→','To SKU','To Product','Count'].map(h=><th key={h} className="px-3 py-2.5 text-left text-slate-500 font-semibold">{h}</th>)}
+                  </tr></thead>
+                  <tbody>
+                    {combosData.sequences.slice(0,40).map((r,i)=>(
+                      <tr key={i} className={`border-t border-gray-800/40 ${i%2===0?'bg-gray-950/40':''}`}>
+                        <td className="px-3 py-2.5 font-semibold text-slate-200">{r.from}</td>
+                        <td className="px-3 py-2.5 text-slate-400 max-w-[140px] truncate">{r.fromName}</td>
+                        <td className="px-3 py-2.5 text-violet-400">→</td>
+                        <td className="px-3 py-2.5 font-semibold text-slate-200">{r.to}</td>
+                        <td className="px-3 py-2.5 text-slate-400 max-w-[140px] truncate">{r.toName}</td>
+                        <td className="px-3 py-2.5 tabular-nums text-emerald-400 font-semibold">{r.count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </motion.div>
       )}
 

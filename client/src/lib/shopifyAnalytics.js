@@ -669,15 +669,22 @@ export function buildOrderSummary(orders) {
   let revenue = 0, discount = 0;
   const custSet = new Set();
   let repeatOrders = 0, refundedOrders = 0, discOrders = 0, newCusts = 0;
-  active.forEach(o => {
+  const sorted = [...active].sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||''));
+  const emailSeen = new Set();
+  sorted.forEach(o => {
     revenue  += p(o.total_price);
     discount += p(o.total_discounts);
-    const key = (o.email||o.customer?.email||'').toLowerCase().trim() || (o.customer?.id ? `c${o.customer.id}` : null);
+    const email = (o.email||o.customer?.email||'').toLowerCase().trim();
+    const key = email || (o.customer?.id ? `c${o.customer.id}` : null);
     if (key) custSet.add(key);
-    if ((o.customer?.orders_count||1) > 1) repeatOrders++;
+    // Repeat = lifetime orders_count > 1 (registered) OR same email seen earlier in window (guest repeat)
+    const lifetimeRpt = (o.customer?.orders_count||0) > 1;
+    const windowRpt   = email && emailSeen.has(email);
+    const isRepeat    = lifetimeRpt || windowRpt;
+    if (email) emailSeen.add(email);
+    if (isRepeat) repeatOrders++; else newCusts++;
     if ((o.refunds||[]).length > 0) refundedOrders++;
     if (p(o.total_discounts) > 0) discOrders++;
-    if ((o.customer?.orders_count||1) <= 1) newCusts++;
   });
   return {
     totalOrders: N, revenue, aov: N>0?revenue/N:0,
@@ -755,7 +762,7 @@ function _rfmQuintile(items, getValue, lowerBetter = false) {
   return map;
 }
 
-export function computeRfm(orders) {
+export function computeRfm(orders, customerCache = {}) {
   if (!orders?.length) return [];
   const active = orders.filter(o => !o.cancelled_at);
   const custMap = {};
@@ -782,16 +789,29 @@ export function computeRfm(orders) {
     skus.forEach(s => c.skuSet.add(s));
   });
   const today = new Date();
-  const custList = Object.values(custMap).map(c => ({
-    ...c,
-    recencyDays: c.lastDate ? Math.round((today - new Date(c.lastDate))/86400000) : 999,
-    lifespan: c.firstDate&&c.lastDate&&c.firstDate!==c.lastDate
-      ? Math.round((new Date(c.lastDate)-new Date(c.firstDate))/86400000) : 0,
-    totalSpent:  c.lifetimeRevenue||c.revenue,
-    orderCount:  c.lifetimeOrders||c.orders,
-    uniqueSkus:  c.skuSet.size,
-    aov:         c.orders>0?c.revenue/c.orders:0,
-  }));
+  const custList = Object.values(custMap).map(c => {
+    const cached = customerCache[c.email] || {};
+    // Use cache for lifetime data — cache aggregates across all fetches
+    const effectiveOrders  = cached.lifetimeOrders  || c.lifetimeOrders || c.orders;
+    const effectiveSpent   = cached.lifetimeSpent   || c.lifetimeRevenue || c.revenue;
+    const effectiveFirst   = cached.firstSeen && (!c.firstDate || cached.firstSeen < c.firstDate) ? cached.firstSeen : c.firstDate;
+    const effectiveLast    = cached.lastSeen  && cached.lastSeen  > c.lastDate  ? cached.lastSeen  : c.lastDate;
+    const effectiveName    = (cached.name && cached.name !== c.email?.split('@')[0]) ? cached.name : c.name;
+    const effectiveCity    = cached.city || c.city;
+    return {
+      ...c,
+      name: effectiveName || c.name,
+      city: effectiveCity,
+      recencyDays: effectiveLast ? Math.round((today - new Date(effectiveLast))/86400000) : 999,
+      lifespan: effectiveFirst&&effectiveLast&&effectiveFirst!==effectiveLast
+        ? Math.round((new Date(effectiveLast)-new Date(effectiveFirst))/86400000) : 0,
+      totalSpent:  effectiveSpent,
+      orderCount:  effectiveOrders,
+      uniqueSkus:  c.skuSet.size,
+      aov:         c.orders>0?c.revenue/c.orders:0,
+      hasCache:    !!cached.firstSeen,
+    };
+  });
   const rMap = _rfmQuintile(custList, c=>c.recencyDays, true);
   const fMap = _rfmQuintile(custList, c=>c.orderCount);
   const mMap = _rfmQuintile(custList, c=>c.totalSpent);
@@ -960,6 +980,50 @@ export function buildTimingAnalysis(orders) {
   return { byHour, byDay };
 }
 
+/* ── Customer cache — merges orders into a persistent all-time customer record map ── */
+// cache shape: { [email]: { email, name, city, phone, firstSeen, lastSeen, orders, spent,
+//                            lifetimeOrders, lifetimeSpent } }
+export function mergeCustomerCache(existing = {}, orders = []) {
+  const cache = { ...existing };
+  orders.filter(o => !o.cancelled_at).forEach(o => {
+    const email = (o.email||o.customer?.email||'').toLowerCase().trim();
+    if (!email) return;
+    const date = o.created_at?.slice(0,10) || '';
+    const rev  = p(o.total_price);
+    if (!cache[email]) {
+      cache[email] = {
+        email,
+        name: `${o.customer?.first_name||''} ${o.customer?.last_name||''}`.trim() || email.split('@')[0],
+        city: o.billing_address?.city || o.shipping_address?.city || '',
+        phone: o.billing_address?.phone || o.shipping_address?.phone || o.customer?.phone || '',
+        firstSeen: date,
+        lastSeen:  date,
+        orders: 0, spent: 0,
+        lifetimeOrders: null,
+        lifetimeSpent:  null,
+      };
+    }
+    const c = cache[email];
+    c.orders++;
+    c.spent += rev;
+    if (date && (!c.firstSeen || date < c.firstSeen)) c.firstSeen = date;
+    if (date && (!c.lastSeen  || date > c.lastSeen))  c.lastSeen  = date;
+    // Always prefer Shopify's own lifetime counters when available (they include orders outside the fetch window)
+    const liftO = o.customer?.orders_count;
+    const liftS = p(o.customer?.total_spent);
+    if (liftO) c.lifetimeOrders = Math.max(c.lifetimeOrders||0, liftO);
+    if (liftS > 0) c.lifetimeSpent = Math.max(c.lifetimeSpent||0, liftS);
+    // Fill in missing name/city/phone
+    const freshName = `${o.customer?.first_name||''} ${o.customer?.last_name||''}`.trim();
+    if (freshName && (!c.name || c.name === c.email.split('@')[0])) c.name = freshName;
+    const freshCity = o.billing_address?.city || o.shipping_address?.city;
+    if (freshCity && !c.city) c.city = freshCity;
+    const freshPhone = o.billing_address?.phone || o.shipping_address?.phone || o.customer?.phone;
+    if (freshPhone && !c.phone) c.phone = freshPhone;
+  });
+  return cache;
+}
+
 /* ── 9. Revenue trend by month ──────────────────────────────────── */
 export function buildRevenueTrend(orders) {
   if (!orders?.length) return [];
@@ -974,7 +1038,9 @@ export function buildRevenueTrend(orders) {
     map[mo].orders++; map[mo].revenue+=p(o.total_price);
     const email = (o.email||o.customer?.email||'').toLowerCase().trim();
     const key   = email || (o.customer?.id?`c${o.customer.id}`:null);
-    const isNew = (o.customer?.orders_count||1)<=1 && !(key && seenCust[key]);
+    const lifetimeNew = (o.customer?.orders_count||0) <= 1;
+    const isNew = lifetimeNew && !(email && seenCust[email]) && !(key && seenCust[key]);
+    if (email) seenCust[email] = true;
     if (key) seenCust[key] = true;
     if (isNew) map[mo].newCustomers++; else map[mo].repeatCustomers++;
   });
