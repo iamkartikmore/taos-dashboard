@@ -182,6 +182,7 @@ app.post('/api/shopify/orders/stream', async (req, res) => {
     // (shipping_lines, note_attributes, tags, subtotal_price, total_tax, etc.)
     const fields = [
       'id','created_at','cancelled_at','cancel_reason',
+      'email',                                   // order-level email — present even for guest checkouts
       'total_price','total_discounts','total_shipping_price_set',
       'customer','line_items','discount_codes',
       'billing_address','shipping_address',

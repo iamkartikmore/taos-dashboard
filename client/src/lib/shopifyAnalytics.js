@@ -82,13 +82,12 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
   const N = active.length;
   let totalRev = 0, totalDisc = 0, totalItems = 0, totalShipping = 0;
 
-  // Pre-build: customers who appear 2+ times in this window.
-  // Their 2nd+ order is a REPEAT even if lifetime orders_count = 1
-  // (covers cases where orders_count isn't returned, or guest-checkout repeat buyers).
-  const custWindowCount = {};
-  active.forEach(o => { if (o.customer?.id) custWindowCount[o.customer.id] = (custWindowCount[o.customer.id] || 0) + 1; });
-  // Track first-seen per customer as we iterate (orders are date-sorted)
-  const custSeenInWindow = new Set();
+  // Identity key: order-level email covers guest checkouts; fall back to customer ID.
+  // Two orders with the same email = same person even without a customer account.
+  const orderKey = o => (o.email || o.customer?.email || '').toLowerCase().trim() || `cid_${o.customer?.id}` || null;
+
+  // Track first-seen per identity key as we iterate (orders are date-sorted)
+  const seenInWindow = new Set();
 
   // Accumulator maps
   const custMap     = {};
@@ -116,16 +115,18 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
     const hour   = o.created_at ? new Date(o.created_at).getHours() : null;
     const cid    = o.customer?.id;
 
-    // isNew = true if this order represents a first-time customer acquisition.
+    // isNew = true if this order is a first-time acquisition.
+    // Uses email as identity key (works for guest checkouts too).
     // Priority:
-    //   1. lifetime orders_count > 1  → definitively repeat (most reliable)
-    //   2. same customer ID already seen earlier in this window → repeat within window
-    //   3. guest checkout (no cid) or first occurrence → new
+    //   1. lifetime orders_count > 1 → definitively repeat
+    //   2. same email/cid seen earlier in this window → repeat within window
+    //   3. first occurrence or no identity → new
+    const key = orderKey(o);
     const lifetimeOrders = o.customer?.orders_count;
     const isNew = lifetimeOrders != null
-      ? lifetimeOrders <= 1 && !custSeenInWindow.has(cid)
-      : !custSeenInWindow.has(cid);   // orders_count absent → within-window fallback
-    if (cid) custSeenInWindow.add(cid);
+      ? lifetimeOrders <= 1 && !(key && seenInWindow.has(key))
+      : !(key && seenInWindow.has(key));
+    if (key) seenInWindow.add(key);
 
     totalRev      += rev;
     totalDisc     += disc;
@@ -153,7 +154,7 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
     const city = o.billing_address?.city     || o.shipping_address?.city     || 'Unknown';
     if (!geoMap[prov]) geoMap[prov] = { province: prov, orders: 0, revenue: 0, custSet: new Set() };
     geoMap[prov].orders++; geoMap[prov].revenue += rev;
-    if (cid) geoMap[prov].custSet.add(cid);
+    if (key) geoMap[prov].custSet.add(key);
     if (!cityMap[city]) cityMap[city] = { city, orders: 0, revenue: 0 };
     cityMap[city].orders++; cityMap[city].revenue += rev;
 
@@ -174,19 +175,21 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
     refMap[ref].orders++; refMap[ref].revenue += rev;
     if (isNew) refMap[ref].newOrders++;
 
-    // ── customer
-    if (cid) {
-      if (!custMap[cid]) custMap[cid] = {
-        id: cid, email: o.customer.email || '',
-        firstName: o.customer.first_name || '',
-        lastName: o.customer.last_name || '',
+    // ── customer (keyed by email so guest checkouts are deduplicated)
+    const custKey = key || (cid ? `cid_${cid}` : null);
+    if (custKey) {
+      const email = (o.email || o.customer?.email || '').toLowerCase().trim();
+      if (!custMap[custKey]) custMap[custKey] = {
+        id: cid || custKey, email,
+        firstName: o.customer?.first_name || '',
+        lastName: o.customer?.last_name || '',
         lastOrderDate: date, firstOrderDate: date,
         ordersInWindow: 0, revenueInWindow: 0,
-        lifetimeOrders: o.customer.orders_count || 1,
-        lifetimeRevenue: p(o.customer.total_spent),
+        lifetimeOrders: o.customer?.orders_count || 1,
+        lifetimeRevenue: p(o.customer?.total_spent),
         joinedAt: o.customer.created_at,
       };
-      const c = custMap[cid];
+      const c = custMap[custKey];
       c.ordersInWindow++;
       c.revenueInWindow += rev;
       if (date > c.lastOrderDate) c.lastOrderDate = date;
@@ -275,10 +278,11 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
           }
     }
 
-    // ── customer orders for sequence analysis
-    if (cid) {
-      if (!custOrders[cid]) custOrders[cid] = [];
-      custOrders[cid].push({ date: o.created_at || '', skus: uSkus });
+    // ── customer orders for sequence analysis (use email key → catches guest repeats)
+    const seqKey = key || (cid ? `cid_${cid}` : null);
+    if (seqKey) {
+      if (!custOrders[seqKey]) custOrders[seqKey] = [];
+      custOrders[seqKey].push({ date: o.created_at || '', skus: uSkus });
     }
 
     // ── fulfillment velocity
