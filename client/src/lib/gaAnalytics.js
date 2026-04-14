@@ -207,12 +207,12 @@ export function buildGaItems(gaData) {
       category:  r.itemCategory,
       brand:     r.itemBrand,
       revenue:   n(r.itemRevenue),
-      sold:      n(r.itemsSold),
+      sold:      n(r.itemsPurchased),
       addToCarts:n(r.addToCarts),
       checkouts: n(r.checkouts),
       cartToCheckout: n(r.addToCarts) > 0 ? pct(n(r.checkouts)/n(r.addToCarts)*100) : 0,
-      checkoutToPurch: n(r.checkouts) > 0 ? pct(n(r.itemPurchaseQuantity)/n(r.checkouts)*100) : 0,
-      aov: n(r.itemsSold) > 0 ? +(n(r.itemRevenue)/n(r.itemsSold)).toFixed(2) : 0,
+      checkoutToPurch: n(r.checkouts) > 0 ? pct(n(r.itemsPurchased)/n(r.checkouts)*100) : 0,
+      aov: n(r.itemsPurchased) > 0 ? +(n(r.itemRevenue)/n(r.itemsPurchased)).toFixed(2) : 0,
     }))
     .sort((a,b) => b.revenue - a.revenue);
 }

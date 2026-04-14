@@ -244,55 +244,8 @@ app.post('/api/ga/report', async (req, res) => {
 
     const since = dateRange?.since || '365daysAgo';
     const until = dateRange?.until || 'today';
-
-    // Build batch reports
-    const batchReports = [
-      // 0: Daily trend (full date range)
-      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'date'}],
-        metrics:['sessions','totalUsers','newUsers','engagedSessions','bounceRate','screenPageViews','conversions','purchaseRevenue','averageSessionDuration'].map(n=>({name:n})) },
-      // 1: Source / Medium
-      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'sessionSourceMedium'},{name:'sessionDefaultChannelGrouping'}],
-        metrics:['sessions','totalUsers','newUsers','conversions','purchaseRevenue','bounceRate','engagementRate'].map(n=>({name:n})), limit:150 },
-      // 2: Campaign + source + medium
-      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'sessionCampaignName'},{name:'sessionSource'},{name:'sessionMedium'}],
-        metrics:['sessions','newUsers','conversions','purchaseRevenue','engagementRate'].map(n=>({name:n})), limit:200 },
-      // 3: Landing pages
-      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'landingPagePlusQueryString'}],
-        metrics:['sessions','totalUsers','bounceRate','conversions','engagementRate','screenPageViews'].map(n=>({name:n})), limit:200 },
-      // 4: Device + OS
-      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'deviceCategory'},{name:'operatingSystem'}],
-        metrics:['sessions','totalUsers','newUsers','conversions','purchaseRevenue'].map(n=>({name:n})) },
-      // 5: Geo — country + region + city
-      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'country'},{name:'region'},{name:'city'}],
-        metrics:['sessions','totalUsers','conversions','purchaseRevenue'].map(n=>({name:n})), limit:200 },
-      // 6: Page performance
-      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'pageTitle'},{name:'fullPageUrl'}],
-        metrics:['screenPageViews','averageSessionDuration','bounceRate','engagedSessions'].map(n=>({name:n})), limit:200 },
-      // 7: Events
-      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'eventName'}],
-        metrics:['eventCount','totalUsers','conversions'].map(n=>({name:n})), limit:50 },
-      // 8: Ecommerce items
-      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'itemName'},{name:'itemId'},{name:'itemCategory'},{name:'itemBrand'}],
-        metrics:['itemRevenue','itemsSold','addToCarts','checkouts','itemPurchaseQuantity'].map(n=>({name:n})), limit:200 },
-      // 9: UTM full drill (source + medium + campaign + content)
-      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'sessionSource'},{name:'sessionMedium'},{name:'sessionCampaignName'},{name:'sessionManualAdContent'}],
-        metrics:['sessions','newUsers','conversions','purchaseRevenue'].map(n=>({name:n})), limit:500 },
-      // 10: Browser
-      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'browser'},{name:'deviceCategory'}],
-        metrics:['sessions','totalUsers','conversions'].map(n=>({name:n})), limit:30 },
-      // 11: User type (new vs returning)
-      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'newVsReturning'}],
-        metrics:['sessions','totalUsers','conversions','purchaseRevenue','engagementRate'].map(n=>({name:n})) },
-      // 12: Monthly trend (last 24 months)
-      { dateRanges:[{startDate:'730daysAgo',endDate:until}], dimensions:[{name:'yearMonth'}],
-        metrics:['sessions','totalUsers','newUsers','conversions','purchaseRevenue'].map(n=>({name:n})) },
-    ];
-
-    const batchResp = await axios.post(
-      `https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:batchRunReports`,
-      { requests: batchReports },
-      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, timeout: 60000 }
-    );
+    const BASE = `https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`;
+    const HDRS = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
 
     // Parse helper: GA returns dimension/metric headers + rows
     const parse = (report) => {
@@ -307,22 +260,67 @@ app.post('/api/ga/report', async (req, res) => {
       });
     };
 
-    const r = batchResp.data.reports || [];
-    res.json({
-      dailyTrend:    parse(r[0]),
-      sourceMedium:  parse(r[1]),
-      campaigns:     parse(r[2]),
-      landingPages:  parse(r[3]),
-      devices:       parse(r[4]),
-      geo:           parse(r[5]),
-      pages:         parse(r[6]),
-      events:        parse(r[7]),
-      items:         parse(r[8]),
-      utmDrill:      parse(r[9]),
-      browsers:      parse(r[10]),
-      userType:      parse(r[11]),
-      monthlyTrend:  parse(r[12]),
-    });
+    // Run each report individually so a single invalid field doesn't kill everything
+    const run = async (body) => {
+      try {
+        const r = await axios.post(BASE, body, { headers: HDRS, timeout: 30000 });
+        return parse(r.data);
+      } catch (e) {
+        console.error('[GA] sub-report error:', e.response?.data?.error?.message || e.message);
+        return [];
+      }
+    };
+
+    // All 13 reports run in parallel — validated against GA4 Data API v1beta schema
+    const [
+      dailyTrend, sourceMedium, campaigns, landingPages, devices,
+      geo, pages, events, items, utmDrill, browsers, userType, monthlyTrend,
+    ] = await Promise.all([
+      // 0: Daily trend
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'date'}],
+        metrics:['sessions','totalUsers','newUsers','engagedSessions','bounceRate','screenPageViews','conversions','purchaseRevenue','averageSessionDuration'].map(n=>({name:n})) }),
+      // 1: Source / Medium
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'sessionSourceMedium'},{name:'sessionDefaultChannelGrouping'}],
+        metrics:['sessions','totalUsers','newUsers','conversions','purchaseRevenue','bounceRate','engagementRate'].map(n=>({name:n})), limit:150 }),
+      // 2: Campaign + source + medium
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'sessionCampaignName'},{name:'sessionSource'},{name:'sessionMedium'}],
+        metrics:['sessions','newUsers','conversions','purchaseRevenue','engagementRate'].map(n=>({name:n})), limit:200 }),
+      // 3: Landing pages
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'landingPagePlusQueryString'}],
+        metrics:['sessions','totalUsers','bounceRate','conversions','engagementRate','screenPageViews'].map(n=>({name:n})), limit:200 }),
+      // 4: Device + OS
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'deviceCategory'},{name:'operatingSystem'}],
+        metrics:['sessions','totalUsers','newUsers','conversions','purchaseRevenue'].map(n=>({name:n})) }),
+      // 5: Geo — country + region + city
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'country'},{name:'region'},{name:'city'}],
+        metrics:['sessions','totalUsers','conversions','purchaseRevenue'].map(n=>({name:n})), limit:200 }),
+      // 6: Page performance
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'pageTitle'},{name:'fullPageUrl'}],
+        metrics:['screenPageViews','averageSessionDuration','bounceRate','engagedSessions'].map(n=>({name:n})), limit:200 }),
+      // 7: Events
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'eventName'}],
+        metrics:['eventCount','totalUsers','conversions'].map(n=>({name:n})), limit:50 }),
+      // 8: Ecommerce items — itemsPurchased is the correct GA4 metric (not itemsSold/itemPurchaseQuantity)
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'itemName'},{name:'itemId'},{name:'itemCategory'},{name:'itemBrand'}],
+        metrics:['itemRevenue','itemsPurchased','addToCarts','checkouts'].map(n=>({name:n})), limit:200 }),
+      // 9: UTM full drill
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'sessionSource'},{name:'sessionMedium'},{name:'sessionCampaignName'},{name:'sessionManualAdContent'}],
+        metrics:['sessions','newUsers','conversions','purchaseRevenue'].map(n=>({name:n})), limit:500 }),
+      // 10: Browser
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'browser'},{name:'deviceCategory'}],
+        metrics:['sessions','totalUsers','conversions'].map(n=>({name:n})), limit:30 }),
+      // 11: User type (new vs returning)
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'newVsReturning'}],
+        metrics:['sessions','totalUsers','conversions','purchaseRevenue','engagementRate'].map(n=>({name:n})) }),
+      // 12: Monthly trend (last 24 months) — use date + yearMonth dimension
+      run({ dateRanges:[{startDate:'730daysAgo',endDate:until}], dimensions:[{name:'year'},{name:'month'}],
+        metrics:['sessions','totalUsers','newUsers','conversions','purchaseRevenue'].map(n=>({name:n})) }),
+    ]);
+
+    // Normalize monthlyTrend: merge year+month into yearMonth key for downstream compat
+    const monthlyTrendNorm = monthlyTrend.map(r => ({ ...r, yearMonth: `${r.year}${r.month}` }));
+
+    res.json({ dailyTrend, sourceMedium, campaigns, landingPages, devices, geo, pages, events, items, utmDrill, browsers, userType, monthlyTrend: monthlyTrendNorm });
   } catch (err) {
     const msg = err.response?.data?.error?.message || err.message;
     res.status(err.response?.status||500).json({ error: msg });
