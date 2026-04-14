@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key, Users, BookOpen, Upload, ShoppingBag } from 'lucide-react';
+import { Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key, Users, BookOpen, Upload, ShoppingBag, Zap } from 'lucide-react';
 import { useStore } from '../store';
 import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders } from '../lib/api';
 import { BREAKDOWN_SPECS, pullAllBreakdowns } from '../lib/breakdownApi';
@@ -30,6 +30,8 @@ export default function Setup() {
   const [ordersFetching, setOrdersFetching]       = useState(false);
   const [ordersResult, setOrdersResult]           = useState(null);
   const [ordersDays, setOrdersDays]               = useState(365);
+  const [megaFetching, setMegaFetching]     = useState(false);
+  const [megaStep, setMegaStep]             = useState('');    // 'meta' | 'breakdowns' | 'inventory' | 'orders'
   const [activeManualAd, setActiveManualAd] = useState(null);
   const [manualSearch, setManualSearch] = useState('');
   const [activeTab, setActiveTab] = useState('credentials');
@@ -37,6 +39,13 @@ export default function Setup() {
   const [savedFlash, setSavedFlash] = useState(false);
   const csvFileRef = useRef(null);
   const saveTimerRef = useRef(null);
+
+  // Convert a days number / 'all' to ISO since/until for the orders endpoint
+  const daysToRange = days => {
+    const until = new Date().toISOString();
+    if (days === 'all') return { since: null, until };
+    return { since: new Date(Date.now() - Number(days) * 86400000).toISOString(), until };
+  };
 
   // Show a brief "Saved" flash whenever config changes
   const flashSaved = () => {
@@ -106,15 +115,118 @@ export default function Setup() {
     setOrdersResult(null);
     setShopifyOrdersStatus('loading');
     try {
-      const orders = await fetchShopifyOrders(config.shopifyShop, config.shopifyClientId, config.shopifyClientSecret, ordersDays);
-      setShopifyOrders(orders, ordersDays);
-      setOrdersResult({ ok: true, count: orders.length });
+      const { since, until } = daysToRange(ordersDays);
+      const { orders: fetchedOrders, count, pages } = await fetchShopifyOrders(
+        config.shopifyShop, config.shopifyClientId, config.shopifyClientSecret,
+        since, until,
+        msg => appendLog(msg),
+      );
+      setShopifyOrders(fetchedOrders, ordersDays);
+      setOrdersResult({ ok: true, count });
     } catch (e) {
       setShopifyOrdersStatus('error');
       setOrdersResult({ ok: false, message: e.message });
     } finally {
       setOrdersFetching(false);
     }
+  };
+
+  const handlePullEverything = async () => {
+    const accounts  = config.accounts.filter(a => a.key && a.id);
+    const hasMeta   = !!config.token && accounts.length > 0;
+    const hasShopify = config.shopifyShop && config.shopifyClientId && config.shopifyClientSecret;
+
+    if (!hasMeta && !hasShopify) {
+      return alert('Configure at least Meta credentials or Shopify credentials first.');
+    }
+
+    setMegaFetching(true);
+    clearLog();
+    setActiveTab('log');   // jump to log so user can watch
+
+    // ── Step 1: Meta insights ────────────────────────────────────
+    if (hasMeta) {
+      setMegaStep('meta');
+      appendLog('━━━ [1/4] Meta Ads (campaigns · adsets · ads · insights) ━━━');
+      setFetchStatus('loading');
+      try {
+        const results = [];
+        for (const acc of accounts) {
+          const result = await pullAccount(
+            { ver: config.apiVersion, token: config.token, accountKey: acc.key, accountId: acc.id },
+            msg => appendLog(msg),
+          );
+          results.push(result);
+        }
+        setRawAccounts(results);
+        setFetchStatus('success');
+        appendLog('✅ Meta ads complete!');
+      } catch (e) {
+        setFetchStatus('error', e.message);
+        appendLog('❌ Meta error: ' + e.message);
+      }
+
+      // ── Step 2: 7D Breakdowns ──────────────────────────────────
+      setMegaStep('breakdowns');
+      appendLog('━━━ [2/4] 7D Breakdowns ━━━');
+      setBreakdownStatus('loading');
+      try {
+        const bdResult = await pullAllBreakdowns(
+          { ver: config.apiVersion, token: config.token, accounts, specs: BREAKDOWN_SPECS, window: '7D' },
+          msg => appendLog(msg),
+        );
+        setBreakdownData(bdResult);
+        appendLog('✅ Breakdowns complete!');
+      } catch (e) {
+        setBreakdownStatus('error');
+        appendLog('❌ Breakdowns error: ' + e.message);
+      }
+    } else {
+      appendLog('⚠️  Meta not configured — skipping Meta + Breakdowns');
+    }
+
+    // ── Step 3: Shopify Inventory ────────────────────────────────
+    if (hasShopify) {
+      setMegaStep('inventory');
+      appendLog('━━━ [3/4] Shopify Inventory ━━━');
+      setInventoryStatus('loading');
+      try {
+        const map = await fetchShopifyInventory(config.shopifyShop, config.shopifyClientId, config.shopifyClientSecret);
+        setInventoryMap(map);
+        const count = Object.keys(map).length;
+        setInventoryResult({ ok: true, count });
+        appendLog(`✅ Inventory complete — ${count} SKUs loaded`);
+      } catch (e) {
+        setInventoryStatus('error');
+        appendLog('❌ Inventory error: ' + e.message);
+      }
+
+      // ── Step 4: Shopify Orders ─────────────────────────────────
+      setMegaStep('orders');
+      const rangeLabel = ordersDays === 'all' ? 'all time' : `last ${ordersDays}d`;
+      appendLog(`━━━ [4/4] Shopify Orders (${rangeLabel}) ━━━`);
+      setShopifyOrdersStatus('loading');
+      try {
+        const { since, until } = daysToRange(ordersDays);
+        const { orders: fetchedOrders, count, pages } = await fetchShopifyOrders(
+          config.shopifyShop, config.shopifyClientId, config.shopifyClientSecret,
+          since, until,
+          msg => appendLog(msg),
+        );
+        setShopifyOrders(fetchedOrders, ordersDays);
+        setOrdersResult({ ok: true, count });
+        appendLog(`✅ Orders complete — ${count} orders across ${pages} page(s)`);
+      } catch (e) {
+        setShopifyOrdersStatus('error');
+        appendLog('❌ Orders error: ' + e.message);
+      }
+    } else {
+      appendLog('⚠️  Shopify not configured — skipping Inventory + Orders');
+    }
+
+    appendLog('🎉 Pull Everything done! Navigate to any dashboard.');
+    setMegaStep('');
+    setMegaFetching(false);
   };
 
   const handlePull = async () => {
@@ -410,15 +522,70 @@ export default function Setup() {
             )}
           </div>
 
-          {/* Pull button */}
-          <button
-            onClick={handlePull}
-            disabled={fetchStatus === 'loading'}
-            className="flex items-center gap-2 px-6 py-3 bg-brand-600 hover:bg-brand-500 disabled:opacity-50 rounded-xl text-sm font-semibold text-white transition-all shadow-glow"
-          >
-            {fetchStatus === 'loading' ? <Spinner size="sm" /> : <RefreshCw size={16} />}
-            {fetchStatus === 'loading' ? 'Fetching Meta Data...' : 'Pull Meta + Refresh All'}
-          </button>
+          {/* ── PULL EVERYTHING ──────────────────────────────────── */}
+          <div className="bg-gradient-to-br from-brand-900/40 to-violet-900/30 rounded-2xl border border-brand-700/40 p-5 space-y-4">
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 rounded-lg bg-brand-600/30">
+                <Zap size={16} className="text-brand-300" />
+              </div>
+              <div>
+                <div className="text-white font-semibold text-sm">Pull Everything</div>
+                <div className="text-[11px] text-slate-400">Meta ads · 7D breakdowns · Shopify inventory · Shopify orders — one click</div>
+              </div>
+            </div>
+
+            {/* Shopify orders date range (accessible here without scrolling down) */}
+            <div className="flex items-center gap-3">
+              <label className="text-xs text-slate-400 shrink-0">Shopify orders window</label>
+              <select
+                value={ordersDays}
+                onChange={e => setOrdersDays(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                disabled={megaFetching}
+                className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-violet-500 disabled:opacity-50"
+              >
+                <option value={30}>Last 30 days</option>
+                <option value={90}>Last 90 days</option>
+                <option value={180}>Last 180 days</option>
+                <option value={365}>Last 365 days</option>
+                <option value="all">All time</option>
+              </select>
+            </div>
+
+            <button
+              onClick={handlePullEverything}
+              disabled={megaFetching}
+              className="w-full flex items-center justify-center gap-2.5 px-6 py-3.5 bg-brand-600 hover:bg-brand-500 disabled:opacity-50 rounded-xl text-sm font-bold text-white transition-all shadow-glow"
+            >
+              {megaFetching ? <Spinner size="sm" /> : <Zap size={16} />}
+              {megaFetching
+                ? megaStep === 'meta'        ? 'Fetching Meta ads...'
+                : megaStep === 'breakdowns'  ? 'Pulling 7D breakdowns...'
+                : megaStep === 'inventory'   ? 'Fetching Shopify inventory...'
+                : megaStep === 'orders'      ? 'Fetching Shopify orders...'
+                : 'Working...'
+                : 'Pull Everything'}
+            </button>
+
+            {/* Quick step indicators */}
+            {megaFetching && (
+              <div className="flex items-center gap-1 justify-center">
+                {[
+                  { key:'meta',       label:'Meta' },
+                  { key:'breakdowns', label:'Breakdowns' },
+                  { key:'inventory',  label:'Inventory' },
+                  { key:'orders',     label:'Orders' },
+                ].map(({ key, label }) => (
+                  <span key={key} className={`px-2 py-0.5 rounded-full text-[10px] font-medium transition-all ${
+                    megaStep === key
+                      ? 'bg-brand-600/40 text-brand-300 ring-1 ring-brand-500/50'
+                      : 'text-slate-600'
+                  }`}>
+                    {label}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
         </motion.div>
       )}
 
