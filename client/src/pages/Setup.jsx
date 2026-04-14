@@ -29,7 +29,7 @@ export default function Setup() {
   const [inventoryResult, setInventoryResult]     = useState(null);
   const [ordersFetching, setOrdersFetching]       = useState(false);
   const [ordersResult, setOrdersResult]           = useState(null);
-  const [ordersDays, setOrdersDays]               = useState(365);
+  const [ordersDays, setOrdersDays]               = useState(7);
   const [megaFetching, setMegaFetching]     = useState(false);
   const [megaStep, setMegaStep]             = useState('');    // 'meta' | 'breakdowns' | 'inventory' | 'orders'
   const [activeManualAd, setActiveManualAd] = useState(null);
@@ -40,11 +40,16 @@ export default function Setup() {
   const csvFileRef = useRef(null);
   const saveTimerRef = useRef(null);
 
-  // Convert a days number / 'all' to ISO since/until for the orders endpoint
+  // Convert a days number / special string to ISO since/until for the orders endpoint
   const daysToRange = days => {
-    const until = new Date().toISOString();
-    if (days === 'all') return { since: null, until };
-    return { since: new Date(Date.now() - Number(days) * 86400000).toISOString(), until };
+    const now = new Date();
+    if (days === 'all') return { since: null, until: now.toISOString() };
+    if (days === 'yesterday') {
+      const y = new Date(now); y.setDate(y.getDate() - 1);
+      const d = y.toISOString().slice(0, 10);
+      return { since: `${d}T00:00:00.000Z`, until: `${d}T23:59:59.999Z` };
+    }
+    return { since: new Date(now - Number(days) * 86400000).toISOString(), until: now.toISOString() };
   };
 
   // Show a brief "Saved" flash whenever config changes
@@ -492,9 +497,12 @@ export default function Setup() {
               <label className="text-xs text-slate-400 shrink-0">Date range</label>
               <select
                 value={ordersDays}
-                onChange={e => setOrdersDays(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                onChange={e => { const v = e.target.value; setOrdersDays(['all','yesterday'].includes(v) ? v : Number(v)); }}
                 className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-violet-500"
               >
+                <option value="yesterday">Yesterday</option>
+                <option value={7}>Last 7 days</option>
+                <option value={14}>Last 14 days</option>
                 <option value={30}>Last 30 days</option>
                 <option value={90}>Last 90 days</option>
                 <option value={180}>Last 180 days</option>
@@ -539,10 +547,13 @@ export default function Setup() {
               <label className="text-xs text-slate-400 shrink-0">Shopify orders window</label>
               <select
                 value={ordersDays}
-                onChange={e => setOrdersDays(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                onChange={e => { const v = e.target.value; setOrdersDays(['all','yesterday'].includes(v) ? v : Number(v)); }}
                 disabled={megaFetching}
                 className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-violet-500 disabled:opacity-50"
               >
+                <option value="yesterday">Yesterday</option>
+                <option value={7}>Last 7 days</option>
+                <option value={14}>Last 14 days</option>
                 <option value={30}>Last 30 days</option>
                 <option value={90}>Last 90 days</option>
                 <option value={180}>Last 180 days</option>
