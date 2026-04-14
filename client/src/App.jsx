@@ -12,6 +12,7 @@ import SkuInsights from './pages/SkuInsights';
 import Breakdowns from './pages/Breakdowns';
 import ShopifyOrders from './pages/ShopifyOrders';
 import ShopifyInsights from './pages/ShopifyInsights';
+import GAInsights from './pages/GAInsights';
 
 export default function App() {
   return (
@@ -33,6 +34,7 @@ export default function App() {
           <Route path="/breakdowns" element={<Breakdowns />} />
           <Route path="/shopify"          element={<ShopifyOrders />} />
           <Route path="/shopify-insights" element={<ShopifyInsights />} />
+          <Route path="/ga" element={<GAInsights />} />
           <Route path="*"           element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

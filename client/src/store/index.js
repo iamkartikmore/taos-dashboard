@@ -31,6 +31,7 @@ export function makeBrand(name = 'New Brand', idx = 0) {
     color:   BRAND_COLORS[idx % BRAND_COLORS.length],
     meta:    { token: '', apiVersion: 'v21.0', accounts: [] },
     shopify: { shop: '', clientId: '', clientSecret: '' },
+    ga:      { propertyId: '', serviceAccountJson: '' },
   };
 }
 
@@ -262,6 +263,16 @@ export const useStore = create((set, get) => {
 
     setBrandOrdersStatus: (brandId, status, error = null) => {
       const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), ordersStatus: status, ordersError: error } };
+      set({ brandData });
+    },
+
+    setBrandGaData: (brandId, data) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), gaData: data, gaStatus: 'success', gaFetchAt: Date.now() } };
+      set({ brandData });
+    },
+
+    setBrandGaStatus: (brandId, status, error = null) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), gaStatus: status, gaError: error } };
       set({ brandData });
     },
 

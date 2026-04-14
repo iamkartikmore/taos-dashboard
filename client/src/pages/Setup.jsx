@@ -3,10 +3,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key, Users,
   BookOpen, Upload, ShoppingBag, Zap, ChevronDown, ChevronRight,
-  Palette,
+  Palette, Activity,
 } from 'lucide-react';
 import { useStore, makeBrand, BRAND_COLORS } from '../store';
-import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders } from '../lib/api';
+import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData } from '../lib/api';
 import { BREAKDOWN_SPECS, pullAllBreakdowns } from '../lib/breakdownApi';
 import { parseCsv, csvRowsToManualMap, detectListsFromCsvRows } from '../lib/csvImport';
 import Spinner from '../components/ui/Spinner';
@@ -49,6 +49,7 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
     setBrandMetaData, setBrandMetaStatus,
     setBrandInventory, setBrandInventoryStatus,
     setBrandOrders, setBrandOrdersStatus,
+    setBrandGaData, setBrandGaStatus,
     appendLog,
   } = useStore();
 
@@ -62,9 +63,11 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
   const metaStatus      = bd.metaStatus      || 'idle';
   const inventoryStatus = bd.inventoryStatus || 'idle';
   const ordersStatus    = bd.ordersStatus    || 'idle';
+  const gaStatus        = bd.gaStatus        || 'idle';
   const hasToken   = !!brand.meta.token;
   const hasAccts   = brand.meta.accounts.filter(a => a.key && a.id).length > 0;
   const hasShopify = brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret;
+  const hasGa      = brand.ga?.propertyId && brand.ga?.serviceAccountJson;
 
   const handleVerify = async () => {
     if (!hasToken) return;
@@ -132,6 +135,23 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
     } catch (e) {
       setBrandOrdersStatus(brand.id, 'error', e.message);
       appendLog(`[${brand.name}] ❌ Orders error: ${e.message}`);
+    }
+  };
+
+  const handlePullGa = async () => {
+    if (!brand.ga?.propertyId || !brand.ga?.serviceAccountJson) return;
+    setBrandGaStatus(brand.id, 'loading');
+    try {
+      const data = await fetchGaData(
+        brand.ga.serviceAccountJson, brand.ga.propertyId,
+        null, // use default 365d range
+        msg => appendLog(`[${brand.name}] ${msg}`),
+      );
+      setBrandGaData(brand.id, data);
+      appendLog(`[${brand.name}] ✅ GA — ${data.dailyTrend?.length || 0} days of data`);
+    } catch (e) {
+      setBrandGaStatus(brand.id, 'error', e.message);
+      appendLog(`[${brand.name}] ❌ GA error: ${e.message}`);
     }
   };
 
@@ -327,6 +347,63 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
                   )}
                 </div>
               </div>
+
+              {/* ── GOOGLE ANALYTICS ───────────────────────────────── */}
+              <div className="space-y-3 xl:col-span-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-widest">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+                  Google Analytics 4
+                  <StatusDot status={gaStatus} />
+                  {bd.gaFetchAt && <span className="text-[10px] text-slate-600 font-normal ml-1">Last: {new Date(bd.gaFetchAt).toLocaleTimeString()}</span>}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">GA4 Property ID</label>
+                    <input type="text"
+                      value={brand.ga?.propertyId || ''}
+                      onChange={e => updateBrand(brand.id, { ga: { ...brand.ga, propertyId: e.target.value } })}
+                      placeholder="123456789"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-blue-500" />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">Service Account JSON</label>
+                    <div className="flex gap-2">
+                      <label className="flex-1 flex items-center gap-2 px-3 py-2 bg-gray-800 border border-gray-700 hover:border-blue-500 rounded-lg text-xs text-slate-400 cursor-pointer transition-colors truncate">
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                        {brand.ga?.serviceAccountJson ? <span className="text-emerald-400">JSON loaded ✓</span> : 'Upload service-account.json'}
+                        <input type="file" accept=".json,application/json" className="hidden"
+                          onChange={async e => {
+                            const file = e.target.files?.[0];
+                            if (!file) return;
+                            const text = await file.text();
+                            try { JSON.parse(text); updateBrand(brand.id, { ga: { ...brand.ga, serviceAccountJson: text } }); }
+                            catch { appendLog(`[${brand.name}] ❌ Invalid JSON file`); }
+                            e.target.value = '';
+                          }} />
+                      </label>
+                      {brand.ga?.serviceAccountJson && (
+                        <button onClick={() => updateBrand(brand.id, { ga: { ...brand.ga, serviceAccountJson: '' } })}
+                          className="px-2 py-1.5 bg-gray-800 hover:bg-red-900/30 border border-gray-700 rounded-lg text-xs text-slate-500 hover:text-red-400 transition-colors">✕</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 flex-wrap">
+                  <button onClick={handlePullGa} disabled={!hasGa || gaStatus === 'loading'}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-700/30 hover:bg-blue-700/50 disabled:opacity-30 rounded-lg text-xs font-medium text-blue-300 transition-all border border-blue-700/30">
+                    {gaStatus === 'loading' ? <Spinner size="sm" /> : <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>}
+                    Pull GA4 Data
+                  </button>
+                  {bd.gaData && (
+                    <span className="px-2 py-0.5 rounded-full bg-blue-900/30 text-blue-400 text-[10px]">
+                      {bd.gaData.dailyTrend?.length || 0}d trend · {bd.gaData.campaigns?.length || 0} campaigns
+                    </span>
+                  )}
+                </div>
+              </div>
             </div>
           </motion.div>
         )}
@@ -345,6 +422,7 @@ export default function Setup() {
     setBrandMetaData, setBrandMetaStatus,
     setBrandInventory, setBrandInventoryStatus,
     setBrandOrders, setBrandOrdersStatus,
+    setBrandGaData, setBrandGaStatus,
     setBreakdownData, setBreakdownStatus,
   } = useStore();
 
@@ -473,6 +551,26 @@ export default function Setup() {
       } else {
         appendLog(`[${brand.name}] ⚠️ Shopify not configured — skipped`);
       }
+
+      // GA
+      if (brand.ga?.propertyId && brand.ga?.serviceAccountJson) {
+        setMegaStep(`${brand.id}:ga`);
+        appendLog(`[${brand.name}] Fetching Google Analytics...`);
+        setBrandGaStatus(brand.id, 'loading');
+        try {
+          const gaResult = await fetchGaData(
+            brand.ga.serviceAccountJson, brand.ga.propertyId,
+            null, msg => appendLog(`[${brand.name}] ${msg}`),
+          );
+          setBrandGaData(brand.id, gaResult);
+          appendLog(`[${brand.name}] ✅ GA — ${gaResult.dailyTrend?.length || 0}d`);
+        } catch (e) {
+          setBrandGaStatus(brand.id, 'error', e.message);
+          appendLog(`[${brand.name}] ❌ GA: ${e.message}`);
+        }
+      } else {
+        appendLog(`[${brand.name}] ⚠️ GA not configured — skipped`);
+      }
     }
 
     appendLog('🎉 Pull Everything complete!');
@@ -540,7 +638,7 @@ export default function Setup() {
               <div className="p-1.5 rounded-lg bg-brand-600/30"><Zap size={16} className="text-brand-300" /></div>
               <div>
                 <div className="text-white font-bold text-sm">Pull Everything</div>
-                <div className="text-[11px] text-slate-400">{brands.length} brand{brands.length > 1 ? 's' : ''} · Meta ads · 7D breakdowns · Shopify inventory + orders</div>
+                <div className="text-[11px] text-slate-400">{brands.length} brand{brands.length > 1 ? 's' : ''} · Meta ads · 7D breakdowns · Shopify inventory + orders · Google Analytics</div>
               </div>
             </div>
 

@@ -227,6 +227,108 @@ app.post('/api/shopify/orders/stream', async (req, res) => {
   res.end();
 });
 
+// Google Analytics 4 Data API proxy — signs JWT server-side so private key never hits the browser
+app.post('/api/ga/report', async (req, res) => {
+  const { serviceAccountJson, propertyId, reports, dateRange } = req.body;
+  if (!serviceAccountJson || !propertyId) return res.status(400).json({ error: 'serviceAccountJson and propertyId required' });
+  try {
+    const { GoogleAuth } = require('google-auth-library');
+    let creds;
+    try { creds = typeof serviceAccountJson === 'string' ? JSON.parse(serviceAccountJson) : serviceAccountJson; }
+    catch { return res.status(400).json({ error: 'Invalid serviceAccountJson — must be valid JSON' }); }
+
+    const auth = new GoogleAuth({ credentials: creds, scopes: ['https://www.googleapis.com/auth/analytics.readonly'] });
+    const client = await auth.getClient();
+    const tokenResponse = await client.getAccessToken();
+    const accessToken = tokenResponse.token;
+
+    const since = dateRange?.since || '365daysAgo';
+    const until = dateRange?.until || 'today';
+
+    // Build batch reports
+    const batchReports = [
+      // 0: Daily trend (full date range)
+      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'date'}],
+        metrics:['sessions','totalUsers','newUsers','engagedSessions','bounceRate','screenPageViews','conversions','purchaseRevenue','averageSessionDuration'].map(n=>({name:n})) },
+      // 1: Source / Medium
+      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'sessionSourceMedium'},{name:'sessionDefaultChannelGrouping'}],
+        metrics:['sessions','totalUsers','newUsers','conversions','purchaseRevenue','bounceRate','engagementRate'].map(n=>({name:n})), limit:150 },
+      // 2: Campaign + source + medium
+      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'sessionCampaignName'},{name:'sessionSource'},{name:'sessionMedium'}],
+        metrics:['sessions','newUsers','conversions','purchaseRevenue','engagementRate'].map(n=>({name:n})), limit:200 },
+      // 3: Landing pages
+      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'landingPagePlusQueryString'}],
+        metrics:['sessions','totalUsers','bounceRate','conversions','engagementRate','screenPageViews'].map(n=>({name:n})), limit:200 },
+      // 4: Device + OS
+      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'deviceCategory'},{name:'operatingSystem'}],
+        metrics:['sessions','totalUsers','newUsers','conversions','purchaseRevenue'].map(n=>({name:n})) },
+      // 5: Geo — country + region + city
+      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'country'},{name:'region'},{name:'city'}],
+        metrics:['sessions','totalUsers','conversions','purchaseRevenue'].map(n=>({name:n})), limit:200 },
+      // 6: Page performance
+      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'pageTitle'},{name:'fullPageUrl'}],
+        metrics:['screenPageViews','averageSessionDuration','bounceRate','engagedSessions'].map(n=>({name:n})), limit:200 },
+      // 7: Events
+      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'eventName'}],
+        metrics:['eventCount','totalUsers','conversions'].map(n=>({name:n})), limit:50 },
+      // 8: Ecommerce items
+      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'itemName'},{name:'itemId'},{name:'itemCategory'},{name:'itemBrand'}],
+        metrics:['itemRevenue','itemsSold','addToCarts','checkouts','itemPurchaseQuantity'].map(n=>({name:n})), limit:200 },
+      // 9: UTM full drill (source + medium + campaign + content)
+      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'sessionSource'},{name:'sessionMedium'},{name:'sessionCampaignName'},{name:'sessionManualAdContent'}],
+        metrics:['sessions','newUsers','conversions','purchaseRevenue'].map(n=>({name:n})), limit:500 },
+      // 10: Browser
+      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'browser'},{name:'deviceCategory'}],
+        metrics:['sessions','totalUsers','conversions'].map(n=>({name:n})), limit:30 },
+      // 11: User type (new vs returning)
+      { dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'newVsReturning'}],
+        metrics:['sessions','totalUsers','conversions','purchaseRevenue','engagementRate'].map(n=>({name:n})) },
+      // 12: Monthly trend (last 24 months)
+      { dateRanges:[{startDate:'730daysAgo',endDate:until}], dimensions:[{name:'yearMonth'}],
+        metrics:['sessions','totalUsers','newUsers','conversions','purchaseRevenue'].map(n=>({name:n})) },
+    ];
+
+    const batchResp = await axios.post(
+      `https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:batchRunReports`,
+      { requests: batchReports },
+      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, timeout: 60000 }
+    );
+
+    // Parse helper: GA returns dimension/metric headers + rows
+    const parse = (report) => {
+      if (!report) return [];
+      const dimNames = (report.dimensionHeaders||[]).map(h=>h.name);
+      const metNames = (report.metricHeaders||[]).map(h=>h.name);
+      return (report.rows||[]).map(row => {
+        const obj = {};
+        (row.dimensionValues||[]).forEach((v,i) => { obj[dimNames[i]] = v.value; });
+        (row.metricValues||[]).forEach((v,i)  => { obj[metNames[i]]  = parseFloat(v.value)||0; });
+        return obj;
+      });
+    };
+
+    const r = batchResp.data.reports || [];
+    res.json({
+      dailyTrend:    parse(r[0]),
+      sourceMedium:  parse(r[1]),
+      campaigns:     parse(r[2]),
+      landingPages:  parse(r[3]),
+      devices:       parse(r[4]),
+      geo:           parse(r[5]),
+      pages:         parse(r[6]),
+      events:        parse(r[7]),
+      items:         parse(r[8]),
+      utmDrill:      parse(r[9]),
+      browsers:      parse(r[10]),
+      userType:      parse(r[11]),
+      monthlyTrend:  parse(r[12]),
+    });
+  } catch (err) {
+    const msg = err.response?.data?.error?.message || err.message;
+    res.status(err.response?.status||500).json({ error: msg });
+  }
+});
+
 // Health check
 app.get('/api/health', (_, res) => res.json({ ok: true }));
 

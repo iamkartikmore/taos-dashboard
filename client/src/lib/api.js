@@ -238,6 +238,21 @@ export async function fetchShopifyOrders(shop, clientId, clientSecret, since, un
   return { orders: result.orders, count: result.count || accOrders.length, pages: result.pages || 1, fetchMs: result.fetchMs || 0 };
 }
 
+/* ─── GOOGLE ANALYTICS 4 ─────────────────────────────────────────── */
+
+export async function fetchGaData(serviceAccountJson, propertyId, dateRange, onProgress) {
+  onProgress?.('Connecting to Google Analytics...');
+  const res = await fetch('/api/ga/report', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ serviceAccountJson, propertyId, dateRange }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'GA API error');
+  onProgress?.(`✓ GA data loaded`);
+  return json;
+}
+
 /* ─── VERIFY TOKEN ───────────────────────────────────────────────── */
 
 export async function verifyToken(token, ver = 'v21.0') {
