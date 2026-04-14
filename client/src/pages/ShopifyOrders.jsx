@@ -2,10 +2,10 @@ import { useMemo, useState, useRef, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
-  LineChart, Line, CartesianGrid, Legend,
+  LineChart, Line, CartesianGrid,
 } from 'recharts';
 import {
-  ShoppingBag, TrendingUp, Users, Tag, RefreshCw,
+  ShoppingBag, Users, Tag, RefreshCw,
   AlertTriangle, Package, Download, ChevronDown, ChevronUp,
   Terminal, Zap, ArrowRight, BarChart2, Globe, Truck,
 } from 'lucide-react';
@@ -89,11 +89,11 @@ function ExportBtn({ onClick }) {
 
 /* ─── SMALL COMPONENTS ───────────────────────────────────────────── */
 
-function KPI({ label, value, sub, color = '#2d7cf6', highlight }) {
+function KPI({ label, value, sub, color, highlight }) {
   return (
     <div className={`bg-gray-900 border rounded-xl p-4 ${highlight ? 'border-emerald-500/30' : 'border-gray-800'}`}>
       <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-1">{label}</div>
-      <div className="text-xl font-bold text-white">{value}</div>
+      <div className="text-xl font-bold" style={{ color: color || '#fff' }}>{value}</div>
       {sub && <div className="text-[10px] text-slate-500 mt-0.5">{sub}</div>}
     </div>
   );
@@ -207,7 +207,7 @@ function UtmTree({ list }) {
 
 export default function ShopifyOrders() {
   const {
-    brands, shopifyOrders, shopifyOrdersStatus, shopifyOrdersWindow,
+    brands, shopifyOrders, shopifyOrdersWindow,
     setShopifyOrders, setShopifyOrdersStatus, inventoryMap,
   } = useStore();
 
@@ -231,6 +231,9 @@ export default function ShopifyOrders() {
   const [skuSort, setSkuSort]     = useState('revenue');
   const [skuSearch, setSkuSearch] = useState('');
   const [skuRole, setSkuRole]     = useState('all');
+
+  // Ops / Warehouse tab
+  const [whFilter, setWhFilter]     = useState(null);  // null = all, string = selected tag
 
   // Customers tab
   const [custSearch, setCustSearch] = useState('');
@@ -1175,7 +1178,7 @@ export default function ShopifyOrders() {
                     </tr>
                   </thead>
                   <tbody>
-                    {data.discList.map((d, i) => (
+                    {data.discList.map((d) => (
                       <tr key={d.code} className="border-b border-gray-800/40 hover:bg-gray-800/30">
                         <td className="px-2 py-1.5 font-mono text-[11px] text-slate-200 font-semibold">{d.code}</td>
                         <td className="px-2 py-1.5 text-right tabular-nums text-slate-300">{num(d.uses)}</td>
@@ -1246,7 +1249,7 @@ export default function ShopifyOrders() {
                     </tr>
                   </thead>
                   <tbody>
-                    {data.geoList.map((g, i) => (
+                    {data.geoList.map((g) => (
                       <tr key={g.province} className="border-b border-gray-800/40 hover:bg-gray-800/30">
                         <td className="px-2 py-1.5 text-slate-300">{g.province}</td>
                         <td className="px-2 py-1.5 text-right tabular-nums text-slate-400">{num(g.orders)}</td>
@@ -1265,22 +1268,317 @@ export default function ShopifyOrders() {
               OPERATIONS
           ═══════════════════════════════════════════════════════════ */}
           {tab === 'ops' && (
-            <motion.div initial={{ opacity:0,y:8 }} animate={{ opacity:1,y:0 }} className="space-y-4">
+            <motion.div initial={{ opacity:0,y:8 }} animate={{ opacity:1,y:0 }} className="space-y-6">
 
-              {/* Fulfillment velocity */}
-              <div>
-                <ST>Fulfillment Velocity</ST>
-                {data.fulfillStats ? (
+              {/* ── Global fulfillment KPIs ── */}
+              {data.fulfillStats && (
+                <div>
+                  <ST>Overall Fulfillment Velocity</ST>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <KPI label="Avg Time to Ship"    value={hrs(data.fulfillStats.avg)}    sub={`median ${hrs(data.fulfillStats.median)}`} />
-                    <KPI label="p90 Time to Ship"    value={hrs(data.fulfillStats.p90)}    sub="90th percentile" />
-                    <KPI label="Shipped &lt;24h"    value={pct(data.fulfillStats.under24h / data.fulfillStats.count * 100)} sub={`${num(data.fulfillStats.under24h)} orders`} />
-                    <KPI label="Shipped &gt;72h"    value={num(data.fulfillStats.over72h)} sub="orders slow shipped" />
+                    <KPI label="Avg Time to Ship"  value={hrs(data.fulfillStats.avg)}    sub={`median ${hrs(data.fulfillStats.median)}`} />
+                    <KPI label="p90 Time to Ship"  value={hrs(data.fulfillStats.p90)}    sub="90th percentile" />
+                    <KPI label="Shipped &lt;24h"  value={pct(data.fulfillStats.under24h / data.fulfillStats.count * 100)} sub={`${num(data.fulfillStats.under24h)} orders`} color="#22c55e" />
+                    <KPI label="Shipped &gt;72h"  value={num(data.fulfillStats.over72h)} sub="slow orders" color="#ef4444" />
                   </div>
-                ) : (
-                  <div className="text-slate-600 text-sm py-4">No fulfillment data found — fulfillment data requires fulfilled orders.</div>
-                )}
-              </div>
+                </div>
+              )}
+
+              {/* ── Warehouse Intelligence ── */}
+              {(() => {
+                const wd = data.warehouseData;
+                if (!wd?.hasTagData) return (
+                  <Card>
+                    <div className="text-slate-500 text-sm text-center py-6">
+                      No order tags found — warehouse analytics requires orders to have Shopify tags.<br/>
+                      <span className="text-slate-600 text-xs">Re-fetch orders after tags have been assigned in Shopify.</span>
+                    </div>
+                  </Card>
+                );
+
+                const whs = wd.warehouses;
+                const selectedWh = whFilter ? whs.find(w => w.tag === whFilter) : null;
+                const maxOrders  = whs[0]?.orders || 1;
+
+                const effColor = s => s >= 80 ? '#22c55e' : s >= 60 ? '#3b82f6' : s >= 40 ? '#f59e0b' : '#ef4444';
+
+                return (
+                  <>
+                    {/* Header + filter */}
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div>
+                        <h2 className="text-sm font-semibold text-slate-200">Warehouse Intelligence</h2>
+                        <p className="text-[10px] text-slate-500 mt-0.5">{whs.length} tag{whs.length !== 1 ? 's' : ''} detected across {num(data.overview.orders + data.overview.cancelledCount)} orders</p>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <ExportBtn onClick={() => exportCSV('warehouse-analytics.csv', whs, [
+                          { key:'tag', label:'Warehouse/Tag' },
+                          { key:'orders', label:'Orders' },
+                          { key:'revenue', label:'Revenue', fn: r => dec(r.revenue,0) },
+                          { key:'aov', label:'AOV', fn: r => dec(r.aov,0) },
+                          { key:'cancelPct', label:'Cancel%' },
+                          { key:'refundPct', label:'Refund%' },
+                          { key:'newPct', label:'New Cust%' },
+                          { key:'effScore', label:'Eff Score' },
+                          { key:'fulfillStats', label:'Avg Ship (h)', fn: r => r.fulfillStats?.avg ?? '' },
+                          { key:'fulfillStats', label:'SLA <24h%', fn: r => r.fulfillStats?.sla24hPct ?? '' },
+                        ])} />
+                        <select value={whFilter || ''} onChange={e => setWhFilter(e.target.value || null)}
+                          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-brand-500">
+                          <option value="">All warehouses</option>
+                          {whs.map(w => <option key={w.tag} value={w.tag}>{w.tag}</option>)}
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Performance comparison table */}
+                    <Card className="overflow-x-auto">
+                      <table className="w-full text-xs min-w-[700px]">
+                        <thead>
+                          <tr className="border-b border-gray-700">
+                            {['Warehouse / Tag','Orders','Revenue','AOV','Eff Score','Avg Ship','SLA <24h','Cancel%','Refund%','New%'].map(h => (
+                              <th key={h} className="text-left px-2 py-2 text-[10px] text-slate-500 font-semibold uppercase tracking-wider first:pl-0">{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(whFilter ? [selectedWh].filter(Boolean) : whs).map(w => (
+                            <tr key={w.tag}
+                              onClick={() => setWhFilter(whFilter === w.tag ? null : w.tag)}
+                              className={`border-b border-gray-800/40 cursor-pointer transition-colors ${whFilter === w.tag ? 'bg-brand-600/10' : 'hover:bg-gray-800/30'}`}>
+                              <td className="px-0 py-2 font-semibold text-slate-200 max-w-[140px] truncate">{w.tag}</td>
+                              <td className="px-2 py-2">
+                                <div className="flex items-center gap-1.5">
+                                  <div className="w-16 h-1 bg-gray-800 rounded-full overflow-hidden">
+                                    <div className="h-full bg-blue-500/70 rounded-full" style={{ width:`${w.orders/maxOrders*100}%` }} />
+                                  </div>
+                                  <span className="tabular-nums text-slate-300 font-semibold">{num(w.orders)}</span>
+                                </div>
+                              </td>
+                              <td className="px-2 py-2 tabular-nums text-emerald-400 font-semibold">{cur(w.revenue)}</td>
+                              <td className="px-2 py-2 tabular-nums text-slate-400">{cur(w.aov)}</td>
+                              <td className="px-2 py-2">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold"
+                                  style={{ background:`${effColor(w.effScore)}22`, color:effColor(w.effScore) }}>
+                                  {w.effScore}/100 · {w.effLabel}
+                                </span>
+                              </td>
+                              <td className="px-2 py-2 tabular-nums text-slate-400">{w.fulfillStats ? hrs(w.fulfillStats.avg) : '—'}</td>
+                              <td className="px-2 py-2">
+                                {w.fulfillStats ? (
+                                  <span className={`tabular-nums font-semibold ${w.fulfillStats.sla24hPct >= 80 ? 'text-emerald-400' : w.fulfillStats.sla24hPct >= 50 ? 'text-amber-400' : 'text-red-400'}`}>
+                                    {w.fulfillStats.sla24hPct}%
+                                  </span>
+                                ) : '—'}
+                              </td>
+                              <td className="px-2 py-2">
+                                <span className={`tabular-nums ${w.cancelPct > 10 ? 'text-red-400' : w.cancelPct > 5 ? 'text-amber-400' : 'text-slate-400'}`}>{w.cancelPct}%</span>
+                              </td>
+                              <td className="px-2 py-2">
+                                <span className={`tabular-nums ${w.refundPct > 10 ? 'text-red-400' : w.refundPct > 5 ? 'text-amber-400' : 'text-slate-400'}`}>{w.refundPct}%</span>
+                              </td>
+                              <td className="px-2 py-2 tabular-nums text-slate-400">{w.newPct}%</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </Card>
+
+                    {/* Charts row */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+                      {/* Avg fulfillment time per warehouse */}
+                      <Card>
+                        <ST>Avg Time to Ship by Warehouse (hours)</ST>
+                        {whs.some(w => w.fulfillStats) ? (
+                          <ResponsiveContainer width="100%" height={180}>
+                            <BarChart data={whs.filter(w => w.fulfillStats).slice(0,12)}
+                              layout="vertical" margin={{ left:8, right:24, top:4, bottom:4 }}>
+                              <XAxis type="number" tick={{ fill:'#64748b', fontSize:10 }} />
+                              <YAxis type="category" dataKey="tag" width={90} tick={{ fill:'#94a3b8', fontSize:10 }} />
+                              <Tooltip formatter={(v) => [`${dec(v,1)}h`, 'Avg Ship']}
+                                contentStyle={{ background:'#111827', border:'1px solid #374151', borderRadius:8, fontSize:11 }} />
+                              <Bar dataKey="fulfillStats.avg" name="Avg Ship (h)" radius={[0,4,4,0]}>
+                                {whs.filter(w => w.fulfillStats).slice(0,12).map((w) => (
+                                  <Cell key={w.tag} fill={w.fulfillStats.avg <= 24 ? '#22c55e' : w.fulfillStats.avg <= 48 ? '#f59e0b' : '#ef4444'} />
+                                ))}
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        ) : <div className="text-slate-600 text-xs py-8 text-center">No fulfillment timestamps available</div>}
+                      </Card>
+
+                      {/* SLA compliance (% shipped <24h) */}
+                      <Card>
+                        <ST>SLA Compliance — Shipped &lt;24h (%)</ST>
+                        {whs.some(w => w.fulfillStats) ? (
+                          <ResponsiveContainer width="100%" height={180}>
+                            <BarChart data={whs.filter(w => w.fulfillStats).slice(0,12)}
+                              layout="vertical" margin={{ left:8, right:24, top:4, bottom:4 }}>
+                              <XAxis type="number" domain={[0,100]} tick={{ fill:'#64748b', fontSize:10 }} />
+                              <YAxis type="category" dataKey="tag" width={90} tick={{ fill:'#94a3b8', fontSize:10 }} />
+                              <Tooltip formatter={(v) => [`${v}%`, 'SLA <24h']}
+                                contentStyle={{ background:'#111827', border:'1px solid #374151', borderRadius:8, fontSize:11 }} />
+                              <Bar dataKey="fulfillStats.sla24hPct" name="SLA <24h%" radius={[0,4,4,0]}>
+                                {whs.filter(w => w.fulfillStats).slice(0,12).map(w => (
+                                  <Cell key={w.tag} fill={w.fulfillStats.sla24hPct >= 80 ? '#22c55e' : w.fulfillStats.sla24hPct >= 50 ? '#f59e0b' : '#ef4444'} />
+                                ))}
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        ) : <div className="text-slate-600 text-xs py-8 text-center">No fulfillment timestamps available</div>}
+                      </Card>
+
+                      {/* Order volume by warehouse */}
+                      <Card>
+                        <ST>Order Volume by Warehouse</ST>
+                        <ResponsiveContainer width="100%" height={180}>
+                          <BarChart data={whs.slice(0,12)} layout="vertical" margin={{ left:8, right:24, top:4, bottom:4 }}>
+                            <XAxis type="number" tick={{ fill:'#64748b', fontSize:10 }} />
+                            <YAxis type="category" dataKey="tag" width={90} tick={{ fill:'#94a3b8', fontSize:10 }} />
+                            <Tooltip contentStyle={{ background:'#111827', border:'1px solid #374151', borderRadius:8, fontSize:11 }} />
+                            <Bar dataKey="orders" name="Orders" radius={[0,4,4,0]}>
+                              {whs.slice(0,12).map((w,i) => <Cell key={w.tag} fill={C[i%C.length]} />)}
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </Card>
+
+                      {/* Revenue by warehouse */}
+                      <Card>
+                        <ST>Revenue by Warehouse</ST>
+                        <ResponsiveContainer width="100%" height={180}>
+                          <BarChart data={whs.slice(0,12)} layout="vertical" margin={{ left:8, right:24, top:4, bottom:4 }}>
+                            <XAxis type="number" tick={{ fill:'#64748b', fontSize:10 }} tickFormatter={v => `₹${(v/1000).toFixed(0)}k`} />
+                            <YAxis type="category" dataKey="tag" width={90} tick={{ fill:'#94a3b8', fontSize:10 }} />
+                            <Tooltip formatter={v => [cur(v), 'Revenue']}
+                              contentStyle={{ background:'#111827', border:'1px solid #374151', borderRadius:8, fontSize:11 }} />
+                            <Bar dataKey="revenue" name="Revenue" radius={[0,4,4,0]}>
+                              {whs.slice(0,12).map((w,i) => <Cell key={w.tag} fill={C[i%C.length]} />)}
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      </Card>
+                    </div>
+
+                    {/* Drill-down: selected warehouse detail */}
+                    {selectedWh && (
+                      <Card>
+                        <div className="flex items-center justify-between mb-4">
+                          <h2 className="text-sm font-semibold text-white">
+                            <span className="text-brand-400">{selectedWh.tag}</span> — Deep Dive
+                          </h2>
+                          <button onClick={() => setWhFilter(null)} className="text-xs text-slate-500 hover:text-slate-300">✕ Close</button>
+                        </div>
+
+                        {/* KPI row */}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+                          <KPI label="Orders"       value={num(selectedWh.orders)}        sub={`${selectedWh.newPct}% new customers`} />
+                          <KPI label="Revenue"      value={cur(selectedWh.revenue)}       sub={`AOV ${cur(selectedWh.aov)}`} color="#22c55e" />
+                          <KPI label="Eff Score"    value={`${selectedWh.effScore}/100`}  sub={selectedWh.effLabel} color={effColor(selectedWh.effScore)} />
+                          <KPI label="Unique SKUs"  value={num(selectedWh.uniqueSkus)}    sub={`${selectedWh.avgItemsPerOrder} items/order avg`} />
+                        </div>
+                        {selectedWh.fulfillStats && (
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+                            <KPI label="Avg Ship Time" value={hrs(selectedWh.fulfillStats.avg)}       sub={`p90: ${hrs(selectedWh.fulfillStats.p90)}`} />
+                            <KPI label="SLA &lt;24h"   value={`${selectedWh.fulfillStats.sla24hPct}%`} sub={`${num(selectedWh.fulfillStats.under24h)} orders`} color="#22c55e" />
+                            <KPI label="Slow &gt;72h"  value={`${selectedWh.fulfillStats.slowPct}%`}   sub={`${num(selectedWh.fulfillStats.over72h)} orders`} color="#ef4444" />
+                            <KPI label="Fulfilled"     value={num(selectedWh.fulfillStats.count)}      sub="with timestamps" />
+                          </div>
+                        )}
+
+                        {/* Daily trend */}
+                        {selectedWh.byDay.length > 1 && (
+                          <div className="mb-5">
+                            <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2">Daily Order Trend</div>
+                            <ResponsiveContainer width="100%" height={100}>
+                              <LineChart data={selectedWh.byDay}>
+                                <XAxis dataKey="date" hide />
+                                <Tooltip formatter={(v,n) => [n === 'revenue' ? cur(v) : num(v), n]}
+                                  contentStyle={{ background:'#111827', border:'1px solid #374151', borderRadius:8, fontSize:11 }} />
+                                <Line type="monotone" dataKey="orders" stroke="#3b82f6" dot={false} strokeWidth={2} />
+                              </LineChart>
+                            </ResponsiveContainer>
+                          </div>
+                        )}
+
+                        {/* Hourly pattern */}
+                        <div className="mb-5">
+                          <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2">
+                            Order Pattern by Hour (peak: {String(selectedWh.peakHour).padStart(2,'0')}:00)
+                          </div>
+                          <div className="flex items-end gap-0.5 h-12">
+                            {selectedWh.hourCounts.map(({ hour, count }) => {
+                              const max = Math.max(...selectedWh.hourCounts.map(h => h.count), 1);
+                              return (
+                                <div key={hour} className="flex-1 flex flex-col items-center gap-0.5 group relative">
+                                  <div className="w-full rounded-t-sm transition-all"
+                                    style={{ height:`${(count/max*100)}%`, minHeight: count > 0 ? 2 : 0,
+                                      background: hour === selectedWh.peakHour ? '#3b82f6' : '#374151' }} />
+                                  <div className="absolute bottom-full mb-1 hidden group-hover:block bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] text-slate-300 whitespace-nowrap z-10">
+                                    {String(hour).padStart(2,'0')}:00 — {num(count)} orders
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                          <div className="flex justify-between text-[9px] text-slate-700 mt-1">
+                            <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:00</span>
+                          </div>
+                        </div>
+
+                        {/* Status breakdown */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div>
+                            <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2">Fulfillment Status</div>
+                            <div className="space-y-1">
+                              {selectedWh.fulfillStatuses.map(({ status, count: c }) => (
+                                <div key={status} className="flex items-center gap-2 text-xs">
+                                  <span className="w-24 truncate capitalize text-slate-400">{status.replace(/_/g,' ')}</span>
+                                  <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                                    <div className="h-full rounded-full bg-blue-500/60" style={{ width:`${c/selectedWh.orders*100}%` }} />
+                                  </div>
+                                  <span className="w-8 text-right tabular-nums text-slate-500">{num(c)}</span>
+                                  <span className="w-10 text-right tabular-nums text-slate-600">{dec(c/selectedWh.orders*100,1)}%</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2">Financial Status</div>
+                            <div className="space-y-1">
+                              {selectedWh.financialStatuses.map(({ status, count: c }) => (
+                                <div key={status} className="flex items-center gap-2 text-xs">
+                                  <span className="w-24 truncate capitalize text-slate-400">{status.replace(/_/g,' ')}</span>
+                                  <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                                    <div className="h-full rounded-full bg-emerald-500/60" style={{ width:`${c/selectedWh.orders*100}%` }} />
+                                  </div>
+                                  <span className="w-8 text-right tabular-nums text-slate-500">{num(c)}</span>
+                                  <span className="w-10 text-right tabular-nums text-slate-600">{dec(c/selectedWh.orders*100,1)}%</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </Card>
+                    )}
+
+                    {/* All tags pill list */}
+                    {!whFilter && wd.tagList.length > 0 && (
+                      <div>
+                        <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2">All Tags Detected ({wd.tagList.length})</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {wd.tagList.map(t => (
+                            <button key={t} onClick={() => setWhFilter(t)}
+                              className="px-2 py-0.5 rounded-full bg-gray-800 hover:bg-gray-700 border border-gray-700 text-[10px] text-slate-400 hover:text-slate-200 transition-all">
+                              {t}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
 
               {/* Payment gateways */}
               <div>
@@ -1315,38 +1613,6 @@ export default function ShopifyOrders() {
                       ))}
                     </tbody>
                   </table>
-                </div>
-              </div>
-
-              {/* Referring sites */}
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <ST>Referring Sites (Traffic Source)</ST>
-                  <ExportBtn onClick={() => exportCSV('referrers.csv', data.referList, [
-                    { key:'source', label:'Referrer' },
-                    { key:'orders', label:'Orders' },
-                    { key:'revenue', label:'Revenue', fn: r => dec(r.revenue, 0) },
-                    { key:'newOrders', label:'New Cust Orders' },
-                  ])} />
-                </div>
-                <div className="space-y-2">
-                  {data.referList.map((r, i) => {
-                    const max = data.referList[0]?.orders || 1;
-                    return (
-                      <div key={r.source} className="flex items-center gap-3">
-                        <span className="text-[11px] text-slate-400 w-32 truncate">{r.source}</span>
-                        <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                          <div className="h-full rounded-full" style={{ width:`${r.orders/max*100}%`, background: C[i%C.length] }} />
-                        </div>
-                        <span className="text-[10px] text-slate-400 w-12 text-right tabular-nums">{num(r.orders)} ord</span>
-                        <span className="text-[10px] text-emerald-400 w-20 text-right tabular-nums">{cur(r.revenue)}</span>
-                        <span className="text-[10px] text-slate-600 w-14 text-right">{num(r.newOrders)} new</span>
-                      </div>
-                    );
-                  })}
-                  {data.referList.length === 0 && (
-                    <div className="text-slate-600 text-sm py-4">No referring site data — requires referring_site field from Shopify.</div>
-                  )}
                 </div>
               </div>
 

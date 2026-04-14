@@ -646,7 +646,174 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
     crossSellList, tripletList, sequenceList,
     fulfillStats,
     ltvBuckets, freqBuckets,
+    warehouseData: buildWarehouseAnalytics(orders),
   };
+}
+
+/* ─── WAREHOUSE / OPS ANALYTICS ─────────────────────────────────── */
+// Parses comma-separated order `tags` field. Each tag can be a warehouse name
+// (e.g. "Mumbai Hub, Delhi WH, priority"). Returns per-tag ops metrics.
+
+export function buildWarehouseAnalytics(orders) {
+  if (!orders?.length) return { warehouses: [], tagList: [], hasTagData: false };
+
+  const active    = orders.filter(o => !o.cancelled_at);
+  const cancelled = orders.filter(o => !!o.cancelled_at);
+  const N         = orders.length;
+
+  // Collect all unique tags across all orders
+  const allTagSet = new Set();
+  orders.forEach(o => {
+    if (!o.tags) return;
+    String(o.tags).split(',').forEach(t => { const clean = t.trim(); if (clean) allTagSet.add(clean); });
+  });
+  const tagList = [...allTagSet].sort();
+  if (!tagList.length) return { warehouses: [], tagList: [], hasTagData: false };
+
+  // Per-tag accumulator
+  const whMap = {};
+  const ensureTag = tag => {
+    if (!whMap[tag]) whMap[tag] = {
+      tag,
+      orders: 0, revenue: 0, cancelledOrders: 0, cancelledRevenue: 0,
+      refundedOrders: 0, refundedRevenue: 0,
+      newOrders: 0, discountedOrders: 0, discount: 0,
+      fulfillTimes: [],     // hours from order creation → first fulfillment event
+      fulfillStatuses: {},  // fulfillment_status → count
+      financialStatuses: {},
+      dayMap: {},           // date → { orders, revenue }
+      hourCounts: new Array(24).fill(0),
+      skuSet: new Set(),
+      multiItemOrders: 0,
+      totalItems: 0,
+    };
+    return whMap[tag];
+  };
+
+  const seenEmails = new Set();
+  const sortedActive = [...active].sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+
+  sortedActive.forEach(o => {
+    const tags = o.tags ? String(o.tags).split(',').map(t => t.trim()).filter(Boolean) : [];
+    if (!tags.length) {
+      // assign to a synthetic "(untagged)" bucket
+      tags.push('(untagged)');
+    }
+
+    const rev    = p(o.total_price);
+    const disc   = p(o.total_discounts);
+    const date   = o.created_at?.slice(0, 10);
+    const hour   = o.created_at ? new Date(o.created_at).getHours() : null;
+    const email  = (o.email || o.customer?.email || '').toLowerCase().trim();
+    const isNew  = !email || !seenEmails.has(email);
+    if (email) seenEmails.add(email);
+    const isRefunded = (o.refunds || []).length > 0;
+    const hasDiscount = disc > 0;
+    const skus = (o.line_items || []).map(i => (i.sku || '').trim().toUpperCase() || `pid_${i.product_id}`);
+    const totalItems = (o.line_items || []).reduce((s, i) => s + (i.quantity || 1), 0);
+
+    // Fulfillment time: hours from creation → first fulfillment event
+    let fulfillHrs = null;
+    if (o.fulfillments?.length > 0 && o.fulfillments[0].created_at) {
+      const h = (new Date(o.fulfillments[0].created_at) - new Date(o.created_at)) / 3600000;
+      if (h >= 0 && h < 720) fulfillHrs = h;
+    }
+
+    tags.forEach(tag => {
+      const w = ensureTag(tag);
+      w.orders++;
+      w.revenue += rev;
+      if (isNew) w.newOrders++;
+      if (isRefunded) { w.refundedOrders++; w.refundedRevenue += rev; }
+      if (hasDiscount) { w.discountedOrders++; w.discount += disc; }
+      if (fulfillHrs !== null) w.fulfillTimes.push(fulfillHrs);
+      if (date) {
+        if (!w.dayMap[date]) w.dayMap[date] = { date, orders: 0, revenue: 0 };
+        w.dayMap[date].orders++;
+        w.dayMap[date].revenue += rev;
+      }
+      if (hour !== null) w.hourCounts[hour]++;
+      const fs = o.fulfillment_status || 'unfulfilled';
+      w.fulfillStatuses[fs] = (w.fulfillStatuses[fs] || 0) + 1;
+      const fin = o.financial_status || 'unknown';
+      w.financialStatuses[fin] = (w.financialStatuses[fin] || 0) + 1;
+      skus.forEach(s => w.skuSet.add(s));
+      if (skus.length > 1) w.multiItemOrders++;
+      w.totalItems += totalItems;
+    });
+  });
+
+  // Cancelled orders per tag
+  cancelled.forEach(o => {
+    const tags = o.tags ? String(o.tags).split(',').map(t => t.trim()).filter(Boolean) : ['(untagged)'];
+    tags.forEach(tag => {
+      const w = ensureTag(tag);
+      w.cancelledOrders++;
+      w.cancelledRevenue += p(o.total_price);
+    });
+  });
+
+  // Post-process each warehouse
+  const warehouses = Object.values(whMap).map(w => {
+    const ft = [...w.fulfillTimes].sort((a, b) => a - b);
+    const ftCount = ft.length;
+    const fulfillStats = ftCount > 0 ? {
+      count:    ftCount,
+      avg:      +(ft.reduce((s, v) => s + v, 0) / ftCount).toFixed(1),
+      median:   +median(ft).toFixed(1),
+      p90:      +percentile(ft, 90).toFixed(1),
+      under24h: ft.filter(t => t < 24).length,
+      under48h: ft.filter(t => t < 48).length,
+      over72h:  ft.filter(t => t > 72).length,
+      sla24hPct: ftCount > 0 ? +(ft.filter(t => t < 24).length / ftCount * 100).toFixed(1) : 0,
+      slowPct:   ftCount > 0 ? +(ft.filter(t => t > 72).length / ftCount * 100).toFixed(1) : 0,
+    } : null;
+
+    const totalWithCancelled = w.orders + w.cancelledOrders;
+    const peakHour = w.hourCounts.indexOf(Math.max(...w.hourCounts));
+
+    // Efficiency score 0-100:
+    //   SLA <24h (35pts), low cancel rate (25pts), low refund rate (20pts), low slow% (20pts)
+    const sla24 = fulfillStats ? fulfillStats.sla24hPct : 0;
+    const cancelPct = totalWithCancelled > 0 ? w.cancelledOrders / totalWithCancelled * 100 : 0;
+    const refundPct = w.orders > 0 ? w.refundedOrders / w.orders * 100 : 0;
+    const slowPct   = fulfillStats ? fulfillStats.slowPct : 0;
+    const effScore  = Math.round(
+      (sla24 / 100) * 35 +
+      ((100 - Math.min(cancelPct, 100)) / 100) * 25 +
+      ((100 - Math.min(refundPct, 100)) / 100) * 20 +
+      ((100 - Math.min(slowPct, 100)) / 100) * 20
+    );
+
+    return {
+      tag:              w.tag,
+      orders:           w.orders,
+      revenue:          w.revenue,
+      aov:              w.orders > 0 ? +(w.revenue / w.orders).toFixed(0) : 0,
+      newOrders:        w.newOrders,
+      newPct:           w.orders > 0 ? +(w.newOrders / w.orders * 100).toFixed(1) : 0,
+      cancelledOrders:  w.cancelledOrders,
+      cancelPct:        +(cancelPct).toFixed(1),
+      refundedOrders:   w.refundedOrders,
+      refundPct:        +(refundPct).toFixed(1),
+      discountedOrders: w.discountedOrders,
+      discountPct:      w.orders > 0 ? +(w.discountedOrders / w.orders * 100).toFixed(1) : 0,
+      avgDiscount:      w.discountedOrders > 0 ? +(w.discount / w.discountedOrders).toFixed(0) : 0,
+      fulfillStats,
+      fulfillStatuses:  Object.entries(w.fulfillStatuses).sort((a, b) => b[1] - a[1]).map(([status, count]) => ({ status, count })),
+      financialStatuses: Object.entries(w.financialStatuses).sort((a, b) => b[1] - a[1]).map(([status, count]) => ({ status, count })),
+      byDay:            Object.values(w.dayMap).sort((a, b) => a.date.localeCompare(b.date)),
+      hourCounts:       w.hourCounts.map((count, hour) => ({ hour, count })),
+      peakHour,
+      uniqueSkus:       w.skuSet.size,
+      multiItemPct:     w.orders > 0 ? +(w.multiItemOrders / w.orders * 100).toFixed(1) : 0,
+      avgItemsPerOrder: w.orders > 0 ? +(w.totalItems / w.orders).toFixed(1) : 0,
+      effScore,
+      effLabel:         effScore >= 80 ? 'Excellent' : effScore >= 60 ? 'Good' : effScore >= 40 ? 'Average' : 'Needs Work',
+    };
+  }).sort((a, b) => b.orders - a.orders);
+
+  return { warehouses, tagList, hasTagData: true };
 }
 
 /* ─── SHOPIFY INSIGHTS ADAPTER FUNCTIONS ────────────────────────── */

@@ -178,17 +178,16 @@ app.post('/api/shopify/orders/stream', async (req, res) => {
     emit({ type: 'log', msg: '✓ Authenticated' });
 
     const headers = { 'X-Shopify-Access-Token': accessToken };
-    // Only fetch fields actually used in analytics — skip bulky unused ones
-    // (shipping_lines, note_attributes, tags, subtotal_price, total_tax, etc.)
     const fields = [
       'id','created_at','cancelled_at','cancel_reason',
-      'email',                                   // order-level email — present even for guest checkouts
+      'email',
       'total_price','total_discounts','total_shipping_price_set',
       'customer','line_items','discount_codes',
       'billing_address','shipping_address',
       'source_name','referring_site','landing_site',
       'payment_gateway','payment_gateway_names',
       'refunds','fulfillments','note_attributes',
+      'tags','fulfillment_status','financial_status',  // warehouse tags + status for ops analytics
     ].join(',');
 
     let qs = `limit=250&status=any&fields=${fields}`;
