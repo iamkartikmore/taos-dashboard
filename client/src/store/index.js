@@ -2,44 +2,37 @@ import { create } from 'zustand';
 import { buildEnrichedRows } from '../lib/analytics';
 import { normalizeBreakdownRow } from '../lib/breakdownAnalytics';
 
-/* ─── PLAIN LOCALSTORAGE HELPERS ─────────────────────────────────── */
-// We use localStorage directly so persistence never silently fails
-// regardless of which Zustand version npm resolved.
-
-const LS_CONFIG    = 'taos_config';
-const LS_MANUAL    = 'taos_manual';
-const LS_LISTS     = 'taos_lists';
-const LS_INVENTORY = 'taos_inventory';
+/* ─── LOCALSTORAGE ──────────────────────────────────────────────── */
+const LS_BRANDS = 'taos_brands_v2';
+const LS_ACTIVE = 'taos_active_brands';
+const LS_MANUAL = 'taos_manual';
+const LS_LISTS  = 'taos_lists';
+const LS_INV    = 'taos_inventory_v2';   // { [brandId]: inventoryMap }
 
 function lsGet(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
+  try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; } catch { return fallback; }
+}
+function lsSet(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
 }
 
-function lsSet(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-    return true;
-  } catch {
-    return false;   // storage quota exceeded – fail silently
-  }
+/* ─── BRAND FACTORY ─────────────────────────────────────────────── */
+export const BRAND_COLORS = [
+  '#22c55e','#3b82f6','#a78bfa','#f59e0b',
+  '#f472b6','#34d399','#fb923c','#60a5fa','#e879f9','#4ade80',
+];
+
+export function makeBrand(name = 'New Brand', idx = 0) {
+  return {
+    id:      `b_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    name,
+    color:   BRAND_COLORS[idx % BRAND_COLORS.length],
+    meta:    { token: '', apiVersion: 'v21.0', accounts: [] },
+    shopify: { shop: '', clientId: '', clientSecret: '' },
+  };
 }
 
-/* ─── DEFAULTS ───────────────────────────────────────────────────── */
-
-const DEFAULT_CONFIG = {
-  token:              '',
-  apiVersion:         'v21.0',
-  accounts:           [],   // [{ key: string, id: string }]
-  shopifyShop:        '',   // e.g. "txk12s-ny"
-  shopifyClientId:    '',   // Shopify Custom App client_id
-  shopifyClientSecret:'',   // Shopify Custom App client_secret (shpss_...)
-};
-
+/* ─── DEFAULT LISTS ─────────────────────────────────────────────── */
 const DEFAULT_LISTS = {
   Collection:        ['All Mix','Plants','Seeds','Succulent','Miniature','Building Block','Diamond Painting','3D Puzzle','Sustainable & Stationary','Other'],
   'Campaign Type':   ['none','IndivProduct','MultiProduct','Catalog','Flexible','Influe','Inhouse','Static','Other'],
@@ -48,153 +41,290 @@ const DEFAULT_LISTS = {
   Geography:         ['none','India','Maharashtra','Karnataka','Tamil Nadu','Telangana','Uttar Pradesh','NCT of Delhi','West Bengal','Kerala','Gujarat','Haryana','Mumbai','Delhi','Bengaluru','Chennai','Hyderabad','Kolkata','Pune','Ahmedabad','Gurugram','Noida','Other'],
 };
 
-/* ─── STORE ──────────────────────────────────────────────────────── */
+/* ─── MIGRATION from old single-brand config ────────────────────── */
+function loadBrands() {
+  const stored = lsGet(LS_BRANDS, null);
+  if (stored?.length) return stored;
 
-export const useStore = create((set, get) => ({
+  const old = lsGet('taos_config', null);
+  if (old) {
+    const brand      = makeBrand('Brand 1', 0);
+    brand.meta       = { token: old.token || '', apiVersion: old.apiVersion || 'v21.0', accounts: old.accounts || [] };
+    brand.shopify    = { shop: old.shopifyShop || '', clientId: old.shopifyClientId || '', clientSecret: old.shopifyClientSecret || '' };
+    const brands     = [brand];
+    lsSet(LS_BRANDS, brands);
+    return brands;
+  }
 
-  /* ── Persisted state (loaded from localStorage on first render) ── */
-  config:       lsGet(LS_CONFIG, DEFAULT_CONFIG),
-  manualMap:    lsGet(LS_MANUAL, {}),  // adId → { Collection, SKU, ... }
-  dynamicLists: lsGet(LS_LISTS, DEFAULT_LISTS),
+  const brands = [makeBrand('Brand 1', 0)];
+  lsSet(LS_BRANDS, brands);
+  return brands;
+}
 
-  /* ── Config actions ─────────────────────────────────────────────── */
-  setConfig: config => {
-    lsSet(LS_CONFIG, config);
-    set({ config });
-  },
+/* ─── STORE ─────────────────────────────────────────────────────── */
+export const useStore = create((set, get) => {
+  const initialBrands  = loadBrands();
+  const storedActive   = lsGet(LS_ACTIVE, null);
+  const initialActive  = storedActive?.length ? storedActive : initialBrands.map(b => b.id);
 
-  updateConfig: patch => {
-    const config = { ...get().config, ...patch };
-    lsSet(LS_CONFIG, config);
-    set({ config });
-  },
+  // Restore persisted per-brand inventory
+  const storedInv = lsGet(LS_INV, {});
+  const initialBrandData = {};
+  // Also migrate old single-store taos_inventory
+  const oldInv = lsGet('taos_inventory', null);
+  initialBrands.forEach((b, i) => {
+    const inv = storedInv[b.id] || (i === 0 && oldInv ? oldInv : null);
+    if (inv) initialBrandData[b.id] = { inventoryMap: inv, inventoryStatus: 'success' };
+  });
 
-  updateAccount: (idx, updates) => {
-    const accounts = [...get().config.accounts];
-    accounts[idx] = { ...accounts[idx], ...updates };
-    const config = { ...get().config, accounts };
-    lsSet(LS_CONFIG, config);
-    set({ config });
-  },
+  /* ── helpers ──────────────────────────────────────────────────── */
+  const _saveBrands = brands => { lsSet(LS_BRANDS, brands); return brands; };
+  const _saveActive = ids    => { lsSet(LS_ACTIVE, ids);    return ids;    };
 
-  addAccount: () => {
-    const config = {
-      ...get().config,
-      accounts: [...get().config.accounts, { key: '', id: '' }],
-    };
-    lsSet(LS_CONFIG, config);
-    set({ config });
-  },
+  function _rebuild(overrides = {}) {
+    const s              = get();
+    const brands         = overrides.brands         ?? s.brands;
+    const activeBrandIds = overrides.activeBrandIds ?? s.activeBrandIds;
+    const brandData      = overrides.brandData      ?? s.brandData;
+    const manualMap      = s.manualMap;
 
-  removeAccount: idx => {
-    const config = {
-      ...get().config,
-      accounts: get().config.accounts.filter((_, i) => i !== idx),
-    };
-    lsSet(LS_CONFIG, config);
-    set({ config });
-  },
+    const active = brands.filter(b => activeBrandIds.includes(b.id));
 
-  /* ── Manual label actions ────────────────────────────────────────── */
-  setManualMap: m => {
-    lsSet(LS_MANUAL, m);
-    set({ manualMap: m });
-  },
-
-  setManualRow: (adId, fields) => {
-    const manualMap = {
-      ...get().manualMap,
-      [adId]: { ...(get().manualMap[adId] || {}), ...fields },
-    };
-    lsSet(LS_MANUAL, manualMap);
-    set({ manualMap });
-  },
-
-  /* ── Dynamic list actions ────────────────────────────────────────── */
-  mergeDynamicLists: additions => {
-    const current = get().dynamicLists;
-    const merged = { ...current };
-    Object.entries(additions).forEach(([listKey, newValues]) => {
-      if (!Array.isArray(newValues)) return;
-      const existing = merged[listKey] || [];
-      const existingSet = new Set(existing);
-      const appended = newValues.filter(v => !existingSet.has(v));
-      merged[listKey] = [...existing, ...appended];
+    // Meta
+    const all7d = [], all30d = [];
+    const adsetMap = {}, campaignMap = {};
+    active.forEach(b => {
+      const d = brandData[b.id];
+      if (!d) return;
+      all7d.push(...(d.insights7d  || []));
+      all30d.push(...(d.insights30d || []));
+      (d.adsets    || []).forEach(a => { adsetMap[a.id]    = a; });
+      (d.campaigns || []).forEach(c => { campaignMap[c.id] = c; });
     });
-    lsSet(LS_LISTS, merged);
-    set({ dynamicLists: merged });
-  },
+    const enrichedRows = buildEnrichedRows(all7d, all30d, manualMap, adsetMap, campaignMap);
 
-  resetDynamicLists: () => {
-    lsSet(LS_LISTS, DEFAULT_LISTS);
-    set({ dynamicLists: DEFAULT_LISTS });
-  },
-
-  /* ── Session-only: fetched Meta data ────────────────────────────── */
-  rawAccounts:  [],
-  enrichedRows: [],
-  adsetMap:     {},   // adsetId → adset object (for budget lookup)
-  campaignMap:  {},   // campaignId → campaign object (for budget lookup)
-  fetchStatus:  'idle',   // idle | loading | success | error
-  fetchLog:     [],
-  fetchError:   null,
-  lastFetchAt:  null,
-
-  /* ── Persisted: Shopify inventory ────────────────────────────────── */
-  // SKU (uppercase) → { title, stock, price, productType }
-  inventoryMap: lsGet(LS_INVENTORY, {}),
-  inventoryStatus: Object.keys(lsGet(LS_INVENTORY, {})).length > 0 ? 'success' : 'idle',
-  setInventoryMap: map => { lsSet(LS_INVENTORY, map); set({ inventoryMap: map, inventoryStatus: 'success' }); },
-  setInventoryStatus: s => set({ inventoryStatus: s }),
-
-  setRawAccounts: accounts => {
-    const all7d  = accounts.flatMap(a => a.insights7d   || []);
-    const all30d = accounts.flatMap(a => a.insights30d  || []);
-    const adsetMap    = {};
-    const campaignMap = {};
-    accounts.forEach(a => {
-      (a.adsets    || []).forEach(s => { adsetMap[s.id]    = s; });
-      (a.campaigns || []).forEach(c => { campaignMap[c.id] = c; });
+    // Shopify
+    const inventoryMap = {};
+    const shopifyOrders = [];
+    active.forEach(b => {
+      const d = brandData[b.id];
+      if (!d) return;
+      Object.assign(inventoryMap, d.inventoryMap || {});
+      shopifyOrders.push(...(d.orders || []));
     });
-    const enriched = buildEnrichedRows(all7d, all30d, get().manualMap, adsetMap, campaignMap);
-    set({ rawAccounts: accounts, enrichedRows: enriched, adsetMap, campaignMap, lastFetchAt: Date.now() });
-  },
 
-  rebuildEnriched: () => {
-    const s = get();
-    const enrichedRows = buildEnrichedRows(
-      s.rawAccounts.flatMap(a => a.insights7d   || []),
-      s.rawAccounts.flatMap(a => a.insights30d  || []),
-      s.manualMap,
-      s.adsetMap    || {},
-      s.campaignMap || {},
-    );
-    set({ enrichedRows });
-  },
+    // Derive overall fetch status from brand statuses
+    const statuses = active.map(b => brandData[b.id]?.metaStatus || 'idle');
+    const fetchStatus = statuses.some(s => s === 'loading')  ? 'loading'
+                      : statuses.every(s => s === 'success') ? 'success'
+                      : statuses.some(s => s === 'error')    ? 'error'
+                      : 'idle';
 
-  setFetchStatus: (fetchStatus, fetchError = null) => set({ fetchStatus, fetchError }),
-  appendLog: msg => set(s => ({ fetchLog: [...s.fetchLog.slice(-199), msg] })),
-  clearLog:  ()  => set({ fetchLog: [] }),
-
-  /* ── Session-only: Shopify orders ───────────────────────────────── */
-  shopifyOrders:       [],
-  shopifyOrdersStatus: 'idle',   // idle | loading | success | error
-  shopifyOrdersWindow: '7d',
-  shopifyOrdersError:  null,
-  setShopifyOrders: (orders, window) => set({ shopifyOrders: orders, shopifyOrdersStatus: 'success', shopifyOrdersWindow: window }),
-  setShopifyOrdersStatus: (s, err = null) => set({ shopifyOrdersStatus: s, shopifyOrdersError: err }),
-
-  /* ── Session-only: breakdown data ───────────────────────────────── */
-  breakdownRows:   {},    // { base:[], age:[], gender:[], ... } — normalized
-  breakdownStatus: 'idle', // idle | loading | success | error
-  lastBreakdownAt: null,
-
-  setBreakdownData: rawByKey => {
-    const normalized = {};
-    Object.entries(rawByKey).forEach(([bdKey, rows]) => {
-      normalized[bdKey] = rows.map(r => normalizeBreakdownRow(r));
+    // Synthetic rawAccounts: one entry per active brand, carries insights arrays for AdDetailDrawer
+    const rawAccounts = active.flatMap(b => {
+      const d = brandData[b.id];
+      if (!d) return [];
+      // One synthetic "account" per configured Meta account in the brand
+      return (b.meta?.accounts || []).filter(a => a.id && a.key).map(a => ({
+        accountKey:     a.key,
+        accountId:      a.id,
+        brandId:        b.id,
+        brandName:      b.name,
+        insightsToday:  d.insightsToday  || [],
+        insights7d:     d.insights7d     || [],
+        insights14d:    d.insights14d    || [],
+        insights30d:    d.insights30d    || [],
+      }));
     });
-    set({ breakdownRows: normalized, lastBreakdownAt: Date.now(), breakdownStatus: 'success' });
-  },
-  setBreakdownStatus: s => set({ breakdownStatus: s }),
-}));
+
+    set({ enrichedRows, adsetMap, campaignMap, inventoryMap, shopifyOrders, rawAccounts, fetchStatus, lastFetchAt: Date.now() });
+  }
+
+  return {
+    /* ── Brands ──────────────────────────────────────────────────── */
+    brands:         initialBrands,
+    activeBrandIds: initialActive,
+
+    addBrand: () => {
+      const newBrand = makeBrand('New Brand', get().brands.length);
+      const brands   = _saveBrands([...get().brands, newBrand]);
+      const activeBrandIds = _saveActive([...get().activeBrandIds, newBrand.id]);
+      set({ brands, activeBrandIds });
+    },
+
+    updateBrand: (id, patch) => {
+      const brands = _saveBrands(get().brands.map(b => {
+        if (b.id !== id) return b;
+        const u = { ...b, ...patch };
+        if (patch.meta)    u.meta    = { ...b.meta,    ...patch.meta };
+        if (patch.shopify) u.shopify = { ...b.shopify, ...patch.shopify };
+        return u;
+      }));
+      set({ brands });
+    },
+
+    addBrandAccount: brandId => {
+      const brands = _saveBrands(get().brands.map(b =>
+        b.id !== brandId ? b
+          : { ...b, meta: { ...b.meta, accounts: [...b.meta.accounts, { key: '', id: '' }] } }
+      ));
+      set({ brands });
+    },
+
+    updateBrandAccount: (brandId, idx, patch) => {
+      const brands = _saveBrands(get().brands.map(b => {
+        if (b.id !== brandId) return b;
+        const accounts = b.meta.accounts.map((a, i) => i === idx ? { ...a, ...patch } : a);
+        return { ...b, meta: { ...b.meta, accounts } };
+      }));
+      set({ brands });
+    },
+
+    removeBrandAccount: (brandId, idx) => {
+      const brands = _saveBrands(get().brands.map(b =>
+        b.id !== brandId ? b
+          : { ...b, meta: { ...b.meta, accounts: b.meta.accounts.filter((_, i) => i !== idx) } }
+      ));
+      set({ brands });
+    },
+
+    removeBrand: id => {
+      const brands = _saveBrands(get().brands.filter(b => b.id !== id));
+      const activeBrandIds = _saveActive(get().activeBrandIds.filter(x => x !== id));
+      const { [id]: _gone, ...brandData } = get().brandData;
+      set({ brands, activeBrandIds, brandData });
+      _rebuild({ brands, activeBrandIds, brandData });
+    },
+
+    toggleBrandActive: id => {
+      const activeBrandIds = _saveActive(
+        get().activeBrandIds.includes(id)
+          ? get().activeBrandIds.filter(x => x !== id)
+          : [...get().activeBrandIds, id]
+      );
+      set({ activeBrandIds });
+      _rebuild({ activeBrandIds });
+    },
+
+    setAllBrandsActive: () => {
+      const activeBrandIds = _saveActive(get().brands.map(b => b.id));
+      set({ activeBrandIds });
+      _rebuild({ activeBrandIds });
+    },
+
+    setNoBrandsActive: () => {
+      _saveActive([]);
+      set({ activeBrandIds: [], enrichedRows: [], shopifyOrders: [], inventoryMap: {}, adsetMap: {}, campaignMap: {} });
+    },
+
+    /* ── Per-brand session data ──────────────────────────────────── */
+    brandData: initialBrandData,
+
+    setBrandMetaData: (brandId, data) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), ...data, metaStatus: 'success', metaFetchAt: Date.now() } };
+      set({ brandData });
+      _rebuild({ brandData });
+    },
+
+    setBrandMetaStatus: (brandId, status, error = null) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), metaStatus: status, metaError: error } };
+      set({ brandData });
+      if (status !== 'loading') _rebuild({ brandData });
+    },
+
+    setBrandInventory: (brandId, inventoryMap) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), inventoryMap, inventoryStatus: 'success' } };
+      const inv = lsGet(LS_INV, {}); inv[brandId] = inventoryMap; lsSet(LS_INV, inv);
+      set({ brandData });
+      _rebuild({ brandData });
+    },
+
+    setBrandInventoryStatus: (brandId, status) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), inventoryStatus: status } };
+      set({ brandData });
+    },
+
+    setBrandOrders: (brandId, orders, window) => {
+      const tagged = (orders || []).map(o => ({ ...o, _brandId: brandId }));
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), orders: tagged, ordersWindow: window, ordersStatus: 'success' } };
+      set({ brandData });
+      _rebuild({ brandData });
+    },
+
+    setBrandOrdersStatus: (brandId, status, error = null) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), ordersStatus: status, ordersError: error } };
+      set({ brandData });
+    },
+
+    /* ── Aggregated (derived, rebuilt when active brands / brandData change) */
+    enrichedRows:  [],
+    rawAccounts:   [],
+    adsetMap:      {},
+    campaignMap:   {},
+    inventoryMap:  {},
+    shopifyOrders: [],
+
+    rebuildEnriched: () => _rebuild(),
+
+    /* ── Fetch log (shared across all pulls) ─────────────────────── */
+    fetchStatus:  'idle',
+    fetchError:   null,
+    lastFetchAt:  null,
+    fetchLog:     [],
+    setFetchStatus: (fetchStatus, fetchError = null) => set({ fetchStatus, fetchError }),
+    appendLog: msg => set(s => ({ fetchLog: [...s.fetchLog.slice(-299), msg] })),
+    clearLog:  ()  => set({ fetchLog: [] }),
+
+    /* ── Breakdown data ──────────────────────────────────────────── */
+    breakdownRows:   {},
+    breakdownStatus: 'idle',
+    lastBreakdownAt: null,
+    setBreakdownData: rawByKey => {
+      const normalized = {};
+      Object.entries(rawByKey).forEach(([k, rows]) => { normalized[k] = rows.map(r => normalizeBreakdownRow(r)); });
+      set({ breakdownRows: normalized, lastBreakdownAt: Date.now(), breakdownStatus: 'success' });
+    },
+    setBreakdownStatus: s => set({ breakdownStatus: s }),
+
+    /* ── Manual labels ───────────────────────────────────────────── */
+    manualMap: lsGet(LS_MANUAL, {}),
+    setManualMap: m => { lsSet(LS_MANUAL, m); set({ manualMap: m }); },
+    setManualRow: (adId, fields) => {
+      const manualMap = { ...get().manualMap, [adId]: { ...(get().manualMap[adId] || {}), ...fields } };
+      lsSet(LS_MANUAL, manualMap);
+      set({ manualMap });
+    },
+
+    /* ── Dynamic lists ───────────────────────────────────────────── */
+    dynamicLists: lsGet(LS_LISTS, DEFAULT_LISTS),
+    mergeDynamicLists: additions => {
+      const current = get().dynamicLists;
+      const merged  = { ...current };
+      Object.entries(additions).forEach(([k, vals]) => {
+        if (!Array.isArray(vals)) return;
+        const ex = merged[k] || [];
+        merged[k] = [...ex, ...vals.filter(v => !ex.includes(v))];
+      });
+      lsSet(LS_LISTS, merged);
+      set({ dynamicLists: merged });
+    },
+    resetDynamicLists: () => { lsSet(LS_LISTS, DEFAULT_LISTS); set({ dynamicLists: DEFAULT_LISTS }); },
+
+    /* ── Legacy compat shims (some pages still use these directly) ─ */
+    // shopifyOrdersStatus: derived from brandData in ShopifyOrders page
+    shopifyOrdersStatus: 'idle',
+    shopifyOrdersWindow: '7d',
+    setShopifyOrdersStatus: (s, err = null) => set({ shopifyOrdersStatus: s, shopifyOrdersError: err }),
+    // Called by ShopifyOrders.jsx page-level fetch
+    setShopifyOrders: (orders, window) => {
+      // Without a brandId context, store as a temporary override for the current view
+      // (won't be persisted to brandData — only affects the merged shopifyOrders view)
+      set({ shopifyOrders: orders, shopifyOrdersStatus: 'success', shopifyOrdersWindow: window });
+    },
+
+    /* ── inventoryMap compat (already covered by _rebuild) ────────── */
+    setInventoryMap: map => { set({ inventoryMap: map }); },
+    inventoryStatus: 'idle',
+    setInventoryStatus: s => set({ inventoryStatus: s }),
+  };
+});

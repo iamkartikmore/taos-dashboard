@@ -1,597 +1,573 @@
 import { useState, useRef } from 'react';
-import { motion } from 'framer-motion';
-import { Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key, Users, BookOpen, Upload, ShoppingBag, Zap } from 'lucide-react';
-import { useStore } from '../store';
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+  Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key, Users,
+  BookOpen, Upload, ShoppingBag, Zap, ChevronDown, ChevronRight,
+  Palette,
+} from 'lucide-react';
+import { useStore, makeBrand, BRAND_COLORS } from '../store';
 import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders } from '../lib/api';
 import { BREAKDOWN_SPECS, pullAllBreakdowns } from '../lib/breakdownApi';
 import { parseCsv, csvRowsToManualMap, detectListsFromCsvRows } from '../lib/csvImport';
 import Spinner from '../components/ui/Spinner';
 
-// Lists come from store — computed at render time in component
+/* ─── HELPERS ────────────────────────────────────────────────────── */
+const daysToRange = days => {
+  const now = new Date();
+  if (days === 'all') return { since: null, until: now.toISOString() };
+  if (days === 'yesterday') {
+    const y = new Date(now); y.setDate(y.getDate() - 1);
+    const d = y.toISOString().slice(0, 10);
+    return { since: `${d}T00:00:00.000Z`, until: `${d}T23:59:59.999Z` };
+  }
+  return { since: new Date(now - Number(days) * 86400000).toISOString(), until: now.toISOString() };
+};
 
+const ORDER_WINDOWS = [
+  { value: 'yesterday', label: 'Yesterday' },
+  { value: 7,           label: 'Last 7 days' },
+  { value: 14,          label: 'Last 14 days' },
+  { value: 30,          label: 'Last 30 days' },
+  { value: 90,          label: 'Last 90 days' },
+  { value: 180,         label: 'Last 180 days' },
+  { value: 365,         label: 'Last 365 days' },
+  { value: 'all',       label: 'All time' },
+];
+
+/* ─── STATUS DOT ─────────────────────────────────────────────────── */
+function StatusDot({ status }) {
+  if (!status || status === 'idle') return <span className="w-2 h-2 rounded-full bg-gray-600 shrink-0" />;
+  if (status === 'loading')  return <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />;
+  if (status === 'success')  return <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />;
+  if (status === 'error')    return <span className="w-2 h-2 rounded-full bg-red-400 shrink-0" />;
+}
+
+/* ─── BRAND CARD ─────────────────────────────────────────────────── */
+function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
+  const {
+    updateBrand, removeBrand, addBrandAccount, updateBrandAccount, removeBrandAccount,
+    setBrandMetaData, setBrandMetaStatus,
+    setBrandInventory, setBrandInventoryStatus,
+    setBrandOrders, setBrandOrdersStatus,
+    appendLog,
+  } = useStore();
+
+  const [expanded, setExpanded]   = useState(true);
+  const [pulling, setPulling]     = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [verifyOk, setVerifyOk]   = useState(null);
+  const [showPalette, setShowPalette] = useState(false);
+
+  const bd = brandInfo || {};
+  const metaStatus      = bd.metaStatus      || 'idle';
+  const inventoryStatus = bd.inventoryStatus || 'idle';
+  const ordersStatus    = bd.ordersStatus    || 'idle';
+  const hasToken   = !!brand.meta.token;
+  const hasAccts   = brand.meta.accounts.filter(a => a.key && a.id).length > 0;
+  const hasShopify = brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret;
+
+  const handleVerify = async () => {
+    if (!hasToken) return;
+    setVerifying(true); setVerifyOk(null);
+    try {
+      const me = await verifyToken(brand.meta.token, brand.meta.apiVersion);
+      setVerifyOk({ ok: true, name: me.name });
+    } catch (e) { setVerifyOk({ ok: false, msg: e.message }); }
+    finally { setVerifying(false); }
+  };
+
+  const handlePullMeta = async () => {
+    const accounts = brand.meta.accounts.filter(a => a.key && a.id);
+    if (!hasToken || !accounts.length) return;
+    setPulling(true);
+    setBrandMetaStatus(brand.id, 'loading');
+    appendLog(`[${brand.name}] Starting Meta pull...`);
+    try {
+      let combined = { campaigns: [], adsets: [], ads: [], insightsToday: [], insights7d: [], insights14d: [], insights30d: [] };
+      for (const acc of accounts) {
+        const r = await pullAccount(
+          { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
+          msg => appendLog(`[${brand.name}] ${msg}`),
+        );
+        combined.campaigns.push(...r.campaigns);
+        combined.adsets.push(...r.adsets);
+        combined.ads.push(...r.ads);
+        combined.insightsToday.push(...r.insightsToday);
+        combined.insights7d.push(...r.insights7d);
+        combined.insights14d.push(...r.insights14d);
+        combined.insights30d.push(...r.insights30d);
+      }
+      setBrandMetaData(brand.id, combined);
+      appendLog(`[${brand.name}] ✅ Meta done`);
+    } catch (e) {
+      setBrandMetaStatus(brand.id, 'error', e.message);
+      appendLog(`[${brand.name}] ❌ Meta error: ${e.message}`);
+    } finally { setPulling(false); }
+  };
+
+  const handlePullInventory = async () => {
+    if (!hasShopify) return;
+    setBrandInventoryStatus(brand.id, 'loading');
+    try {
+      const map = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
+      setBrandInventory(brand.id, map);
+      appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(map).length} SKUs`);
+    } catch (e) {
+      setBrandInventoryStatus(brand.id, 'error');
+      appendLog(`[${brand.name}] ❌ Inventory error: ${e.message}`);
+    }
+  };
+
+  const handlePullOrders = async () => {
+    if (!hasShopify) return;
+    setBrandOrdersStatus(brand.id, 'loading');
+    try {
+      const { since, until } = daysToRange(ordersDays);
+      const { orders: fetchedOrders, count } = await fetchShopifyOrders(
+        brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
+        since, until, msg => appendLog(`[${brand.name}] ${msg}`),
+      );
+      setBrandOrders(brand.id, fetchedOrders, ordersDays);
+      appendLog(`[${brand.name}] ✅ Orders — ${count} orders`);
+    } catch (e) {
+      setBrandOrdersStatus(brand.id, 'error', e.message);
+      appendLog(`[${brand.name}] ❌ Orders error: ${e.message}`);
+    }
+  };
+
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-gray-800/60">
+        {/* Color swatch + picker */}
+        <div className="relative">
+          <button onClick={() => setShowPalette(v => !v)}
+            className="w-5 h-5 rounded-full ring-2 ring-gray-700 hover:ring-gray-500 transition-all shrink-0"
+            style={{ background: brand.color }} />
+          {showPalette && (
+            <div className="absolute top-7 left-0 z-20 bg-gray-800 border border-gray-700 rounded-xl p-2 flex flex-wrap gap-1.5 w-28 shadow-xl">
+              {BRAND_COLORS.map(c => (
+                <button key={c} onClick={() => { updateBrand(brand.id, { color: c }); setShowPalette(false); }}
+                  className="w-5 h-5 rounded-full ring-1 ring-gray-700 hover:scale-110 transition-all"
+                  style={{ background: c }} />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <input
+          value={brand.name}
+          onChange={e => updateBrand(brand.id, { name: e.target.value })}
+          className="flex-1 bg-transparent text-white font-semibold text-sm focus:outline-none placeholder-gray-600"
+          placeholder="Brand name"
+        />
+
+        {/* Status dots */}
+        <div className="flex items-center gap-1.5" title="Meta · Inventory · Orders">
+          <StatusDot status={metaStatus} />
+          <StatusDot status={inventoryStatus} />
+          <StatusDot status={ordersStatus} />
+        </div>
+
+        <button onClick={handlePullMeta} disabled={pulling || !hasToken || !hasAccts}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 bg-brand-600/20 hover:bg-brand-600/40 disabled:opacity-30 rounded-lg text-xs font-medium text-brand-300 transition-all border border-brand-700/30">
+          {pulling ? <Spinner size="sm" /> : <RefreshCw size={11} />} Pull Meta
+        </button>
+
+        <button onClick={() => setExpanded(v => !v)}
+          className="p-1.5 text-slate-500 hover:text-slate-300 transition-colors">
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </button>
+
+        <button onClick={() => removeBrand(brand.id)}
+          className="p-1.5 text-slate-600 hover:text-red-400 transition-colors">
+          <Trash2 size={14} />
+        </button>
+      </div>
+
+      {/* Body */}
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div initial={{ height:0, opacity:0 }} animate={{ height:'auto', opacity:1 }}
+            exit={{ height:0, opacity:0 }} transition={{ duration:0.18 }}
+            className="overflow-hidden">
+            <div className="p-4 grid grid-cols-1 xl:grid-cols-2 gap-4">
+
+              {/* ── META ───────────────────────────────────────────── */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-widest">
+                  <Key size={11} /> Meta Ads
+                  <StatusDot status={metaStatus} />
+                </div>
+
+                <div>
+                  <label className="text-[10px] text-slate-500 mb-1 block">Access Token</label>
+                  <input type="password"
+                    value={brand.meta.token}
+                    onChange={e => updateBrand(brand.id, { meta: { token: e.target.value } })}
+                    placeholder="EAA..."
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500" />
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <div className="flex-1">
+                    <label className="text-[10px] text-slate-500 mb-1 block">API Version</label>
+                    <input type="text"
+                      value={brand.meta.apiVersion}
+                      onChange={e => updateBrand(brand.id, { meta: { apiVersion: e.target.value } })}
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 focus:outline-none focus:ring-1 focus:ring-brand-500" />
+                  </div>
+                  <div className="mt-4">
+                    <button onClick={handleVerify} disabled={verifying || !hasToken}
+                      className="flex items-center gap-1.5 px-3 py-2 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 rounded-lg text-xs text-slate-300 transition-all border border-gray-700">
+                      {verifying ? <Spinner size="sm" /> : <CheckCircle size={11} />} Verify
+                    </button>
+                  </div>
+                </div>
+
+                {verifyOk && (
+                  <div className={`flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-lg ${verifyOk.ok ? 'bg-emerald-900/30 text-emerald-300' : 'bg-red-900/30 text-red-300'}`}>
+                    {verifyOk.ok ? <><CheckCircle size={11} /> {verifyOk.name}</> : <><AlertCircle size={11} /> {verifyOk.msg}</>}
+                  </div>
+                )}
+
+                {/* Accounts */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider">Ad Accounts</label>
+                    <button onClick={() => addBrandAccount(brand.id)}
+                      className="flex items-center gap-1 text-[10px] text-brand-400 hover:text-brand-300 transition-colors">
+                      <Plus size={10} /> Add
+                    </button>
+                  </div>
+                  <div className="space-y-1.5">
+                    {brand.meta.accounts.map((acc, i) => (
+                      <div key={i} className="flex items-center gap-1.5">
+                        <input type="text" value={acc.key}
+                          onChange={e => updateBrandAccount(brand.id, i, { key: e.target.value })}
+                          placeholder="Key (MAIN)"
+                          className="w-20 px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500" />
+                        <input type="text" value={acc.id}
+                          onChange={e => updateBrandAccount(brand.id, i, { id: e.target.value })}
+                          placeholder="Account ID"
+                          className="flex-1 px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500" />
+                        <button onClick={() => removeBrandAccount(brand.id, i)}
+                          className="p-1 text-slate-600 hover:text-red-400 transition-colors">
+                          <Trash2 size={11} />
+                        </button>
+                      </div>
+                    ))}
+                    {brand.meta.accounts.length === 0 && (
+                      <p className="text-[10px] text-slate-600 italic">No accounts — click Add above</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* ── SHOPIFY ────────────────────────────────────────── */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-widest">
+                  <ShoppingBag size={11} /> Shopify
+                  <StatusDot status={inventoryStatus} />
+                  <StatusDot status={ordersStatus} />
+                </div>
+
+                <div>
+                  <label className="text-[10px] text-slate-500 mb-1 block">Shop Domain</label>
+                  <input type="text"
+                    value={brand.shopify.shop}
+                    onChange={e => updateBrand(brand.id, { shopify: { shop: e.target.value } })}
+                    placeholder="yourshop (no .myshopify.com)"
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+                </div>
+                <div>
+                  <label className="text-[10px] text-slate-500 mb-1 block">Client ID</label>
+                  <input type="text"
+                    value={brand.shopify.clientId}
+                    onChange={e => updateBrand(brand.id, { shopify: { clientId: e.target.value } })}
+                    placeholder="bc70bfdc..."
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+                </div>
+                <div>
+                  <label className="text-[10px] text-slate-500 mb-1 block">Client Secret</label>
+                  <input type="password"
+                    value={brand.shopify.clientSecret}
+                    onChange={e => updateBrand(brand.id, { shopify: { clientSecret: e.target.value } })}
+                    placeholder="shpss_..."
+                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+                </div>
+
+                <div className="flex gap-2 pt-1">
+                  <button onClick={handlePullInventory} disabled={!hasShopify || inventoryStatus === 'loading'}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700/30 hover:bg-emerald-700/50 disabled:opacity-30 rounded-lg text-xs font-medium text-emerald-300 transition-all border border-emerald-700/30">
+                    {inventoryStatus === 'loading' ? <Spinner size="sm" /> : <ShoppingBag size={11} />} Inventory
+                  </button>
+                  <button onClick={handlePullOrders} disabled={!hasShopify || ordersStatus === 'loading'}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-700/30 hover:bg-violet-700/50 disabled:opacity-30 rounded-lg text-xs font-medium text-violet-300 transition-all border border-violet-700/30">
+                    {ordersStatus === 'loading' ? <Spinner size="sm" /> : <ShoppingBag size={11} />} Orders
+                  </button>
+                </div>
+
+                {/* Status tags */}
+                <div className="flex flex-wrap gap-1.5 text-[10px]">
+                  {bd.inventoryMap && Object.keys(bd.inventoryMap).length > 0 && (
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-900/30 text-emerald-400">
+                      {Object.keys(bd.inventoryMap).length} SKUs
+                    </span>
+                  )}
+                  {bd.orders && (
+                    <span className="px-2 py-0.5 rounded-full bg-violet-900/30 text-violet-400">
+                      {bd.orders.length} orders
+                    </span>
+                  )}
+                  {bd.metaFetchAt && (
+                    <span className="px-2 py-0.5 rounded-full bg-brand-900/30 text-brand-400">
+                      Meta: {new Date(bd.metaFetchAt).toLocaleTimeString()}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+/* ─── MAIN PAGE ──────────────────────────────────────────────────── */
 export default function Setup() {
   const {
-    config, setConfig, updateAccount, addAccount, removeAccount,
+    brands, addBrand, brandData,
     manualMap, setManualMap, setManualRow, rebuildEnriched,
-    fetchStatus, fetchLog, appendLog, clearLog, setFetchStatus, setRawAccounts,
-    enrichedRows,
-    dynamicLists, mergeDynamicLists,
-    inventoryStatus, setInventoryMap, setInventoryStatus,
+    fetchLog, appendLog, clearLog, setFetchStatus,
+    enrichedRows, dynamicLists, mergeDynamicLists,
+    setBrandMetaData, setBrandMetaStatus,
+    setBrandInventory, setBrandInventoryStatus,
+    setBrandOrders, setBrandOrdersStatus,
     setBreakdownData, setBreakdownStatus,
-    shopifyOrdersStatus, setShopifyOrders, setShopifyOrdersStatus,
   } = useStore();
 
   const LISTS = dynamicLists;
 
-  const [verifying, setVerifying] = useState(false);
-  const [verifyResult, setVerifyResult] = useState(null);
-  const [inventoryFetching, setInventoryFetching] = useState(false);
-  const [inventoryResult, setInventoryResult]     = useState(null);
-  const [ordersFetching, setOrdersFetching]       = useState(false);
-  const [ordersResult, setOrdersResult]           = useState(null);
-  const [ordersDays, setOrdersDays]               = useState(7);
-  const [megaFetching, setMegaFetching]     = useState(false);
-  const [megaStep, setMegaStep]             = useState('');    // 'meta' | 'breakdowns' | 'inventory' | 'orders'
-  const [activeManualAd, setActiveManualAd] = useState(null);
+  const [activeTab, setActiveTab]   = useState('brands');
+  const [megaFetching, setMegaFetching] = useState(false);
+  const [megaStep, setMegaStep]     = useState('');
+  const [ordersDays, setOrdersDays] = useState(7);
   const [manualSearch, setManualSearch] = useState('');
-  const [activeTab, setActiveTab] = useState('credentials');
-  const [csvImportStatus, setCsvImportStatus] = useState(null);
+  const [csvStatus, setCsvStatus]   = useState(null);
   const [savedFlash, setSavedFlash] = useState(false);
-  const csvFileRef = useRef(null);
-  const saveTimerRef = useRef(null);
+  const csvRef = useRef(null);
+  const saveTimer = useRef(null);
 
-  // Convert a days number / special string to ISO since/until for the orders endpoint
-  const daysToRange = days => {
-    const now = new Date();
-    if (days === 'all') return { since: null, until: now.toISOString() };
-    if (days === 'yesterday') {
-      const y = new Date(now); y.setDate(y.getDate() - 1);
-      const d = y.toISOString().slice(0, 10);
-      return { since: `${d}T00:00:00.000Z`, until: `${d}T23:59:59.999Z` };
-    }
-    return { since: new Date(now - Number(days) * 86400000).toISOString(), until: now.toISOString() };
-  };
-
-  // Show a brief "Saved" flash whenever config changes
   const flashSaved = () => {
     setSavedFlash(true);
-    clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => setSavedFlash(false), 2000);
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => setSavedFlash(false), 2000);
   };
 
-  const handleCsvImport = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  /* ── CSV import ────────────────────────────────────────────────── */
+  const handleCsv = async e => {
+    const file = e.target.files?.[0]; if (!file) return;
     try {
-      const text = await file.text();
-      const rows = parseCsv(text);
-      const newMap = csvRowsToManualMap(rows);
-      const count = Object.keys(newMap).length;
-      // Detect and merge dynamic lists from CSV
-      const detected = detectListsFromCsvRows(rows);
-      mergeDynamicLists(detected);
-      // Merge with existing (CSV wins on conflicts)
-      setManualMap({ ...manualMap, ...newMap });
+      const rows = parseCsv(await file.text());
+      setManualMap({ ...manualMap, ...csvRowsToManualMap(rows) });
+      mergeDynamicLists(detectListsFromCsvRows(rows));
       rebuildEnriched();
-      setCsvImportStatus({ count, merged: true });
+      setCsvStatus({ count: Object.keys(csvRowsToManualMap(rows)).length });
       flashSaved();
-    } catch (err) {
-      setCsvImportStatus({ error: err.message });
-    }
-    // Reset file input so same file can be re-imported
+    } catch (err) { setCsvStatus({ error: err.message }); }
     e.target.value = '';
   };
 
-  const handleVerify = async () => {
-    if (!config.token) return;
-    setVerifying(true);
-    setVerifyResult(null);
-    try {
-      const me = await verifyToken(config.token, config.apiVersion);
-      setVerifyResult({ ok: true, name: me.name, id: me.id });
-    } catch (e) {
-      setVerifyResult({ ok: false, message: e.message });
-    } finally {
-      setVerifying(false);
-    }
-  };
-
-  const handleFetchInventory = async () => {
-    if (!config.shopifyShop || !config.shopifyClientId || !config.shopifyClientSecret) return;
-    setInventoryFetching(true);
-    setInventoryResult(null);
-    setInventoryStatus('loading');
-    try {
-      const map = await fetchShopifyInventory(config.shopifyShop, config.shopifyClientId, config.shopifyClientSecret);
-      setInventoryMap(map);
-      const count = Object.keys(map).length;
-      setInventoryResult({ ok: true, count });
-    } catch (e) {
-      setInventoryStatus('error');
-      setInventoryResult({ ok: false, message: e.message });
-    } finally {
-      setInventoryFetching(false);
-    }
-  };
-
-  const handleFetchOrders = async () => {
-    if (!config.shopifyShop || !config.shopifyClientId || !config.shopifyClientSecret) return;
-    setOrdersFetching(true);
-    setOrdersResult(null);
-    setShopifyOrdersStatus('loading');
-    try {
-      const { since, until } = daysToRange(ordersDays);
-      const { orders: fetchedOrders, count, pages } = await fetchShopifyOrders(
-        config.shopifyShop, config.shopifyClientId, config.shopifyClientSecret,
-        since, until,
-        msg => appendLog(msg),
-      );
-      setShopifyOrders(fetchedOrders, ordersDays);
-      setOrdersResult({ ok: true, count });
-    } catch (e) {
-      setShopifyOrdersStatus('error');
-      setOrdersResult({ ok: false, message: e.message });
-    } finally {
-      setOrdersFetching(false);
-    }
-  };
-
+  /* ── Pull Everything ───────────────────────────────────────────── */
   const handlePullEverything = async () => {
-    const accounts  = config.accounts.filter(a => a.key && a.id);
-    const hasMeta   = !!config.token && accounts.length > 0;
-    const hasShopify = config.shopifyShop && config.shopifyClientId && config.shopifyClientSecret;
-
-    if (!hasMeta && !hasShopify) {
-      return alert('Configure at least Meta credentials or Shopify credentials first.');
-    }
-
     setMegaFetching(true);
     clearLog();
-    setActiveTab('log');   // jump to log so user can watch
+    setActiveTab('log');
 
-    // ── Step 1: Meta insights ────────────────────────────────────
-    if (hasMeta) {
-      setMegaStep('meta');
-      appendLog('━━━ [1/4] Meta Ads (campaigns · adsets · ads · insights) ━━━');
-      setFetchStatus('loading');
-      try {
-        const results = [];
-        for (const acc of accounts) {
-          const result = await pullAccount(
-            { ver: config.apiVersion, token: config.token, accountKey: acc.key, accountId: acc.id },
-            msg => appendLog(msg),
-          );
-          results.push(result);
+    for (const brand of brands) {
+      const accounts  = brand.meta.accounts.filter(a => a.key && a.id);
+      const hasMeta   = !!brand.meta.token && accounts.length > 0;
+      const hasShopify = brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret;
+
+      appendLog(`━━━ ${brand.name} ━━━`);
+
+      if (hasMeta) {
+        // Meta
+        setMegaStep(`${brand.id}:meta`);
+        appendLog(`[${brand.name}] Fetching Meta ads...`);
+        setBrandMetaStatus(brand.id, 'loading');
+        try {
+          let combined = { campaigns:[], adsets:[], ads:[], insightsToday:[], insights7d:[], insights14d:[], insights30d:[] };
+          for (const acc of accounts) {
+            const r = await pullAccount(
+              { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
+              msg => appendLog(`[${brand.name}] ${msg}`),
+            );
+            combined.campaigns.push(...r.campaigns);
+            combined.adsets.push(...r.adsets);
+            combined.ads.push(...r.ads);
+            combined.insightsToday.push(...r.insightsToday);
+            combined.insights7d.push(...r.insights7d);
+            combined.insights14d.push(...r.insights14d);
+            combined.insights30d.push(...r.insights30d);
+          }
+          setBrandMetaData(brand.id, combined);
+          appendLog(`[${brand.name}] ✅ Meta done`);
+        } catch (e) {
+          setBrandMetaStatus(brand.id, 'error', e.message);
+          appendLog(`[${brand.name}] ❌ Meta: ${e.message}`);
         }
-        setRawAccounts(results);
-        setFetchStatus('success');
-        appendLog('✅ Meta ads complete!');
-      } catch (e) {
-        setFetchStatus('error', e.message);
-        appendLog('❌ Meta error: ' + e.message);
+
+        // Breakdowns
+        setMegaStep(`${brand.id}:breakdowns`);
+        appendLog(`[${brand.name}] Fetching 7D breakdowns...`);
+        setBreakdownStatus('loading');
+        try {
+          const bdResult = await pullAllBreakdowns(
+            { ver: brand.meta.apiVersion, token: brand.meta.token, accounts, specs: BREAKDOWN_SPECS, window: '7D' },
+            msg => appendLog(`[${brand.name}] ${msg}`),
+          );
+          setBreakdownData(bdResult);
+          appendLog(`[${brand.name}] ✅ Breakdowns done`);
+        } catch (e) {
+          setBreakdownStatus('error');
+          appendLog(`[${brand.name}] ❌ Breakdowns: ${e.message}`);
+        }
+      } else {
+        appendLog(`[${brand.name}] ⚠️ Meta not configured — skipped`);
       }
 
-      // ── Step 2: 7D Breakdowns ──────────────────────────────────
-      setMegaStep('breakdowns');
-      appendLog('━━━ [2/4] 7D Breakdowns ━━━');
-      setBreakdownStatus('loading');
-      try {
-        const bdResult = await pullAllBreakdowns(
-          { ver: config.apiVersion, token: config.token, accounts, specs: BREAKDOWN_SPECS, window: '7D' },
-          msg => appendLog(msg),
-        );
-        setBreakdownData(bdResult);
-        appendLog('✅ Breakdowns complete!');
-      } catch (e) {
-        setBreakdownStatus('error');
-        appendLog('❌ Breakdowns error: ' + e.message);
+      if (hasShopify) {
+        // Inventory
+        setMegaStep(`${brand.id}:inventory`);
+        appendLog(`[${brand.name}] Fetching Shopify inventory...`);
+        setBrandInventoryStatus(brand.id, 'loading');
+        try {
+          const map = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
+          setBrandInventory(brand.id, map);
+          appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(map).length} SKUs`);
+        } catch (e) {
+          setBrandInventoryStatus(brand.id, 'error');
+          appendLog(`[${brand.name}] ❌ Inventory: ${e.message}`);
+        }
+
+        // Orders
+        setMegaStep(`${brand.id}:orders`);
+        const label = ordersDays === 'all' ? 'all time' : ordersDays === 'yesterday' ? 'yesterday' : `last ${ordersDays}d`;
+        appendLog(`[${brand.name}] Fetching Shopify orders (${label})...`);
+        setBrandOrdersStatus(brand.id, 'loading');
+        try {
+          const { since, until } = daysToRange(ordersDays);
+          const { orders: fetched, count } = await fetchShopifyOrders(
+            brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
+            since, until, msg => appendLog(`[${brand.name}] ${msg}`),
+          );
+          setBrandOrders(brand.id, fetched, ordersDays);
+          appendLog(`[${brand.name}] ✅ Orders — ${count} orders`);
+        } catch (e) {
+          setBrandOrdersStatus(brand.id, 'error', e.message);
+          appendLog(`[${brand.name}] ❌ Orders: ${e.message}`);
+        }
+      } else {
+        appendLog(`[${brand.name}] ⚠️ Shopify not configured — skipped`);
       }
-    } else {
-      appendLog('⚠️  Meta not configured — skipping Meta + Breakdowns');
     }
 
-    // ── Step 3: Shopify Inventory ────────────────────────────────
-    if (hasShopify) {
-      setMegaStep('inventory');
-      appendLog('━━━ [3/4] Shopify Inventory ━━━');
-      setInventoryStatus('loading');
-      try {
-        const map = await fetchShopifyInventory(config.shopifyShop, config.shopifyClientId, config.shopifyClientSecret);
-        setInventoryMap(map);
-        const count = Object.keys(map).length;
-        setInventoryResult({ ok: true, count });
-        appendLog(`✅ Inventory complete — ${count} SKUs loaded`);
-      } catch (e) {
-        setInventoryStatus('error');
-        appendLog('❌ Inventory error: ' + e.message);
-      }
-
-      // ── Step 4: Shopify Orders ─────────────────────────────────
-      setMegaStep('orders');
-      const rangeLabel = ordersDays === 'all' ? 'all time' : `last ${ordersDays}d`;
-      appendLog(`━━━ [4/4] Shopify Orders (${rangeLabel}) ━━━`);
-      setShopifyOrdersStatus('loading');
-      try {
-        const { since, until } = daysToRange(ordersDays);
-        const { orders: fetchedOrders, count, pages } = await fetchShopifyOrders(
-          config.shopifyShop, config.shopifyClientId, config.shopifyClientSecret,
-          since, until,
-          msg => appendLog(msg),
-        );
-        setShopifyOrders(fetchedOrders, ordersDays);
-        setOrdersResult({ ok: true, count });
-        appendLog(`✅ Orders complete — ${count} orders across ${pages} page(s)`);
-      } catch (e) {
-        setShopifyOrdersStatus('error');
-        appendLog('❌ Orders error: ' + e.message);
-      }
-    } else {
-      appendLog('⚠️  Shopify not configured — skipping Inventory + Orders');
-    }
-
-    appendLog('🎉 Pull Everything done! Navigate to any dashboard.');
+    appendLog('🎉 Pull Everything complete!');
     setMegaStep('');
     setMegaFetching(false);
   };
 
-  const handlePull = async () => {
-    const accounts = config.accounts.filter(a => a.key && a.id);
-    if (!config.token) return alert('Enter Meta Access Token first.');
-    if (!accounts.length) return alert('Add at least one Ad Account.');
-
-    setFetchStatus('loading');
-    clearLog();
-    appendLog('Starting pull...');
-
-    try {
-      // Step 1: Pull insights for all windows
-      const results = [];
-      for (const acc of accounts) {
-        const result = await pullAccount(
-          { ver: config.apiVersion, token: config.token, accountKey: acc.key, accountId: acc.id },
-          msg => appendLog(msg),
-        );
-        results.push(result);
-      }
-      setRawAccounts(results);
-      setFetchStatus('success');
-      appendLog('✅ Insights done! Now pulling 7D breakdowns...');
-
-      // Step 2: Auto-pull all breakdowns for 7D window
-      setBreakdownStatus('loading');
-      const bdResult = await pullAllBreakdowns(
-        {
-          ver:      config.apiVersion,
-          token:    config.token,
-          accounts,
-          specs:    BREAKDOWN_SPECS,
-          window:   '7D',
-        },
-        msg => appendLog(msg),
-      );
-      setBreakdownData(bdResult);
-      appendLog('✅ Breakdowns done!');
-    } catch (e) {
-      setFetchStatus('error', e.message);
-      appendLog('❌ Error: ' + e.message);
-    }
-  };
-
-  // Ads available for manual labeling
-  const adsForManual = enrichedRows
-    .filter(r => !manualSearch || r.adName?.toLowerCase().includes(manualSearch.toLowerCase())
-                              || r.campaignName?.toLowerCase().includes(manualSearch.toLowerCase()))
-    .slice(0, 200);
-
   const TABS = [
-    { id: 'credentials', label: 'API Credentials', icon: Key },
-    { id: 'import',      label: 'Import CSV',       icon: Upload },
-    { id: 'manual',      label: 'Manual Labels',   icon: BookOpen },
-    { id: 'log',         label: 'Fetch Log',        icon: RefreshCw },
+    { id: 'brands',  label: 'Brands & Connections', icon: Zap },
+    { id: 'import',  label: 'Import CSV',            icon: Upload },
+    { id: 'manual',  label: 'Manual Labels',         icon: BookOpen },
+    { id: 'log',     label: 'Fetch Log',             icon: RefreshCw },
   ];
 
+  const adsForManual = enrichedRows
+    .filter(r => !manualSearch
+      || r.adName?.toLowerCase().includes(manualSearch.toLowerCase())
+      || r.campaignName?.toLowerCase().includes(manualSearch.toLowerCase()))
+    .slice(0, 200);
+
   return (
-    <div className="max-w-4xl space-y-6">
+    <div className="max-w-5xl space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-white">Study Manual</h1>
         <p className="text-sm text-slate-400 mt-1">
-          Configure your Meta API credentials, ad accounts, and apply manual labels to ads.
-          This is the only section that requires your input — all dashboards are auto-generated.
+          Manage brands, connect Meta + Shopify, pull data, and apply manual labels.
         </p>
       </div>
 
       {/* Tabs */}
       <div className="flex gap-1 p-1 bg-gray-900 rounded-xl border border-gray-800 w-fit">
         {TABS.map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setActiveTab(id)}
+          <button key={id} onClick={() => setActiveTab(id)}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-              activeTab === id
-                ? 'bg-brand-600/30 text-brand-300 ring-1 ring-brand-500/40'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Icon size={14} /> {label}
+              activeTab === id ? 'bg-brand-600/30 text-brand-300 ring-1 ring-brand-500/40' : 'text-slate-400 hover:text-slate-200'
+            }`}>
+            <Icon size={13} /> {label}
           </button>
         ))}
       </div>
 
-      {/* ── CREDENTIALS TAB ─────────────────────────────────────── */}
-      {activeTab === 'credentials' && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
-          {/* Token */}
-          <div className="bg-gray-900 rounded-xl border border-gray-800 p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-white font-semibold">
-                <Key size={16} className="text-brand-400" /> Meta Access Token
-              </div>
-              <div className="flex items-center gap-2">
-                {config.token && (
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-900/40 text-emerald-400 ring-1 ring-emerald-500/30">
-                    Token set ✓
-                  </span>
-                )}
-                {savedFlash && (
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-brand-900/40 text-brand-300 ring-1 ring-brand-500/30 animate-pulse">
-                    Saved to browser ✓
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs text-slate-400 mb-1 block">Access Token</label>
-                <input
-                  type="password"
-                  value={config.token}
-                  onChange={e => { setConfig({ ...config, token: e.target.value }); flashSaved(); }}
-                  placeholder="EAA..."
-                  className="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-brand-500"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-400 mb-1 block">API Version</label>
-                <input
-                  type="text"
-                  value={config.apiVersion}
-                  onChange={e => { setConfig({ ...config, apiVersion: e.target.value }); flashSaved(); }}
-                  className="w-48 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-brand-500"
-                />
-              </div>
-              <button
-                onClick={handleVerify}
-                disabled={verifying || !config.token}
-                className="flex items-center gap-2 px-4 py-2 bg-brand-600 hover:bg-brand-500 disabled:opacity-40 rounded-lg text-sm font-medium text-white transition-all"
-              >
-                {verifying ? <Spinner size="sm" /> : <CheckCircle size={14} />}
-                Verify Token
-              </button>
-              {verifyResult && (
-                <div className={`flex items-center gap-2 text-sm px-3 py-2 rounded-lg ${
-                  verifyResult.ok ? 'bg-emerald-900/30 text-emerald-300' : 'bg-red-900/30 text-red-300'
-                }`}>
-                  {verifyResult.ok
-                    ? <><CheckCircle size={14} /> Connected as <strong>{verifyResult.name}</strong> ({verifyResult.id})</>
-                    : <><AlertCircle size={14} /> {verifyResult.message}</>
-                  }
-                </div>
-              )}
-            </div>
-          </div>
+      {/* ── BRANDS TAB ────────────────────────────────────────────── */}
+      {activeTab === 'brands' && (
+        <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} className="space-y-4">
 
-          {/* Accounts */}
-          <div className="bg-gray-900 rounded-xl border border-gray-800 p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-white font-semibold">
-                <Users size={16} className="text-brand-400" /> Ad Accounts
-              </div>
-              <button
-                onClick={() => { addAccount(); flashSaved(); }}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-gray-800 hover:bg-gray-700 text-slate-300 rounded-lg transition-all border border-gray-700"
-              >
-                <Plus size={12} /> Add account
-              </button>
-            </div>
+          {/* Brand cards */}
+          {brands.map(brand => (
+            <BrandCard
+              key={brand.id}
+              brand={brand}
+              brandInfo={brandData[brand.id]}
+              ordersDays={ordersDays}
+              onOrdersDaysChange={setOrdersDays}
+            />
+          ))}
 
-            {config.accounts.length === 0 && (
-              <p className="text-sm text-slate-500 italic">No accounts yet. Click "Add account" above.</p>
-            )}
+          <button onClick={addBrand}
+            className="flex items-center gap-2 px-4 py-2.5 bg-gray-800 hover:bg-gray-700 border border-dashed border-gray-600 hover:border-brand-500 rounded-xl text-sm text-slate-400 hover:text-brand-300 transition-all w-full justify-center">
+            <Plus size={14} /> Add Brand
+          </button>
 
-            <div className="space-y-2">
-              {config.accounts.map((acc, i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={acc.key}
-                    onChange={e => { updateAccount(i, { key: e.target.value }); flashSaved(); }}
-                    placeholder="Account key (e.g. MAIN)"
-                    className="w-36 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500"
-                  />
-                  <input
-                    type="text"
-                    value={acc.id}
-                    onChange={e => { updateAccount(i, { id: e.target.value }); flashSaved(); }}
-                    placeholder="Account ID (act_... or numeric)"
-                    className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500"
-                  />
-                  <button
-                    onClick={() => { removeAccount(i); flashSaved(); }}
-                    className="p-2 text-slate-500 hover:text-red-400 transition-colors"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Shopify Inventory */}
-          <div className="bg-gray-900 rounded-xl border border-gray-800 p-5 space-y-4">
-            <div className="flex items-center gap-2 text-white font-semibold">
-              <ShoppingBag size={16} className="text-emerald-400" /> Shopify Inventory
-              <span className="text-xs font-normal text-slate-500 ml-1">— links SKU codes to current stock levels</span>
-            </div>
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs text-slate-400 mb-1 block">Shopify Shop Domain</label>
-                <input
-                  type="text"
-                  value={config.shopifyShop || ''}
-                  onChange={e => { setConfig({ ...config, shopifyShop: e.target.value }); flashSaved(); }}
-                  placeholder="yourshop (without .myshopify.com)"
-                  className="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-400 mb-1 block">Client ID</label>
-                <input
-                  type="text"
-                  value={config.shopifyClientId || ''}
-                  onChange={e => { setConfig({ ...config, shopifyClientId: e.target.value }); flashSaved(); }}
-                  placeholder="bc70bfdc89f06d5810b5bed1c..."
-                  className="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-400 mb-1 block">Client Secret</label>
-                <input
-                  type="password"
-                  value={config.shopifyClientSecret || ''}
-                  onChange={e => { setConfig({ ...config, shopifyClientSecret: e.target.value }); flashSaved(); }}
-                  placeholder="shpss_..."
-                  className="w-full px-3 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
-              <button
-                onClick={handleFetchInventory}
-                disabled={inventoryFetching || !config.shopifyShop || !config.shopifyClientId || !config.shopifyClientSecret}
-                className="flex items-center gap-2 px-4 py-2 bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 rounded-lg text-sm font-medium text-white transition-all"
-              >
-                {inventoryFetching ? <Spinner size="sm" /> : <ShoppingBag size={14} />}
-                {inventoryFetching ? 'Fetching stock...' : 'Fetch Inventory Stock'}
-              </button>
-              {inventoryResult && (
-                <div className={`flex items-center gap-2 text-sm px-3 py-2 rounded-lg ${
-                  inventoryResult.ok ? 'bg-emerald-900/30 text-emerald-300' : 'bg-red-900/30 text-red-300'
-                }`}>
-                  {inventoryResult.ok
-                    ? <><CheckCircle size={14} /> Loaded <strong>{inventoryResult.count}</strong> SKUs from Shopify</>
-                    : <><AlertCircle size={14} /> {inventoryResult.message}</>
-                  }
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Shopify Orders — Analytics Data */}
-          <div className="bg-gray-900 rounded-xl border border-gray-800 p-5 space-y-4">
-            <div className="flex items-center gap-2 text-white font-semibold">
-              <ShoppingBag size={16} className="text-violet-400" /> Shopify Analytics Data
-              <span className="text-xs font-normal text-slate-500 ml-1">— orders, customers, RFM, cohorts</span>
-            </div>
-            <p className="text-xs text-slate-500">
-              Pulls all orders for the selected period. Used for SKU sales velocity, customer RFM scoring, cohort retention, discount analysis, geography, and timing insights.
-            </p>
-            <div className="flex items-center gap-3">
-              <label className="text-xs text-slate-400 shrink-0">Date range</label>
-              <select
-                value={ordersDays}
-                onChange={e => { const v = e.target.value; setOrdersDays(['all','yesterday'].includes(v) ? v : Number(v)); }}
-                className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-violet-500"
-              >
-                <option value="yesterday">Yesterday</option>
-                <option value={7}>Last 7 days</option>
-                <option value={14}>Last 14 days</option>
-                <option value={30}>Last 30 days</option>
-                <option value={90}>Last 90 days</option>
-                <option value={180}>Last 180 days</option>
-                <option value={365}>Last 365 days</option>
-                <option value="all">All time</option>
-              </select>
-            </div>
-            <button
-              onClick={handleFetchOrders}
-              disabled={ordersFetching || !config.shopifyShop || !config.shopifyClientId || !config.shopifyClientSecret}
-              className="flex items-center gap-2 px-4 py-2 bg-violet-700 hover:bg-violet-600 disabled:opacity-40 rounded-lg text-sm font-medium text-white transition-all"
-            >
-              {ordersFetching ? <Spinner size="sm" /> : <ShoppingBag size={14} />}
-              {ordersFetching ? 'Fetching orders...' : 'Fetch Shopify Analytics Data'}
-            </button>
-            {ordersResult && (
-              <div className={`flex items-center gap-2 text-sm px-3 py-2 rounded-lg ${ordersResult.ok ? 'bg-violet-900/30 text-violet-300' : 'bg-red-900/30 text-red-300'}`}>
-                {ordersResult.ok
-                  ? <><CheckCircle size={14} /> Loaded <strong>{ordersResult.count}</strong> orders — go to Shopify Analytics to explore</>
-                  : <><AlertCircle size={14} /> {ordersResult.message}</>}
-              </div>
-            )}
-            {shopifyOrdersStatus === 'success' && !ordersResult && (
-              <div className="text-xs text-slate-500 px-1">Orders already loaded — re-fetch to refresh.</div>
-            )}
-          </div>
-
-          {/* ── PULL EVERYTHING ──────────────────────────────────── */}
+          {/* Pull Everything */}
           <div className="bg-gradient-to-br from-brand-900/40 to-violet-900/30 rounded-2xl border border-brand-700/40 p-5 space-y-4">
             <div className="flex items-center gap-2">
-              <div className="p-1.5 rounded-lg bg-brand-600/30">
-                <Zap size={16} className="text-brand-300" />
-              </div>
+              <div className="p-1.5 rounded-lg bg-brand-600/30"><Zap size={16} className="text-brand-300" /></div>
               <div>
-                <div className="text-white font-semibold text-sm">Pull Everything</div>
-                <div className="text-[11px] text-slate-400">Meta ads · 7D breakdowns · Shopify inventory · Shopify orders — one click</div>
+                <div className="text-white font-bold text-sm">Pull Everything</div>
+                <div className="text-[11px] text-slate-400">{brands.length} brand{brands.length > 1 ? 's' : ''} · Meta ads · 7D breakdowns · Shopify inventory + orders</div>
               </div>
             </div>
 
-            {/* Shopify orders date range (accessible here without scrolling down) */}
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
               <label className="text-xs text-slate-400 shrink-0">Shopify orders window</label>
               <select
                 value={ordersDays}
                 onChange={e => { const v = e.target.value; setOrdersDays(['all','yesterday'].includes(v) ? v : Number(v)); }}
                 disabled={megaFetching}
-                className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-violet-500 disabled:opacity-50"
-              >
-                <option value="yesterday">Yesterday</option>
-                <option value={7}>Last 7 days</option>
-                <option value={14}>Last 14 days</option>
-                <option value={30}>Last 30 days</option>
-                <option value={90}>Last 90 days</option>
-                <option value={180}>Last 180 days</option>
-                <option value={365}>Last 365 days</option>
-                <option value="all">All time</option>
+                className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-violet-500 disabled:opacity-50">
+                {ORDER_WINDOWS.map(w => <option key={w.value} value={w.value}>{w.label}</option>)}
               </select>
             </div>
 
-            <button
-              onClick={handlePullEverything}
-              disabled={megaFetching}
-              className="w-full flex items-center justify-center gap-2.5 px-6 py-3.5 bg-brand-600 hover:bg-brand-500 disabled:opacity-50 rounded-xl text-sm font-bold text-white transition-all shadow-glow"
-            >
+            <button onClick={handlePullEverything} disabled={megaFetching}
+              className="w-full flex items-center justify-center gap-2.5 px-6 py-3.5 bg-brand-600 hover:bg-brand-500 disabled:opacity-50 rounded-xl text-sm font-bold text-white transition-all">
               {megaFetching ? <Spinner size="sm" /> : <Zap size={16} />}
-              {megaFetching
-                ? megaStep === 'meta'        ? 'Fetching Meta ads...'
-                : megaStep === 'breakdowns'  ? 'Pulling 7D breakdowns...'
-                : megaStep === 'inventory'   ? 'Fetching Shopify inventory...'
-                : megaStep === 'orders'      ? 'Fetching Shopify orders...'
-                : 'Working...'
-                : 'Pull Everything'}
+              {megaFetching ? (megaStep ? `${megaStep.split(':')[1]} — ${brands.find(b=>b.id===megaStep.split(':')[0])?.name || '...'}` : 'Working...') : 'Pull Everything'}
             </button>
 
-            {/* Quick step indicators */}
             {megaFetching && (
-              <div className="flex items-center gap-1 justify-center">
-                {[
-                  { key:'meta',       label:'Meta' },
-                  { key:'breakdowns', label:'Breakdowns' },
-                  { key:'inventory',  label:'Inventory' },
-                  { key:'orders',     label:'Orders' },
-                ].map(({ key, label }) => (
-                  <span key={key} className={`px-2 py-0.5 rounded-full text-[10px] font-medium transition-all ${
-                    megaStep === key
-                      ? 'bg-brand-600/40 text-brand-300 ring-1 ring-brand-500/50'
-                      : 'text-slate-600'
-                  }`}>
-                    {label}
+              <div className="flex flex-wrap gap-1 justify-center">
+                {brands.map(b => (
+                  <span key={b.id} className={`px-2 py-0.5 rounded-full text-[10px] font-medium transition-all ${
+                    megaStep?.startsWith(b.id) ? 'ring-1 text-white' : 'text-slate-600'
+                  }`} style={megaStep?.startsWith(b.id) ? { background: b.color+'33', borderColor: b.color, color: b.color } : {}}>
+                    {b.name}
                   </span>
                 ))}
               </div>
@@ -600,85 +576,51 @@ export default function Setup() {
         </motion.div>
       )}
 
-      {/* ── IMPORT CSV TAB ──────────────────────────────────────── */}
+      {/* ── IMPORT CSV TAB ─────────────────────────────────────────── */}
       {activeTab === 'import' && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4 max-w-lg">
-          <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-5">
-            <div className="flex items-center gap-2 text-white font-semibold">
-              <Upload size={16} className="text-brand-400" /> Import 02_MANUAL.csv
-            </div>
-            <p className="text-sm text-slate-400">
-              Upload your exported <span className="font-mono text-slate-300">02_MANUAL.csv</span> file.
-              All columns (Collection, Campaign Type, Offer Type, Audience flags, Status Override, Notes, etc.)
-              are loaded automatically. Existing labels are overwritten only where the CSV has a row.
-            </p>
-
+        <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} className="max-w-lg space-y-4">
+          <div className="bg-gray-900 rounded-xl border border-gray-800 p-6 space-y-4">
+            <div className="flex items-center gap-2 text-white font-semibold"><Upload size={15} className="text-brand-400" /> Import 02_MANUAL.csv</div>
+            <p className="text-sm text-slate-400">Upload your exported <span className="font-mono text-slate-300">02_MANUAL.csv</span>. All columns are loaded automatically.</p>
             <label className="flex flex-col items-center justify-center gap-3 border-2 border-dashed border-gray-700 hover:border-brand-500 rounded-xl p-8 cursor-pointer transition-colors">
               <Upload size={28} className="text-slate-500" />
               <span className="text-sm text-slate-400">Click to choose file or drag & drop</span>
-              <span className="text-xs text-slate-600">Accepts .csv files from your TAOS Google Sheet</span>
-              <input
-                ref={csvFileRef}
-                type="file"
-                accept=".csv,text/csv"
-                onChange={handleCsvImport}
-                className="hidden"
-              />
+              <input ref={csvRef} type="file" accept=".csv,text/csv" onChange={handleCsv} className="hidden" />
             </label>
-
-            {csvImportStatus && !csvImportStatus.error && (
+            {csvStatus && !csvStatus.error && (
               <div className="flex items-center gap-2 px-4 py-3 bg-emerald-900/30 text-emerald-300 rounded-lg text-sm">
-                <CheckCircle size={16} />
-                Loaded <strong>{csvImportStatus.count}</strong> ad rows into the manual map.
-                {' '}All dashboards have been refreshed.
+                <CheckCircle size={15} /> Loaded <strong>{csvStatus.count}</strong> rows.
               </div>
             )}
-            {csvImportStatus?.error && (
+            {csvStatus?.error && (
               <div className="flex items-center gap-2 px-4 py-3 bg-red-900/30 text-red-300 rounded-lg text-sm">
-                <AlertCircle size={16} /> {csvImportStatus.error}
-              </div>
-            )}
-
-            {Object.keys(manualMap).length > 0 && (
-              <div className="text-xs text-slate-500">
-                Currently loaded: <span className="text-slate-300 font-medium">{Object.keys(manualMap).length}</span> ads labeled
+                <AlertCircle size={15} /> {csvStatus.error}
               </div>
             )}
           </div>
         </motion.div>
       )}
 
-      {/* ── MANUAL LABELS TAB ───────────────────────────────────── */}
+      {/* ── MANUAL LABELS TAB ──────────────────────────────────────── */}
       {activeTab === 'manual' && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-4">
+        <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} className="space-y-4">
           {enrichedRows.length === 0 ? (
-            <div className="bg-gray-900 rounded-xl border border-gray-800 p-8 text-center text-slate-500">
-              Pull Meta data first to see ads available for labeling.
-            </div>
+            <div className="bg-gray-900 rounded-xl border border-gray-800 p-8 text-center text-slate-500">Pull Meta data first.</div>
           ) : (
             <>
               <div className="flex items-center gap-3">
-                <input
-                  type="text"
-                  value={manualSearch}
-                  onChange={e => setManualSearch(e.target.value)}
+                <input type="text" value={manualSearch} onChange={e => setManualSearch(e.target.value)}
                   placeholder="Search ads / campaigns..."
-                  className="w-80 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500"
-                />
-                <span className="text-xs text-slate-500">{adsForManual.length} ads shown</span>
+                  className="w-80 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500" />
+                <span className="text-xs text-slate-500">{adsForManual.length} ads</span>
               </div>
-
               <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
                 <table className="w-full text-xs">
-                  <thead className="bg-gray-900 border-b border-gray-800">
+                  <thead className="border-b border-gray-800">
                     <tr>
-                      <th className="px-3 py-2.5 text-left text-slate-400 font-semibold w-64">Ad</th>
-                      <th className="px-3 py-2.5 text-left text-slate-400 font-semibold">Campaign</th>
-                      <th className="px-3 py-2.5 text-left text-slate-400 font-semibold">Collection</th>
-                      <th className="px-3 py-2.5 text-left text-slate-400 font-semibold">Campaign Type</th>
-                      <th className="px-3 py-2.5 text-left text-slate-400 font-semibold">Offer</th>
-                      <th className="px-3 py-2.5 text-left text-slate-400 font-semibold">Override</th>
-                      <th className="px-3 py-2.5 text-left text-slate-400 font-semibold">Notes</th>
+                      {['Ad','Campaign','Collection','Campaign Type','Offer','Override','Notes'].map(h => (
+                        <th key={h} className="px-3 py-2.5 text-left text-slate-400 font-semibold">{h}</th>
+                      ))}
                     </tr>
                   </thead>
                   <tbody>
@@ -690,33 +632,19 @@ export default function Setup() {
                           <td className="px-3 py-2 text-slate-400 max-w-[160px] truncate">{row.campaignName}</td>
                           {['Collection','Campaign Type','Offer Type','Status Override'].map(field => (
                             <td key={field} className="px-3 py-1">
-                              {LISTS[field] ? (
-                                <select
-                                  value={m[field] || ''}
-                                  onChange={e => { setManualRow(row.adId, { [field]: e.target.value }); rebuildEnriched(); flashSaved(); }}
-                                  className="w-full px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-200 text-xs focus:outline-none focus:ring-1 focus:ring-brand-500"
-                                >
-                                  <option value="">—</option>
-                                  {LISTS[field].map(v => <option key={v} value={v}>{v}</option>)}
-                                </select>
-                              ) : (
-                                <input
-                                  type="text"
-                                  value={m[field] || ''}
-                                  onChange={e => { setManualRow(row.adId, { [field]: e.target.value }); rebuildEnriched(); flashSaved(); }}
-                                  className="w-full px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-200 text-xs focus:outline-none focus:ring-1 focus:ring-brand-500"
-                                />
-                              )}
+                              <select value={m[field] || ''}
+                                onChange={e => { setManualRow(row.adId, { [field]: e.target.value }); rebuildEnriched(); flashSaved(); }}
+                                className="w-full px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-200 text-xs focus:outline-none focus:ring-1 focus:ring-brand-500">
+                                <option value="">—</option>
+                                {(LISTS[field] || []).map(v => <option key={v} value={v}>{v}</option>)}
+                              </select>
                             </td>
                           ))}
                           <td className="px-3 py-1">
-                            <input
-                              type="text"
-                              value={m['Notes'] || ''}
+                            <input type="text" value={m['Notes'] || ''}
                               onChange={e => { setManualRow(row.adId, { Notes: e.target.value }); rebuildEnriched(); flashSaved(); }}
                               placeholder="notes..."
-                              className="w-32 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-200 text-xs focus:outline-none focus:ring-1 focus:ring-brand-500"
-                            />
+                              className="w-32 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-200 text-xs focus:outline-none" />
                           </td>
                         </tr>
                       );
@@ -729,14 +657,15 @@ export default function Setup() {
         </motion.div>
       )}
 
-      {/* ── LOG TAB ─────────────────────────────────────────────── */}
+      {/* ── LOG TAB ────────────────────────────────────────────────── */}
       {activeTab === 'log' && (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-          <div className="bg-gray-900 rounded-xl border border-gray-800 p-4 font-mono text-xs text-slate-300 h-96 overflow-y-auto space-y-0.5">
+        <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }}>
+          <div className="bg-gray-900 rounded-xl border border-gray-800 p-4 font-mono text-xs text-slate-300 h-[480px] overflow-y-auto space-y-0.5">
             {fetchLog.length === 0
               ? <span className="text-slate-600">No log entries yet.</span>
-              : fetchLog.map((l, i) => <div key={i} className="leading-relaxed">{l}</div>)
-            }
+              : fetchLog.map((l, i) => (
+                <div key={i} className={`leading-relaxed ${l.includes('✅') ? 'text-emerald-400' : l.includes('❌') ? 'text-red-400' : l.includes('⚠️') ? 'text-amber-400' : l.startsWith('━') ? 'text-slate-400 font-bold mt-1' : 'text-slate-400'}`}>{l}</div>
+              ))}
           </div>
         </motion.div>
       )}

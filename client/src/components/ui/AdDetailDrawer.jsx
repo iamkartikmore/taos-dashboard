@@ -241,7 +241,18 @@ function VideoBar({ label, pct: value, color }) {
 
 /* ─── MAIN DRAWER ────────────────────────────────────────────────── */
 export default function AdDetailDrawer({ row, onClose }) {
-  const { rawAccounts, config, enrichedRows, breakdownRows } = useStore();
+  const { rawAccounts, brands, enrichedRows, breakdownRows } = useStore();
+
+  // Derive config-like object for the brand that owns this ad
+  const config = (() => {
+    if (!row || !brands?.length) return { token: '', apiVersion: 'v21.0', accounts: [] };
+    const ownerBrand = brands.find(b => b.meta?.accounts?.some(a => a.key === row.accountKey)) || brands[0];
+    return {
+      token:      ownerBrand?.meta?.token || '',
+      apiVersion: ownerBrand?.meta?.apiVersion || 'v21.0',
+      accounts:   ownerBrand?.meta?.accounts || [],
+    };
+  })();
   const [windows, setWindows] = useState({});
   const [loadingWindows, setLoadingWindows] = useState({});
   const [fetchErrors, setFetchErrors] = useState({});

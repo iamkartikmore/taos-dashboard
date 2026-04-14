@@ -207,9 +207,15 @@ function UtmTree({ list }) {
 
 export default function ShopifyOrders() {
   const {
-    config, shopifyOrders, shopifyOrdersStatus, shopifyOrdersWindow,
+    brands, shopifyOrders, shopifyOrdersStatus, shopifyOrdersWindow,
     setShopifyOrders, setShopifyOrdersStatus, inventoryMap,
   } = useStore();
+
+  // Use first brand with Shopify configured, or let user pick
+  const shopifyBrands = (brands || []).filter(b => b.shopify?.shop && b.shopify?.clientId && b.shopify?.clientSecret);
+  const [selectedBrandId, setSelectedBrandId] = useState(() => shopifyBrands[0]?.id || '');
+  const activeBrand = shopifyBrands.find(b => b.id === selectedBrandId) || shopifyBrands[0];
+  const shopify = activeBrand?.shopify || {};
 
   const [win, setWin]             = useState(shopifyOrdersWindow || '7d');
   const [customSince, setCSince]  = useState('');
@@ -233,7 +239,7 @@ export default function ShopifyOrders() {
   // Combos tab
   const [comboView, setComboView] = useState('pairs');
 
-  const canFetch = config.shopifyShop && config.shopifyClientId && config.shopifyClientSecret;
+  const canFetch = shopifyBrands.length > 0;
 
   const addLog = msg => setFetchLog(prev => [...prev, `${new Date().toLocaleTimeString()} — ${msg}`]);
 
@@ -248,7 +254,7 @@ export default function ShopifyOrders() {
       addLog(`Window: ${since.slice(0,10)} → ${(until||'').slice(0,10)}`);
       // fetchShopifyOrders now uses SSE — each server log line calls addLog in real-time
       const result = await fetchShopifyOrders(
-        config.shopifyShop, config.shopifyClientId, config.shopifyClientSecret,
+        shopify.shop, shopify.clientId, shopify.clientSecret,
         since, until,
         msg => addLog(msg),   // ← SSE real-time callback
       );
@@ -316,7 +322,7 @@ export default function ShopifyOrders() {
   if (!canFetch) return (
     <div className="flex flex-col items-center justify-center h-64 gap-3 text-slate-500">
       <ShoppingBag size={36} className="opacity-30" />
-      <p className="text-sm">Add Shopify credentials in Study Manual → API Credentials first.</p>
+      <p className="text-sm">Add Shopify credentials in Study Manual → Brands first.</p>
     </div>
   );
 
@@ -338,6 +344,15 @@ export default function ShopifyOrders() {
             )}
           </div>
         </div>
+
+        {shopifyBrands.length > 1 && (
+          <select value={selectedBrandId} onChange={e => setSelectedBrandId(e.target.value)}
+            className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500">
+            {shopifyBrands.map(b => (
+              <option key={b.id} value={b.id}>{b.name}</option>
+            ))}
+          </select>
+        )}
 
         <div className="flex gap-1 p-1 bg-gray-900 border border-gray-800 rounded-xl ml-auto flex-wrap">
           {WINDOWS.map(w => (

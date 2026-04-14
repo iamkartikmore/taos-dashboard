@@ -32,7 +32,7 @@ const GROUP_LABELS = {
 };
 
 export default function Sidebar() {
-  const { fetchStatus, lastFetchAt, enrichedRows, config } = useStore();
+  const { fetchStatus, lastFetchAt, enrichedRows, brands } = useStore();
   const groups = [...new Set(NAV.map(n => n.group))];
 
   return (
@@ -106,9 +106,9 @@ export default function Sidebar() {
       </nav>
 
       {/* Accounts count */}
-      {config.accounts.length > 0 && (
+      {brands?.length > 0 && (
         <div className="px-4 py-3 border-t border-gray-800/40 text-[10px] text-slate-600">
-          {config.accounts.filter(a => a.id).length} account(s) configured
+          {brands.length} brand{brands.length > 1 ? 's' : ''} configured
         </div>
       )}
     </aside>

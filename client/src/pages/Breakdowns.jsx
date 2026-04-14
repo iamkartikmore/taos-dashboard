@@ -947,30 +947,40 @@ function AdsTab({ breakdownRows }) {
 /* ─── MAIN PAGE ──────────────────────────────────────────────────────── */
 
 export default function Breakdowns() {
-  const { config, breakdownRows, breakdownStatus, lastBreakdownAt, setBreakdownData, setBreakdownStatus } = useStore();
+  const { brands, activeBrandIds, breakdownRows, breakdownStatus, lastBreakdownAt, setBreakdownData, setBreakdownStatus } = useStore();
+
+  // Build a flat list of accounts from all active Meta-configured brands
+  const activeBrands = (brands || []).filter(b => activeBrandIds.includes(b.id) && b.meta?.token);
+  // Each account gets a brandRef so we can look up token/apiVersion when pulling
+  const accounts = activeBrands.flatMap(b =>
+    (b.meta.accounts || []).filter(a => a.id && a.key).map(a => ({ ...a, _token: b.meta.token, _ver: b.meta.apiVersion || 'v21.0' }))
+  );
 
   const [tab, setTab] = useState('overview');
-  const [selectedAccounts, setSelectedAccounts] = useState(() => config.accounts.map(a => a.key));
+  const [selectedAccounts, setSelectedAccounts] = useState(() => accounts.map(a => a.key));
   const [window, setWindow] = useState('7D');
   const [dateRange, setDateRange] = useState({ since: '', until: '' });
   const [pullLog, setPullLog] = useState([]);
 
-  const accounts = config.accounts.filter(a => a.id && a.key);
   const activeAccounts = accounts.filter(a => selectedAccounts.includes(a.key));
 
   const hasData = Object.keys(breakdownRows).some(k => (breakdownRows[k] || []).length > 0);
 
+  const hasToken = activeBrands.length > 0;
+
   const handlePull = async () => {
-    if (!config.token || activeAccounts.length === 0) return;
+    if (!hasToken || activeAccounts.length === 0) return;
     setBreakdownStatus('loading');
     setPullLog([]);
 
     const onProgress = msg => setPullLog(prev => [...prev.slice(-4), msg]);
 
     try {
+      // Use first active account's brand token/ver as representative (pullAllBreakdowns uses per-account _token/_ver if available)
+      const rep = activeAccounts[0];
       const raw = await pullAllBreakdowns({
-        ver:       config.apiVersion || 'v21.0',
-        token:     config.token,
+        ver:       rep?._ver || 'v21.0',
+        token:     rep?._token || '',
         accounts:  activeAccounts,
         specs:     BREAKDOWN_SPECS,
         window,
@@ -1048,7 +1058,7 @@ export default function Breakdowns() {
 
           <button
             onClick={handlePull}
-            disabled={breakdownStatus === 'loading' || !config.token || activeAccounts.length === 0}
+            disabled={breakdownStatus === 'loading' || !hasToken || activeAccounts.length === 0}
             className="flex items-center gap-1.5 px-4 py-1.5 bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg transition-colors"
           >
             {breakdownStatus === 'loading' ? <Spinner size="sm" /> : <Zap size={12} />}
