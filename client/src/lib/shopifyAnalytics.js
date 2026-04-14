@@ -47,6 +47,38 @@ export function getWindowDates(w, cSince, cUntil) {
 
 const p = v => parseFloat(v || 0);
 
+// Parse UTM params from a landing_site URL
+function parseUtm(landingSite, noteAttributes) {
+  // Try note_attributes first (some apps store UTMs there)
+  const notes = {};
+  (noteAttributes || []).forEach(({ name, value }) => {
+    if (name && name.toLowerCase().startsWith('utm_')) notes[name.toLowerCase()] = value;
+  });
+  if (notes.utm_source) return {
+    source:   notes.utm_source   || '(none)',
+    medium:   notes.utm_medium   || '(none)',
+    campaign: notes.utm_campaign || '(none)',
+    content:  notes.utm_content  || '',
+    term:     notes.utm_term     || '',
+  };
+
+  // Fall back to landing_site URL
+  if (!landingSite) return null;
+  try {
+    const url = landingSite.startsWith('http') ? landingSite : `https://x.com${landingSite}`;
+    const params = new URL(url).searchParams;
+    const source = params.get('utm_source');
+    if (!source) return null;
+    return {
+      source:   source,
+      medium:   params.get('utm_medium')   || '(none)',
+      campaign: params.get('utm_campaign') || '(none)',
+      content:  params.get('utm_content')  || '',
+      term:     params.get('utm_term')     || '',
+    };
+  } catch { return null; }
+}
+
 function getReferrer(site) {
   if (!site) return 'direct';
   try {
@@ -112,6 +144,7 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
   const geoMap      = {};
   const cityMap     = {};
   const srcMap      = {};
+  const utmSrcMap   = {};   // utm_source → { orders, revenue, mediums: {}, campaigns: {} }
   const payMap      = {};   // payment gateway
   const refMap      = {};   // referring site
   const crossSell   = {};   // pair co-occurrence counts
@@ -188,6 +221,25 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
     if (!refMap[ref]) refMap[ref] = { source: ref, orders: 0, revenue: 0, newOrders: 0 };
     refMap[ref].orders++; refMap[ref].revenue += rev;
     if (isNew) refMap[ref].newOrders++;
+
+    // ── UTM attribution (from landing_site URL or note_attributes)
+    const utm = parseUtm(o.landing_site, o.note_attributes);
+    if (utm) {
+      const us = utm.source;
+      if (!utmSrcMap[us]) utmSrcMap[us] = { source: us, orders: 0, revenue: 0, newOrders: 0, mediums: {}, campaigns: {} };
+      utmSrcMap[us].orders++;
+      utmSrcMap[us].revenue += rev;
+      if (isNew) utmSrcMap[us].newOrders++;
+      const med = utm.medium;
+      if (!utmSrcMap[us].mediums[med]) utmSrcMap[us].mediums[med] = { medium: med, orders: 0, revenue: 0, campaigns: {} };
+      utmSrcMap[us].mediums[med].orders++;
+      utmSrcMap[us].mediums[med].revenue += rev;
+      const camp = utm.campaign;
+      if (!utmSrcMap[us].mediums[med].campaigns[camp])
+        utmSrcMap[us].mediums[med].campaigns[camp] = { campaign: camp, orders: 0, revenue: 0 };
+      utmSrcMap[us].mediums[med].campaigns[camp].orders++;
+      utmSrcMap[us].mediums[med].campaigns[camp].revenue += rev;
+    }
 
     // ── customer (keyed by email so guest checkouts are deduplicated)
     const custKey = key || (cid ? `cid_${cid}` : null);
@@ -363,6 +415,23 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
   const srcList  = Object.values(srcMap).sort((a, b) => b.revenue - a.revenue);
   const payList  = Object.values(payMap).sort((a, b) => b.orders - a.orders);
   const referList = Object.values(refMap).sort((a, b) => b.orders - a.orders).slice(0, 20);
+
+  // Flatten UTM data into a drill-down list: source → medium → campaign rows
+  const utmList = Object.values(utmSrcMap).sort((a, b) => b.revenue - a.revenue).map(s => ({
+    source:    s.source,
+    orders:    s.orders,
+    revenue:   s.revenue,
+    newOrders: s.newOrders,
+    newPct:    s.orders > 0 ? s.newOrders / s.orders * 100 : 0,
+    aov:       s.orders > 0 ? s.revenue / s.orders : 0,
+    mediums:   Object.values(s.mediums).sort((a, b) => b.revenue - a.revenue).map(m => ({
+      medium:    m.medium,
+      orders:    m.orders,
+      revenue:   m.revenue,
+      aov:       m.orders > 0 ? m.revenue / m.orders : 0,
+      campaigns: Object.values(m.campaigns).sort((a, b) => b.revenue - a.revenue),
+    })),
+  }));
   const cancelList = Object.values(cancelMap).sort((a, b) => b.count - a.count);
 
   // Cross-sell pairs with lift + confidence + support
@@ -572,7 +641,7 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
     },
     skuList, cacReducers, rfmData, segments, topCustomers,
     discList, dailyTrend, hourlyData,
-    geoList, cityList, srcList,
+    geoList, cityList, srcList, utmList,
     payList, referList, cancelList,
     crossSellList, tripletList, sequenceList,
     fulfillStats,

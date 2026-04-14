@@ -143,6 +143,66 @@ function LiftBadge({ lift }) {
   );
 }
 
+/* ─── UTM ATTRIBUTION TREE ───────────────────────────────────────── */
+function UtmTree({ list }) {
+  const [expanded, setExpanded] = useState({});
+  const [expandedMed, setExpandedMed] = useState({});
+  const toggle = key => setExpanded(prev => ({ ...prev, [key]: !prev[key] }));
+  const toggleMed = key => setExpandedMed(prev => ({ ...prev, [key]: !prev[key] }));
+  const maxRev = list[0]?.revenue || 1;
+
+  return (
+    <div className="space-y-1 text-xs">
+      {list.slice(0,12).map(src => (
+        <div key={src.source}>
+          {/* Source row */}
+          <div className="flex items-center gap-1.5 py-1 hover:bg-gray-800/40 rounded px-1 cursor-pointer group"
+            onClick={() => toggle(src.source)}>
+            <span className="text-slate-500 text-[9px] w-3">{src.mediums?.length > 0 ? (expanded[src.source] ? '▾' : '▸') : ' '}</span>
+            <span className="font-semibold text-slate-200 w-28 truncate">{src.source}</span>
+            <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden mx-1">
+              <div className="h-full bg-blue-500/70 rounded-full" style={{ width:`${src.revenue/maxRev*100}%` }} />
+            </div>
+            <span className="text-slate-300 w-20 text-right tabular-nums">{cur(src.revenue)}</span>
+            <span className="text-slate-600 w-10 text-right tabular-nums">{src.orders} ord</span>
+            <span className="text-[9px] text-slate-600 w-14 text-right">{pct(src.newPct)} new</span>
+          </div>
+
+          {/* Medium rows */}
+          {expanded[src.source] && src.mediums?.map(med => (
+            <div key={med.medium} className="ml-4">
+              <div className="flex items-center gap-1.5 py-0.5 hover:bg-gray-800/30 rounded px-1 cursor-pointer"
+                onClick={() => toggleMed(`${src.source}|${med.medium}`)}>
+                <span className="text-slate-600 text-[9px] w-3">{med.campaigns?.length > 0 ? (expandedMed[`${src.source}|${med.medium}`] ? '▾' : '▸') : ' '}</span>
+                <span className="text-slate-400 w-24 truncate italic">{med.medium}</span>
+                <div className="flex-1 h-1 bg-gray-800 rounded-full overflow-hidden mx-1">
+                  <div className="h-full bg-violet-500/60 rounded-full" style={{ width:`${med.revenue/maxRev*100}%` }} />
+                </div>
+                <span className="text-slate-400 w-20 text-right tabular-nums">{cur(med.revenue)}</span>
+                <span className="text-slate-600 w-10 text-right tabular-nums">{med.orders} ord</span>
+              </div>
+
+              {/* Campaign rows */}
+              {expandedMed[`${src.source}|${med.medium}`] && med.campaigns?.slice(0,10).map(camp => (
+                <div key={camp.campaign}
+                  className="ml-4 flex items-center gap-1.5 py-0.5 px-1 text-[10px]">
+                  <span className="w-3" />
+                  <span className="text-slate-500 w-40 truncate">{camp.campaign}</span>
+                  <div className="flex-1 h-1 bg-gray-800 rounded-full overflow-hidden mx-1">
+                    <div className="h-full bg-emerald-500/50 rounded-full" style={{ width:`${camp.revenue/maxRev*100}%` }} />
+                  </div>
+                  <span className="text-slate-500 w-20 text-right tabular-nums">{cur(camp.revenue)}</span>
+                  <span className="text-slate-600 w-10 text-right tabular-nums">{camp.orders} ord</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ─── PAGE ───────────────────────────────────────────────────────── */
 
 export default function ShopifyOrders() {
@@ -375,24 +435,79 @@ export default function ShopifyOrders() {
                 <KPI label="Shipping Rev"    value={cur(data.overview.shipping)}          sub="total shipping collected" />
               </div>
 
-              <Card>
-                <ST>Daily Revenue + Orders</ST>
-                <ResponsiveContainer width="100%" height={220}>
-                  <LineChart data={data.dailyTrend}>
-                    <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
-                    <XAxis dataKey="date" tick={{ fill:'#64748b', fontSize:10 }} tickLine={false} />
-                    <YAxis yAxisId="l" tick={{ fill:'#64748b', fontSize:10 }} tickLine={false} tickFormatter={v => `₹${(v/1000).toFixed(0)}k`} />
-                    <YAxis yAxisId="r" orientation="right" tick={{ fill:'#64748b', fontSize:10 }} tickLine={false} />
-                    <Tooltip content={<CT />} />
-                    <Legend wrapperStyle={{ fontSize:11, color:'#94a3b8' }} />
-                    <Line yAxisId="l" type="monotone" dataKey="revenue"   name="Revenue"     stroke="#22c55e" strokeWidth={2} dot={false} />
-                    <Line yAxisId="r" type="monotone" dataKey="orders"    name="Orders"      stroke="#2d7cf6" strokeWidth={2} dot={false} />
-                    <Line yAxisId="r" type="monotone" dataKey="newOrders" name="New Cust"    stroke="#a78bfa" strokeWidth={1.5} dot={false} strokeDasharray="4 2" />
-                  </LineChart>
-                </ResponsiveContainer>
-              </Card>
+              {/* ── Daily performance pattern ──────────────────────── */}
+              {(() => {
+                // 7-day moving average + colour bars by vs-avg performance
+                const trend = data.dailyTrend;
+                const avgRev = trend.length ? trend.reduce((s,d)=>s+d.revenue,0)/trend.length : 1;
+                const enriched = trend.map((d, i) => {
+                  const windowSlice = trend.slice(Math.max(0,i-3), Math.min(trend.length,i+4));
+                  const ma7 = windowSlice.reduce((s,x)=>s+x.revenue,0)/windowSlice.length;
+                  const discRate = d.revenue > 0 ? (d.discount||0)/d.revenue*100 : 0;
+                  return { ...d, ma7: Math.round(ma7), discRate: +discRate.toFixed(1), vsAvg: d.revenue - avgRev };
+                });
+                return (
+                  <Card>
+                    <div className="flex items-center justify-between mb-3">
+                      <ST>Daily Revenue — Pattern vs Average</ST>
+                      <div className="flex items-center gap-3 text-[10px] text-slate-500">
+                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-emerald-500/70 inline-block" /> Above avg</span>
+                        <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-500/70 inline-block" /> Below avg</span>
+                        <span className="flex items-center gap-1"><span className="w-6 h-0.5 bg-amber-400 inline-block" /> 7d MA</span>
+                      </div>
+                    </div>
+                    <ResponsiveContainer width="100%" height={200}>
+                      <BarChart data={enriched} barSize={Math.max(4, Math.min(18, 600/Math.max(enriched.length,1)))}>
+                        <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" vertical={false} />
+                        <XAxis dataKey="date" tick={{ fill:'#475569', fontSize:9 }} tickLine={false}
+                          tickFormatter={v => v?.slice(5)} interval={Math.max(0,Math.floor(enriched.length/12)-1)} />
+                        <YAxis yAxisId="l" tick={{ fill:'#475569', fontSize:10 }} tickLine={false}
+                          tickFormatter={v => `₹${(v/1000).toFixed(0)}k`} axisLine={false} />
+                        <YAxis yAxisId="r" orientation="right" tick={{ fill:'#475569', fontSize:9 }}
+                          tickLine={false} axisLine={false} tickFormatter={v=>`${v.toFixed(0)}%`} />
+                        <Tooltip content={({ active, payload, label }) => {
+                          if (!active || !payload?.length) return null;
+                          const d = payload[0]?.payload;
+                          return (
+                            <div className="bg-gray-900 border border-gray-700 rounded-lg p-3 text-xs space-y-1 shadow-xl min-w-[180px]">
+                              <div className="font-semibold text-slate-200 mb-1">{label}</div>
+                              <div className="text-emerald-400">Revenue: <strong>{cur(d?.revenue)}</strong></div>
+                              <div className="text-amber-400">7d MA: <strong>{cur(d?.ma7)}</strong></div>
+                              <div className="text-slate-400">Orders: <strong>{d?.orders}</strong> · New: <strong>{d?.newOrders}</strong></div>
+                              <div className="text-slate-400">Disc Rate: <strong>{d?.discRate}%</strong></div>
+                              <div className={d?.vsAvg >= 0 ? 'text-emerald-400' : 'text-red-400'}>vs Avg: <strong>{d?.vsAvg >= 0 ? '+' : ''}{cur(d?.vsAvg)}</strong></div>
+                            </div>
+                          );
+                        }} />
+                        <Bar yAxisId="l" dataKey="revenue" name="Revenue" radius={[2,2,0,0]}>
+                          {enriched.map((d, i) => <Cell key={i} fill={d.vsAvg >= 0 ? '#22c55e99' : '#ef444499'} />)}
+                        </Bar>
+                        <Line yAxisId="l" type="monotone" dataKey="ma7" stroke="#f59e0b" strokeWidth={1.5} dot={false} name="7d MA" />
+                        <Line yAxisId="r" type="monotone" dataKey="discRate" stroke="#a78bfa" strokeWidth={1} dot={false} strokeDasharray="3 2" name="Disc%" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                    {/* New vs repeat mini bar */}
+                    <div className="mt-3 border-t border-gray-800 pt-3">
+                      <div className="text-[10px] text-slate-500 mb-2 font-semibold uppercase tracking-wider">New vs Repeat orders per day</div>
+                      <ResponsiveContainer width="100%" height={60}>
+                        <BarChart data={enriched} barSize={Math.max(3, Math.min(14, 600/Math.max(enriched.length,1)))}>
+                          <XAxis dataKey="date" hide />
+                          <Tooltip content={({ active, payload }) => {
+                            if (!active || !payload?.length) return null;
+                            const d = payload[0]?.payload;
+                            return <div className="bg-gray-900 border border-gray-700 rounded p-2 text-xs"><div className="text-slate-400">{d?.date}: <span className="text-blue-400">{d?.newOrders} new</span> · <span className="text-emerald-400">{(d?.orders||0)-(d?.newOrders||0)} repeat</span></div></div>;
+                          }} />
+                          <Bar dataKey="newOrders" stackId="a" fill="#3b82f6aa" radius={[0,0,0,0]} name="New" />
+                          <Bar dataKey="orders" stackId="a" fill="#22c55e33" radius={[1,1,0,0]} name="Repeat base" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </Card>
+                );
+              })()}
 
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                {/* Orders by hour */}
                 <Card>
                   <ST>Orders by Hour</ST>
                   <ResponsiveContainer width="100%" height={160}>
@@ -407,23 +522,39 @@ export default function ShopifyOrders() {
                   </ResponsiveContainer>
                 </Card>
 
+                {/* UTM / Traffic attribution */}
                 <Card>
-                  <ST>Traffic Source (source_name)</ST>
-                  <div className="space-y-2">
-                    {data.srcList.slice(0, 8).map((s, i) => {
-                      const max = data.srcList[0]?.revenue || 1;
-                      return (
-                        <div key={s.source} className="flex items-center gap-2">
-                          <span className="text-[11px] text-slate-400 w-20 truncate capitalize">{s.source}</span>
-                          <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
-                            <div className="h-full rounded-full" style={{ width:`${s.revenue/max*100}%`, background: C[i%C.length] }} />
-                          </div>
-                          <span className="text-[10px] text-slate-400 w-20 text-right tabular-nums">{cur(s.revenue)}</span>
-                          <span className="text-[10px] text-slate-600 w-8 text-right">{s.orders}</span>
-                        </div>
-                      );
-                    })}
+                  <div className="flex items-center justify-between mb-3">
+                    <ST>{data.utmList?.length > 0 ? 'UTM Attribution' : 'Traffic Source'}</ST>
+                    {data.utmList?.length === 0 && (
+                      <span className="text-[9px] text-amber-500/70 bg-amber-500/10 px-2 py-0.5 rounded-full">
+                        No UTM params found in orders
+                      </span>
+                    )}
                   </div>
+
+                  {data.utmList?.length > 0 ? (
+                    <UtmTree list={data.utmList} />
+                  ) : (
+                    // Fallback: referrer breakdown
+                    <div className="space-y-1.5">
+                      {[...data.referList, ...data.srcList.filter(s => !data.referList.some(r=>r.source===s.source))]
+                        .slice(0,10).map((s, i) => {
+                          const max = data.referList[0]?.revenue || data.srcList[0]?.revenue || 1;
+                          return (
+                            <div key={s.source} className="flex items-center gap-2">
+                              <span className="text-[10px] text-slate-400 w-24 truncate">{s.source || 'direct'}</span>
+                              <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                                <div className="h-full rounded-full" style={{ width:`${s.revenue/max*100}%`, background: C[i%C.length] }} />
+                              </div>
+                              <span className="text-[10px] text-slate-400 w-20 text-right tabular-nums">{cur(s.revenue)}</span>
+                              <span className="text-[10px] text-slate-600 w-8 text-right">{s.orders}</span>
+                            </div>
+                          );
+                        })}
+                      <p className="text-[9px] text-slate-600 mt-2">Tip: add UTM params to your ad URLs to see source/medium/campaign breakdown here.</p>
+                    </div>
+                  )}
                 </Card>
               </div>
             </motion.div>

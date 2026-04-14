@@ -186,9 +186,9 @@ app.post('/api/shopify/orders/stream', async (req, res) => {
       'total_price','total_discounts','total_shipping_price_set',
       'customer','line_items','discount_codes',
       'billing_address','shipping_address',
-      'source_name','referring_site',
+      'source_name','referring_site','landing_site',
       'payment_gateway','payment_gateway_names',
-      'refunds','fulfillments',
+      'refunds','fulfillments','note_attributes',
     ].join(',');
 
     let qs = `limit=250&status=any&fields=${fields}`;
