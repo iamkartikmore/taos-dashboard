@@ -18,11 +18,12 @@ import {
 } from '../lib/gaAnalytics';
 
 /* ─── FORMATTERS ─────────────────────────────────────────────────── */
-const cur  = n => `₹${Number(n||0).toLocaleString('en-IN',{maximumFractionDigits:0})}`;
-const num  = n => Number(n||0).toLocaleString('en-IN',{maximumFractionDigits:0});
-const pct  = n => `${Number(n||0).toFixed(1)}%`;
+const n    = v => parseFloat(v || 0);
+const cur  = v => `₹${n(v).toLocaleString('en-IN',{maximumFractionDigits:0})}`;
+const num  = v => n(v).toLocaleString('en-IN',{maximumFractionDigits:0});
+const pct  = v => `${n(v).toFixed(1)}%`;
 const dur  = s => s < 60 ? `${Math.round(s)}s` : `${Math.floor(s/60)}m${Math.round(s%60)}s`;
-const dec  = (n,d=1) => Number(n||0).toFixed(d);
+const dec  = (v,d=1) => n(v).toFixed(d);
 
 const COLORS = ['#3b82f6','#22c55e','#f59e0b','#a78bfa','#f472b6','#34d399','#fb923c','#60a5fa','#e879f9','#4ade80','#c084fc','#38bdf8'];
 

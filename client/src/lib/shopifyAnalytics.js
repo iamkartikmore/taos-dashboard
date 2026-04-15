@@ -38,7 +38,12 @@ export function getWindowDates(w, cSince, cUntil) {
       const last = new Date(now.getFullYear(), now.getMonth(), 0).getDate();
       return { since: `${yr}-${pad(mo)}-01T00:00:00`, until: `${yr}-${pad(mo)}-${pad(last)}T23:59:59` };
     }
-    case 'custom': return { since: cSince || shift(7).toISOString(), until: cUntil || now.toISOString() };
+    case 'custom': {
+      // Date inputs return "YYYY-MM-DD" — append time so Shopify filters correctly
+      const s = cSince ? (cSince.includes('T') ? cSince : `${cSince}T00:00:00`) : shift(7).toISOString();
+      const u = cUntil ? (cUntil.includes('T') ? cUntil : `${cUntil}T23:59:59`) : now.toISOString();
+      return { since: s, until: u };
+    }
     default:       return { since: shift(7).toISOString(), until: now.toISOString() };
   }
 }
@@ -253,7 +258,7 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
         ordersInWindow: 0, revenueInWindow: 0,
         lifetimeOrders: o.customer?.orders_count || 1,
         lifetimeRevenue: p(o.customer?.total_spent),
-        joinedAt: o.customer.created_at,
+        joinedAt: o.customer?.created_at,
       };
       const c = custMap[custKey];
       c.ordersInWindow++;
