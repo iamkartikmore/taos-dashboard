@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
@@ -197,19 +197,41 @@ function AccountSelect({ accounts, selected, onChange }) {
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
 
-  const allSelected = selected.length === accounts.length;
+  // Close on outside click
+  useEffect(() => {
+    const handler = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const allSelected = accounts.length > 0 && selected.length === accounts.length;
 
   const toggle = key => {
-    if (selected.includes(key)) {
-      onChange(selected.filter(k => k !== key));
-    } else {
-      onChange([...selected, key]);
-    }
+    if (selected.includes(key)) onChange(selected.filter(k => k !== key));
+    else onChange([...selected, key]);
   };
 
   const toggleAll = () => {
     if (allSelected) onChange([]);
     else onChange(accounts.map(a => a.key));
+  };
+
+  // Group accounts by brand
+  const byBrand = useMemo(() => {
+    const map = {};
+    accounts.forEach(a => {
+      const bName = a._brandName || 'Unknown';
+      if (!map[bName]) map[bName] = { brandId: a._brandId, accounts: [] };
+      map[bName].accounts.push(a);
+    });
+    return Object.entries(map);
+  }, [accounts]);
+
+  const toggleBrand = (brandAccs) => {
+    const keys = brandAccs.map(a => a.key);
+    const allBrandSelected = keys.every(k => selected.includes(k));
+    if (allBrandSelected) onChange(selected.filter(k => !keys.includes(k)));
+    else onChange([...new Set([...selected, ...keys])]);
   };
 
   return (
@@ -225,23 +247,44 @@ function AccountSelect({ accounts, selected, onChange }) {
         </span>
       </button>
       {open && (
-        <div className="absolute top-full mt-1 left-0 z-50 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-2 min-w-[160px]">
-          <label className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 cursor-pointer text-xs text-slate-300">
+        <div className="absolute top-full mt-1 left-0 z-50 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-2 min-w-[200px] max-h-72 overflow-y-auto">
+          <label className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 cursor-pointer text-xs text-slate-300 font-semibold">
             <input type="checkbox" checked={allSelected} onChange={toggleAll} className="accent-brand-500" />
             All accounts
           </label>
           <div className="border-t border-gray-800 my-1" />
-          {accounts.map(a => (
-            <label key={a.key} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 cursor-pointer text-xs text-slate-300">
-              <input
-                type="checkbox"
-                checked={selected.includes(a.key)}
-                onChange={() => toggle(a.key)}
-                className="accent-brand-500"
-              />
-              {a.key || a.id}
-            </label>
-          ))}
+          {byBrand.map(([brandName, { accounts: bAccs }]) => {
+            const allBrandSel = bAccs.every(a => selected.includes(a.key));
+            const someBrandSel = bAccs.some(a => selected.includes(a.key));
+            return (
+              <div key={brandName}>
+                {/* Brand row */}
+                <label className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-800 cursor-pointer text-xs text-brand-300 font-semibold">
+                  <input
+                    type="checkbox"
+                    checked={allBrandSel}
+                    ref={el => { if (el) el.indeterminate = !allBrandSel && someBrandSel; }}
+                    onChange={() => toggleBrand(bAccs)}
+                    className="accent-brand-500"
+                  />
+                  {brandName}
+                  <span className="ml-auto text-[10px] text-slate-600">{bAccs.length}</span>
+                </label>
+                {/* Account rows under brand */}
+                {bAccs.map(a => (
+                  <label key={a.key} className="flex items-center gap-2 pl-6 pr-2 py-1 rounded hover:bg-gray-800 cursor-pointer text-xs text-slate-400">
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(a.key)}
+                      onChange={() => toggle(a.key)}
+                      className="accent-brand-500"
+                    />
+                    <span className="truncate max-w-[140px]" title={a.key}>{a.key || a.id}</span>
+                  </label>
+                ))}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -949,34 +992,53 @@ function AdsTab({ breakdownRows }) {
 export default function Breakdowns() {
   const { brands, activeBrandIds, breakdownRows, breakdownStatus, lastBreakdownAt, setBreakdownData, setBreakdownStatus } = useStore();
 
-  // Build a flat list of accounts from all active Meta-configured brands
-  const activeBrands = (brands || []).filter(b => activeBrandIds.includes(b.id) && b.meta?.token);
-  // Each account gets a brandRef so we can look up token/apiVersion when pulling
-  const accounts = activeBrands.flatMap(b =>
-    (b.meta.accounts || []).filter(a => a.id && a.key).map(a => ({ ...a, _token: b.meta.token, _ver: b.meta.apiVersion || 'v21.0' }))
+  // ALL meta-configured brands (not filtered by activeBrandIds) so every account is always visible
+  const allAccounts = useMemo(() =>
+    (brands || [])
+      .filter(b => b.meta?.token)
+      .flatMap(b =>
+        (b.meta.accounts || [])
+          .filter(a => a.id && a.key)
+          .map(a => ({
+            ...a,
+            _token: b.meta.token,
+            _ver: b.meta.apiVersion || 'v21.0',
+            _brandId: b.id,
+            _brandName: b.name,
+          }))
+      ),
+    [brands]
   );
 
   const [tab, setTab] = useState('overview');
-  const [selectedAccounts, setSelectedAccounts] = useState(() => accounts.map(a => a.key));
+  // Init: select accounts belonging to currently active brands
+  const [selectedAccounts, setSelectedAccounts] = useState(() =>
+    allAccounts.filter(a => activeBrandIds.includes(a._brandId)).map(a => a.key)
+  );
   const [window, setWindow] = useState('7D');
   const [dateRange, setDateRange] = useState({ since: '', until: '' });
   const [pullLog, setPullLog] = useState([]);
 
-  const activeAccounts = accounts.filter(a => selectedAccounts.includes(a.key));
+  // Keep selectedAccounts in sync when the top brand pills change
+  useEffect(() => {
+    setSelectedAccounts(
+      allAccounts.filter(a => activeBrandIds.includes(a._brandId)).map(a => a.key)
+    );
+  }, [activeBrandIds, allAccounts]);
+
+  const activeAccounts = allAccounts.filter(a => selectedAccounts.includes(a.key));
 
   const hasData = Object.keys(breakdownRows).some(k => (breakdownRows[k] || []).length > 0);
-
-  const hasToken = activeBrands.length > 0;
+  const hasToken = allAccounts.length > 0;
 
   const handlePull = async () => {
-    if (!hasToken || activeAccounts.length === 0) return;
+    if (activeAccounts.length === 0) return;
     setBreakdownStatus('loading');
     setPullLog([]);
 
     const onProgress = msg => setPullLog(prev => [...prev.slice(-4), msg]);
 
     try {
-      // Use first active account's brand token/ver as representative (pullAllBreakdowns uses per-account _token/_ver if available)
       const rep = activeAccounts[0];
       const raw = await pullAllBreakdowns({
         ver:       rep?._ver || 'v21.0',
@@ -995,14 +1057,15 @@ export default function Breakdowns() {
 
   const filteredRows = useMemo(() => {
     if (!hasData) return {};
+    const allKeys = allAccounts.map(a => a.key);
     const out = {};
     Object.entries(breakdownRows).forEach(([bdKey, rows]) => {
-      out[bdKey] = selectedAccounts.length === accounts.length
+      out[bdKey] = selectedAccounts.length === allKeys.length
         ? rows
         : rows.filter(r => selectedAccounts.includes(r.accountKey));
     });
     return out;
-  }, [breakdownRows, selectedAccounts, accounts.length, hasData]);
+  }, [breakdownRows, selectedAccounts, allAccounts, hasData]);
 
   return (
     <div className="space-y-0">
@@ -1017,7 +1080,7 @@ export default function Breakdowns() {
           </div>
 
           <AccountSelect
-            accounts={accounts}
+            accounts={allAccounts}
             selected={selectedAccounts}
             onChange={setSelectedAccounts}
           />
@@ -1058,7 +1121,7 @@ export default function Breakdowns() {
 
           <button
             onClick={handlePull}
-            disabled={breakdownStatus === 'loading' || !hasToken || activeAccounts.length === 0}
+            disabled={breakdownStatus === 'loading' || activeAccounts.length === 0}
             className="flex items-center gap-1.5 px-4 py-1.5 bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold rounded-lg transition-colors"
           >
             {breakdownStatus === 'loading' ? <Spinner size="sm" /> : <Zap size={12} />}
@@ -1097,7 +1160,7 @@ export default function Breakdowns() {
               age, gender, platform, device, country, and region breakdowns from the Meta API.
             </p>
           </div>
-          {accounts.length === 0 && (
+          {allAccounts.length === 0 && (
             <p className="text-xs text-amber-400">No accounts configured — visit Setup to add accounts.</p>
           )}
         </motion.div>

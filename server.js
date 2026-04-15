@@ -263,7 +263,7 @@ app.post('/api/ga/report', async (req, res) => {
     const tokenResponse = await client.getAccessToken();
     const accessToken = tokenResponse.token;
 
-    const since = dateRange?.since || '365daysAgo';
+    const since = dateRange?.since || '7daysAgo';
     const until = dateRange?.until || 'today';
     const BASE = `https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`;
     const HDRS = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
