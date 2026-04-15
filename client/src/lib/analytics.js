@@ -306,12 +306,19 @@ export function classifyDecision(r, manual) {
 
 /* ─── BUILD FLAT ENRICHED ROWS ───────────────────────────────────── */
 
-export function buildEnrichedRows(insights7d, insights30d, manualMap, adsetMap = {}, campaignMap = {}) {
+export function buildEnrichedRows(insights7d, insights30d, manualMap, adsetMap = {}, campaignMap = {}, adMap = {}) {
+  // Only include rows where the ad (and its adset + campaign) are fully ACTIVE.
+  // Meta's effective_status already rolls up the hierarchy — if it's ACTIVE the whole chain is active.
+  // When adMap is empty (data not yet fetched) we pass everything through so the UI stays populated.
+  const hasAdMap = Object.keys(adMap).length > 0;
+  const activeInsights7d  = hasAdMap ? insights7d.filter(r  => adMap[r.adId]?.effective_status === 'ACTIVE') : insights7d;
+  const activeInsights30d = hasAdMap ? insights30d.filter(r => adMap[r.adId]?.effective_status === 'ACTIVE') : insights30d;
+
   const rows30 = {};
-  insights30d.forEach(r => { rows30[r.adId] = r; });
+  activeInsights30d.forEach(r => { rows30[r.adId] = r; });
 
   const account7Metrics = {};
-  insights7d.forEach(r => {
+  activeInsights7d.forEach(r => {
     const key = r.accountKey || r.accountId;
     if (!account7Metrics[key]) account7Metrics[key] = [];
     account7Metrics[key].push(r);
@@ -330,7 +337,7 @@ export function buildEnrichedRows(insights7d, insights30d, manualMap, adsetMap =
     };
   });
 
-  return insights7d.map(r => {
+  return activeInsights7d.map(r => {
     const manual = manualMap?.[r.adId] || {};
     const t30    = rows30[r.adId] || null;
     const accKey = r.accountKey || r.accountId;

@@ -96,7 +96,7 @@ export const useStore = create((set, get) => {
 
     // Meta
     const all7d = [], all30d = [];
-    const adsetMap = {}, campaignMap = {};
+    const adsetMap = {}, campaignMap = {}, adMap = {};
     active.forEach(b => {
       const d = brandData[b.id];
       if (!d) return;
@@ -104,8 +104,9 @@ export const useStore = create((set, get) => {
       all30d.push(...(d.insights30d || []));
       (d.adsets    || []).forEach(a => { adsetMap[a.id]    = a; });
       (d.campaigns || []).forEach(c => { campaignMap[c.id] = c; });
+      (d.ads       || []).forEach(a => { adMap[a.id]       = a; });
     });
-    const enrichedRows = buildEnrichedRows(all7d, all30d, manualMap, adsetMap, campaignMap);
+    const enrichedRows = buildEnrichedRows(all7d, all30d, manualMap, adsetMap, campaignMap, adMap);
 
     // Shopify
     const inventoryMap = {};
