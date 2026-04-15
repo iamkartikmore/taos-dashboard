@@ -112,9 +112,9 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
     if (!hasShopify) return;
     setBrandInventoryStatus(brand.id, 'loading');
     try {
-      const map = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
-      setBrandInventory(brand.id, map);
-      appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(map).length} SKUs`);
+      const result = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
+      setBrandInventory(brand.id, result.map, result.locations, result.inventoryByLocation, result.skuToItemId);
+      appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(result.map).length} SKUs · ${result.locations.length} locations`);
     } catch (e) {
       setBrandInventoryStatus(brand.id, 'error');
       appendLog(`[${brand.name}] ❌ Inventory error: ${e.message}`);
@@ -144,7 +144,7 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
     try {
       const data = await fetchGaData(
         brand.ga.serviceAccountJson, brand.ga.propertyId,
-        null, // use default 365d range
+        { since: '7daysAgo', until: 'today' },
         msg => appendLog(`[${brand.name}] ${msg}`),
       );
       setBrandGaData(brand.id, data);
@@ -523,9 +523,9 @@ export default function Setup() {
         appendLog(`[${brand.name}] Fetching Shopify inventory...`);
         setBrandInventoryStatus(brand.id, 'loading');
         try {
-          const map = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
-          setBrandInventory(brand.id, map);
-          appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(map).length} SKUs`);
+          const result = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
+          setBrandInventory(brand.id, result.map, result.locations, result.inventoryByLocation, result.skuToItemId);
+          appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(result.map).length} SKUs · ${result.locations.length} locations`);
         } catch (e) {
           setBrandInventoryStatus(brand.id, 'error');
           appendLog(`[${brand.name}] ❌ Inventory: ${e.message}`);
@@ -560,7 +560,8 @@ export default function Setup() {
         try {
           const gaResult = await fetchGaData(
             brand.ga.serviceAccountJson, brand.ga.propertyId,
-            null, msg => appendLog(`[${brand.name}] ${msg}`),
+            { since: '7daysAgo', until: 'today' },
+            msg => appendLog(`[${brand.name}] ${msg}`),
           );
           setBrandGaData(brand.id, gaResult);
           appendLog(`[${brand.name}] ✅ GA — ${gaResult.dailyTrend?.length || 0}d`);

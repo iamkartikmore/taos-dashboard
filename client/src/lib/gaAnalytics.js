@@ -184,6 +184,7 @@ export function buildGaDevices(gaData) {
       conversions: n(r.conversions),
       revenue:     n(r.purchaseRevenue),
       share:       pct(n(r.sessions)/total*100),
+      convRate:    n(r.sessions)>0 ? pct(n(r.conversions)/n(r.sessions)*100) : 0,
     }))
     .sort((a,b) => b.sessions - a.sessions);
 }

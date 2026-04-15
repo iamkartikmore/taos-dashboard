@@ -684,6 +684,7 @@ export function buildWarehouseAnalytics(orders) {
       dayMap: {},           // date → { orders, revenue }
       hourCounts: new Array(24).fill(0),
       skuSet: new Set(),
+      skuQuantities: {},    // sku → { qty, revenue, name }
       multiItemOrders: 0,
       totalItems: 0,
     };
@@ -738,6 +739,15 @@ export function buildWarehouseAnalytics(orders) {
       const fin = o.financial_status || 'unknown';
       w.financialStatuses[fin] = (w.financialStatuses[fin] || 0) + 1;
       skus.forEach(s => w.skuSet.add(s));
+      // Track per-SKU quantities and revenue for this warehouse tag
+      (o.line_items || []).forEach(li => {
+        const sku = (li.sku || '').trim().toUpperCase() || `pid_${li.product_id}`;
+        const qty = li.quantity || 1;
+        const liRev = parseFloat(li.price || 0) * qty;
+        if (!w.skuQuantities[sku]) w.skuQuantities[sku] = { qty: 0, revenue: 0, name: li.title || sku };
+        w.skuQuantities[sku].qty     += qty;
+        w.skuQuantities[sku].revenue += liRev;
+      });
       if (skus.length > 1) w.multiItemOrders++;
       w.totalItems += totalItems;
     });
@@ -810,6 +820,10 @@ export function buildWarehouseAnalytics(orders) {
       avgItemsPerOrder: w.orders > 0 ? +(w.totalItems / w.orders).toFixed(1) : 0,
       effScore,
       effLabel:         effScore >= 80 ? 'Excellent' : effScore >= 60 ? 'Good' : effScore >= 40 ? 'Average' : 'Needs Work',
+      // SKU consumption list sorted by qty desc
+      skuList: Object.entries(w.skuQuantities)
+        .map(([sku, d]) => ({ sku, name: d.name, qty: d.qty, revenue: d.revenue }))
+        .sort((a, b) => b.qty - a.qty),
     };
   }).sort((a, b) => b.orders - a.orders);
 

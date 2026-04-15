@@ -160,7 +160,6 @@ export async function fetchShopifyInventory(shop, clientId, clientSecret) {
   if (!res.ok) throw new Error(json.error || 'Shopify API error');
 
   // Build SKU → { title, stock, price, productType } map
-  // Use _totalStock (multi-location sum) if server fetched it, else inventory_quantity
   const map = {};
   for (const p of json.products || []) {
     for (const v of p.variants || []) {
@@ -170,19 +169,27 @@ export async function fetchShopifyInventory(shop, clientId, clientSecret) {
         ? v._totalStock
         : (parseInt(v.inventory_quantity) || 0);
       if (map[sku]) {
-        // Multiple variants share a SKU — sum stock
         map[sku].stock += stock;
       } else {
         map[sku] = {
-          title:       p.title || '',
+          title:            p.title || '',
+          variantTitle:     v.title || '',
           stock,
-          price:       parseFloat(v.price) || 0,
-          productType: p.product_type || '',
+          price:            parseFloat(v.price) || 0,
+          productType:      p.product_type || '',
+          inventoryItemId:  String(v.inventory_item_id || ''),
         };
       }
     }
   }
-  return map;
+
+  // Return enriched object so callers can also access location data
+  return {
+    map,
+    locations:           json.locations           || [],
+    inventoryByLocation: json.inventoryByLocation || {},
+    skuToItemId:         json.skuToItemId         || {},
+  };
 }
 
 /* ─── SHOPIFY ORDERS — SSE streaming (real-time page-by-page logs) ─ */

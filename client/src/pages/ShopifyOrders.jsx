@@ -27,13 +27,15 @@ const WINDOWS = [
 ];
 
 const TABS = [
-  { id: 'overview',  label: 'Overview',      icon: BarChart2 },
-  { id: 'skus',      label: 'SKU Intel',     icon: Package },
-  { id: 'combos',    label: 'Combos',        icon: Zap },
-  { id: 'customers', label: 'Customers',     icon: Users },
-  { id: 'discounts', label: 'Discounts',     icon: Tag },
-  { id: 'geo',       label: 'Geo',           icon: Globe },
-  { id: 'ops',       label: 'Operations',    icon: Truck },
+  { id: 'overview',   label: 'Overview',     icon: BarChart2 },
+  { id: 'skus',       label: 'SKU Intel',    icon: Package },
+  { id: 'combos',     label: 'Combos',       icon: Zap },
+  { id: 'customers',  label: 'Customers',    icon: Users },
+  { id: 'discounts',  label: 'Discounts',    icon: Tag },
+  { id: 'geo',        label: 'Geo',          icon: Globe },
+  { id: 'warehouse',  label: 'Warehouses',   icon: Truck },
+  { id: 'tags',       label: 'Tag Analytics',icon: Tag },
+  { id: 'ops',        label: 'Operations',   icon: BarChart2 },
 ];
 
 const SEG_COLORS = {
@@ -208,7 +210,7 @@ function UtmTree({ list }) {
 export default function ShopifyOrders() {
   const {
     brands, shopifyOrders, shopifyOrdersWindow,
-    setShopifyOrders, setShopifyOrdersStatus, inventoryMap,
+    setShopifyOrders, setShopifyOrdersStatus, inventoryMap, brandData, activeBrandIds,
   } = useStore();
 
   // Use first brand with Shopify configured, or let user pick
@@ -216,6 +218,12 @@ export default function ShopifyOrders() {
   const [selectedBrandId, setSelectedBrandId] = useState(() => shopifyBrands[0]?.id || '');
   const activeBrand = shopifyBrands.find(b => b.id === selectedBrandId) || shopifyBrands[0];
   const shopify = activeBrand?.shopify || {};
+
+  // Location / per-warehouse inventory from store
+  const activeBrandData = brandData?.[activeBrand?.id] || {};
+  const locations          = activeBrandData.locations           || [];
+  const inventoryByLocation = activeBrandData.inventoryByLocation || {};
+  const skuToItemId         = activeBrandData.skuToItemId         || {};
 
   const [win, setWin]             = useState(shopifyOrdersWindow || '7d');
   const [customSince, setCSince]  = useState('');
@@ -232,8 +240,14 @@ export default function ShopifyOrders() {
   const [skuSearch, setSkuSearch] = useState('');
   const [skuRole, setSkuRole]     = useState('all');
 
-  // Ops / Warehouse tab
-  const [whFilter, setWhFilter]     = useState(null);  // null = all, string = selected tag
+  // Warehouse tab
+  const [whSelectedTags, setWhSelectedTags] = useState(null); // null = not yet initialized
+  const [whDrillTag, setWhDrillTag]         = useState(null); // clicked row drill-down
+  const [whFilter, setWhFilter]             = useState(null); // single-tag filter in ops section
+
+  // Tags tab
+  const [tagSearch, setTagSearch]           = useState('');
+  const [selectedTags, setSelectedTags]     = useState([]); // multi-select for comparison
 
   // Customers tab
   const [custSearch, setCustSearch] = useState('');
@@ -1263,6 +1277,614 @@ export default function ShopifyOrders() {
               </div>
             </motion.div>
           )}
+
+          {/* ═══════════════════════════════════════════════════════════
+              WAREHOUSE TAB
+          ═══════════════════════════════════════════════════════════ */}
+          {tab === 'warehouse' && (() => {
+            const wd = data.warehouseData;
+            if (!wd?.hasTagData) return (
+              <motion.div initial={{ opacity:0,y:8 }} animate={{ opacity:1,y:0 }}>
+                <Card>
+                  <div className="text-slate-500 text-sm text-center py-6">
+                    No order tags found — warehouse analytics requires orders to have Shopify tags.<br/>
+                    <span className="text-slate-600 text-xs">Re-fetch orders after tags have been assigned in Shopify.</span>
+                  </div>
+                </Card>
+              </motion.div>
+            );
+
+            // Filter to warehouse tags (contain "warehouse", "wh", "hub", "fc", "fulfil") or show all
+            const warehouseTags = wd.warehouses.filter(w =>
+              /warehouse|wh[\s_-]|hub|fulfil|fulfillment|\bfc\b|center|centre/i.test(w.tag)
+            );
+            const allWhs = wd.warehouses;
+            // Initialise default selection to warehouse-like tags, or all if none
+            const displayWhs = (whSelectedTags === null)
+              ? allWhs
+              : allWhs.filter(w => whSelectedTags.length === 0 || whSelectedTags.includes(w.tag));
+
+            const selectedWh = whDrillTag ? allWhs.find(w => w.tag === whDrillTag) : null;
+            const maxOrders  = allWhs[0]?.orders || 1;
+            const effColor   = s => s >= 80 ? '#22c55e' : s >= 60 ? '#3b82f6' : s >= 40 ? '#f59e0b' : '#ef4444';
+
+            return (
+              <motion.div initial={{ opacity:0,y:8 }} animate={{ opacity:1,y:0 }} className="space-y-5">
+
+                {/* Header + multi-select */}
+                <div className="flex items-start justify-between flex-wrap gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-200">Warehouse Intelligence</h2>
+                    <p className="text-[10px] text-slate-500 mt-0.5">
+                      {allWhs.length} tag{allWhs.length !== 1 ? 's' : ''} · {wd.tagList.length} unique tags detected
+                      {warehouseTags.length > 0 && ` · ${warehouseTags.length} warehouse-like`}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 max-w-xl">
+                    {/* Quick filter pills */}
+                    <button onClick={() => setWhSelectedTags([])}
+                      className={`px-2.5 py-1 rounded-full text-[10px] font-medium transition-all border ${(whSelectedTags || []).length === 0 ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/40' : 'border-gray-700 text-slate-500 hover:text-slate-300'}`}>
+                      All ({allWhs.length})
+                    </button>
+                    {warehouseTags.length > 0 && (
+                      <button onClick={() => setWhSelectedTags(warehouseTags.map(w => w.tag))}
+                        className={`px-2.5 py-1 rounded-full text-[10px] font-medium transition-all border ${JSON.stringify(whSelectedTags) === JSON.stringify(warehouseTags.map(w=>w.tag)) ? 'bg-blue-600/30 text-blue-300 border-blue-500/40' : 'border-gray-700 text-slate-500 hover:text-slate-300'}`}>
+                        Warehouses ({warehouseTags.length})
+                      </button>
+                    )}
+                    {allWhs.map(w => (
+                      <button key={w.tag}
+                        onClick={() => {
+                          const cur = whSelectedTags || [];
+                          setWhSelectedTags(cur.includes(w.tag) ? cur.filter(t=>t!==w.tag) : [...cur, w.tag]);
+                        }}
+                        className={`px-2.5 py-1 rounded-full text-[10px] font-medium transition-all border ${(whSelectedTags||[]).includes(w.tag) ? 'bg-violet-600/30 text-violet-300 border-violet-500/40' : 'border-gray-700 text-slate-500 hover:text-slate-300'}`}>
+                        {w.tag}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Summary KPIs for selected tags */}
+                {(() => {
+                  const shown = displayWhs;
+                  const totOrders  = shown.reduce((s,w)=>s+w.orders,0);
+                  const totRev     = shown.reduce((s,w)=>s+w.revenue,0);
+                  const avgEff     = shown.length ? Math.round(shown.reduce((s,w)=>s+w.effScore,0)/shown.length) : 0;
+                  const avgSla     = shown.filter(w=>w.fulfillStats).length
+                    ? +(shown.filter(w=>w.fulfillStats).reduce((s,w)=>s+w.fulfillStats.sla24hPct,0)/shown.filter(w=>w.fulfillStats).length).toFixed(1)
+                    : null;
+                  return (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <KPI label="Total Orders"   value={num(totOrders)}  sub={`${shown.length} warehouses`} />
+                      <KPI label="Total Revenue"  value={cur(totRev)}     color="#22c55e" />
+                      <KPI label="Avg Eff Score"  value={`${avgEff}/100`} color={effColor(avgEff)} />
+                      <KPI label="Avg SLA <24h"   value={avgSla !== null ? `${avgSla}%` : '—'} color={avgSla>=80?'#22c55e':avgSla>=50?'#f59e0b':'#ef4444'} />
+                    </div>
+                  );
+                })()}
+
+                {/* Comparison table */}
+                <Card className="overflow-x-auto">
+                  <div className="flex items-center justify-between mb-3">
+                    <ST>Performance Comparison</ST>
+                    <ExportBtn onClick={() => exportCSV('warehouse-analytics.csv', displayWhs, [
+                      { key:'tag', label:'Warehouse/Tag' },
+                      { key:'orders', label:'Orders' },
+                      { key:'revenue', label:'Revenue', fn: r => dec(r.revenue,0) },
+                      { key:'aov', label:'AOV', fn: r => dec(r.aov,0) },
+                      { key:'effScore', label:'Eff Score' },
+                      { key:'cancelPct', label:'Cancel%' },
+                      { key:'refundPct', label:'Refund%' },
+                      { key:'newPct', label:'New Cust%' },
+                      { key:'fulfillStats', label:'Avg Ship (h)', fn: r => r.fulfillStats?.avg ?? '' },
+                      { key:'fulfillStats', label:'SLA <24h%', fn: r => r.fulfillStats?.sla24hPct ?? '' },
+                    ])} />
+                  </div>
+                  <table className="w-full text-xs min-w-[760px]">
+                    <thead>
+                      <tr className="border-b border-gray-700">
+                        {['Warehouse / Tag','Orders','Revenue','AOV','Eff Score','Avg Ship','SLA <24h','Cancel%','Refund%','New%','SKUs'].map(h => (
+                          <th key={h} className="text-left px-2 py-2 text-[10px] text-slate-500 font-semibold uppercase tracking-wider first:pl-0">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {displayWhs.map(w => (
+                        <tr key={w.tag}
+                          onClick={() => setWhDrillTag(whDrillTag === w.tag ? null : w.tag)}
+                          className={`border-b border-gray-800/40 cursor-pointer transition-colors ${whDrillTag === w.tag ? 'bg-brand-600/10' : 'hover:bg-gray-800/30'}`}>
+                          <td className="px-0 py-2 font-semibold text-slate-200 max-w-[140px] truncate">{w.tag}</td>
+                          <td className="px-2 py-2">
+                            <div className="flex items-center gap-1.5">
+                              <div className="w-16 h-1 bg-gray-800 rounded-full overflow-hidden">
+                                <div className="h-full bg-blue-500/70 rounded-full" style={{ width:`${w.orders/maxOrders*100}%` }} />
+                              </div>
+                              <span className="tabular-nums text-slate-300 font-semibold">{num(w.orders)}</span>
+                            </div>
+                          </td>
+                          <td className="px-2 py-2 tabular-nums text-emerald-400 font-semibold">{cur(w.revenue)}</td>
+                          <td className="px-2 py-2 tabular-nums text-slate-400">{cur(w.aov)}</td>
+                          <td className="px-2 py-2">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold"
+                              style={{ background:`${effColor(w.effScore)}22`, color:effColor(w.effScore) }}>
+                              {w.effScore}/100 · {w.effLabel}
+                            </span>
+                          </td>
+                          <td className="px-2 py-2 tabular-nums text-slate-400">{w.fulfillStats ? hrs(w.fulfillStats.avg) : '—'}</td>
+                          <td className="px-2 py-2">
+                            {w.fulfillStats ? (
+                              <span className={`tabular-nums font-semibold ${w.fulfillStats.sla24hPct >= 80 ? 'text-emerald-400' : w.fulfillStats.sla24hPct >= 50 ? 'text-amber-400' : 'text-red-400'}`}>
+                                {w.fulfillStats.sla24hPct}%
+                              </span>
+                            ) : '—'}
+                          </td>
+                          <td className="px-2 py-2">
+                            <span className={`tabular-nums ${w.cancelPct > 10 ? 'text-red-400' : w.cancelPct > 5 ? 'text-amber-400' : 'text-slate-400'}`}>{w.cancelPct}%</span>
+                          </td>
+                          <td className="px-2 py-2">
+                            <span className={`tabular-nums ${w.refundPct > 10 ? 'text-red-400' : w.refundPct > 5 ? 'text-amber-400' : 'text-slate-400'}`}>{w.refundPct}%</span>
+                          </td>
+                          <td className="px-2 py-2 tabular-nums text-slate-400">{w.newPct}%</td>
+                          <td className="px-2 py-2 tabular-nums text-slate-500">{w.uniqueSkus}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </Card>
+
+                {/* Charts row */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                  <Card>
+                    <ST>Order Volume by Warehouse</ST>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={displayWhs.slice(0,10)} layout="vertical" barSize={14}>
+                        <XAxis type="number" tick={{ fill:'#64748b',fontSize:10 }} axisLine={false} tickLine={false} />
+                        <YAxis type="category" dataKey="tag" width={110} tick={{ fill:'#94a3b8',fontSize:10 }} axisLine={false} tickLine={false} />
+                        <Tooltip content={<CT/>} />
+                        <Bar dataKey="orders" name="Orders" radius={[0,3,3,0]}>
+                          {displayWhs.slice(0,10).map((_,i)=><Cell key={i} fill={C[i%C.length]}/>)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </Card>
+                  <Card>
+                    <ST>Revenue by Warehouse</ST>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={displayWhs.slice(0,10)} layout="vertical" barSize={14}>
+                        <XAxis type="number" tick={{ fill:'#64748b',fontSize:10 }} axisLine={false} tickLine={false} tickFormatter={v=>`₹${(v/1000).toFixed(0)}k`} />
+                        <YAxis type="category" dataKey="tag" width={110} tick={{ fill:'#94a3b8',fontSize:10 }} axisLine={false} tickLine={false} />
+                        <Tooltip content={<CT/>} />
+                        <Bar dataKey="revenue" name="Revenue" radius={[0,3,3,0]}>
+                          {displayWhs.slice(0,10).map((_,i)=><Cell key={i} fill={C[i%C.length]}/>)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </Card>
+                  <Card>
+                    <ST>Efficiency Score</ST>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={displayWhs.slice(0,10)} layout="vertical" barSize={14}>
+                        <XAxis type="number" domain={[0,100]} tick={{ fill:'#64748b',fontSize:10 }} axisLine={false} tickLine={false} />
+                        <YAxis type="category" dataKey="tag" width={110} tick={{ fill:'#94a3b8',fontSize:10 }} axisLine={false} tickLine={false} />
+                        <Tooltip content={<CT/>} />
+                        <Bar dataKey="effScore" name="Eff Score" radius={[0,3,3,0]}>
+                          {displayWhs.slice(0,10).map((w,i)=><Cell key={i} fill={effColor(w.effScore)}/>)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </Card>
+                </div>
+
+                {/* SKU Consumption + Stock-out Risk per Warehouse */}
+                <Card>
+                  <div className="flex items-center justify-between mb-4">
+                    <div>
+                      <ST>SKU Consumption & Stock-Out Risk</ST>
+                      <p className="text-[10px] text-slate-500 -mt-2">
+                        Units sold per warehouse tag · cross-referenced with current inventory
+                        {Object.keys(inventoryMap).length === 0 && <span className="text-amber-500 ml-2">⚠ Pull inventory for stock data</span>}
+                      </p>
+                    </div>
+                    <select value={whDrillTag || ''} onChange={e => setWhDrillTag(e.target.value || null)}
+                      className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-slate-300 focus:outline-none">
+                      <option value="">All warehouses</option>
+                      {displayWhs.map(w => <option key={w.tag} value={w.tag}>{w.tag}</option>)}
+                    </select>
+                  </div>
+                  {(() => {
+                    const whs = whDrillTag ? displayWhs.filter(w=>w.tag===whDrillTag) : displayWhs;
+                    // Merge SKU quantities across selected warehouses
+                    const skuMap = {};
+                    whs.forEach(w => {
+                      (w.skuList || []).forEach(s => {
+                        if (!skuMap[s.sku]) skuMap[s.sku] = { sku: s.sku, name: s.name, qty: 0, revenue: 0, warehouses: [] };
+                        skuMap[s.sku].qty     += s.qty;
+                        skuMap[s.sku].revenue += s.revenue;
+                        skuMap[s.sku].warehouses.push(w.tag);
+                      });
+                    });
+                    const mergedSkus = Object.values(skuMap)
+                      .map(s => {
+                        const inv = inventoryMap[s.sku];
+                        const stock = inv?.stock ?? null;
+                        const dailyVel = s.qty / Math.max(data.overview.days || 7, 1);
+                        const daysLeft = stock !== null && dailyVel > 0 ? Math.floor(stock / dailyVel) : null;
+                        const risk = daysLeft === null ? 'unknown'
+                          : daysLeft <= 0 ? 'out'
+                          : daysLeft <= 7 ? 'critical'
+                          : daysLeft <= 14 ? 'low'
+                          : daysLeft <= 30 ? 'watch'
+                          : 'ok';
+                        return { ...s, stock, dailyVel: +dailyVel.toFixed(1), daysLeft, risk };
+                      })
+                      .sort((a, b) => {
+                        const rOrder = { out:0, critical:1, low:2, watch:3, ok:4, unknown:5 };
+                        return (rOrder[a.risk]||5) - (rOrder[b.risk]||5) || b.qty - a.qty;
+                      });
+
+                    const riskStyle = {
+                      out:      { bg:'#ef444422', color:'#ef4444', label:'OUT OF STOCK' },
+                      critical: { bg:'#f9731622', color:'#f97316', label:'CRITICAL' },
+                      low:      { bg:'#f59e0b22', color:'#f59e0b', label:'LOW' },
+                      watch:    { bg:'#3b82f622', color:'#3b82f6', label:'WATCH' },
+                      ok:       { bg:'#22c55e22', color:'#22c55e', label:'OK' },
+                      unknown:  { bg:'#64748b22', color:'#64748b', label:'NO INV' },
+                    };
+
+                    return (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b border-gray-700">
+                              {['SKU','Product','Units Sold','Daily Vel.','Revenue','Stock','Days Left','Risk'].map(h => (
+                                <th key={h} className="text-left px-2 py-2 text-[10px] text-slate-500 font-semibold uppercase tracking-wider">{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {mergedSkus.slice(0, 60).map((s, i) => {
+                              const rs = riskStyle[s.risk];
+                              return (
+                                <tr key={i} className="border-b border-gray-800/40 hover:bg-gray-800/30">
+                                  <td className="px-2 py-1.5 font-mono text-[10px] text-slate-300">{s.sku}</td>
+                                  <td className="px-2 py-1.5 text-slate-400 max-w-[180px] truncate">{s.name}</td>
+                                  <td className="px-2 py-1.5 tabular-nums text-slate-300 font-semibold">{num(s.qty)}</td>
+                                  <td className="px-2 py-1.5 tabular-nums text-slate-400">{s.dailyVel}/day</td>
+                                  <td className="px-2 py-1.5 tabular-nums text-emerald-400">{cur(s.revenue)}</td>
+                                  <td className="px-2 py-1.5 tabular-nums">
+                                    {s.stock === null
+                                      ? <span className="text-slate-600">—</span>
+                                      : s.stock <= 0
+                                        ? <span className="text-red-400 font-bold">0</span>
+                                        : <span className={s.stock < 20 ? 'text-amber-400' : 'text-emerald-400'}>{num(s.stock)}</span>
+                                    }
+                                  </td>
+                                  <td className="px-2 py-1.5 tabular-nums">
+                                    {s.daysLeft === null
+                                      ? <span className="text-slate-600">—</span>
+                                      : <span className={s.daysLeft <= 7 ? 'text-red-400 font-bold' : s.daysLeft <= 14 ? 'text-amber-400' : 'text-slate-400'}>
+                                          {s.daysLeft}d
+                                        </span>
+                                    }
+                                  </td>
+                                  <td className="px-2 py-1.5">
+                                    <span className="px-2 py-0.5 rounded-full text-[9px] font-bold"
+                                      style={{ background: rs.bg, color: rs.color }}>
+                                      {rs.label}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })()}
+                </Card>
+
+                {/* Drill-down: selected warehouse detail */}
+                {selectedWh && (
+                  <Card>
+                    <div className="flex items-center justify-between mb-4">
+                      <h2 className="text-sm font-semibold text-white">
+                        <span className="text-brand-400">{selectedWh.tag}</span> — Deep Dive
+                      </h2>
+                      <button onClick={() => setWhDrillTag(null)} className="text-xs text-slate-500 hover:text-slate-300">✕ Close</button>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+                      <KPI label="Orders"       value={num(selectedWh.orders)}        sub={`${selectedWh.newPct}% new`} />
+                      <KPI label="Revenue"      value={cur(selectedWh.revenue)}       sub={`AOV ${cur(selectedWh.aov)}`} color="#22c55e" />
+                      <KPI label="Eff Score"    value={`${selectedWh.effScore}/100`}  sub={selectedWh.effLabel} color={effColor(selectedWh.effScore)} />
+                      <KPI label="Unique SKUs"  value={num(selectedWh.uniqueSkus)}    sub={`${selectedWh.avgItemsPerOrder} items/order avg`} />
+                    </div>
+                    {selectedWh.fulfillStats && (
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+                        <KPI label="Avg Ship Time" value={hrs(selectedWh.fulfillStats.avg)}       sub={`p90: ${hrs(selectedWh.fulfillStats.p90)}`} />
+                        <KPI label="SLA &lt;24h"   value={`${selectedWh.fulfillStats.sla24hPct}%`} sub={`${num(selectedWh.fulfillStats.under24h)} orders`} color="#22c55e" />
+                        <KPI label="Slow &gt;72h"  value={`${selectedWh.fulfillStats.slowPct}%`}   sub={`${num(selectedWh.fulfillStats.over72h)} orders`} color="#ef4444" />
+                        <KPI label="Fulfilled"     value={num(selectedWh.fulfillStats.count)}      sub="with timestamps" />
+                      </div>
+                    )}
+
+                    {selectedWh.byDay.length > 1 && (
+                      <div className="mb-5">
+                        <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2">Daily Order Trend</div>
+                        <ResponsiveContainer width="100%" height={100}>
+                          <LineChart data={selectedWh.byDay}>
+                            <XAxis dataKey="date" hide />
+                            <Tooltip formatter={(v,n) => [n === 'revenue' ? cur(v) : num(v), n]}
+                              contentStyle={{ background:'#111827', border:'1px solid #374151', borderRadius:8, fontSize:11 }} />
+                            <Line type="monotone" dataKey="orders" stroke="#3b82f6" dot={false} strokeWidth={2} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    )}
+
+                    <div className="mb-5">
+                      <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2">
+                        Peak Hour: {String(selectedWh.peakHour).padStart(2,'0')}:00
+                      </div>
+                      <div className="flex items-end gap-0.5 h-12">
+                        {selectedWh.hourCounts.map(({ hour, count }) => {
+                          const max = Math.max(...selectedWh.hourCounts.map(h => h.count), 1);
+                          return (
+                            <div key={hour} className="flex-1 flex flex-col items-center gap-0.5 group relative">
+                              <div className="w-full rounded-t-sm transition-all"
+                                style={{ height:`${(count/max*100)}%`, minHeight: count > 0 ? 2 : 0,
+                                  background: hour === selectedWh.peakHour ? '#3b82f6' : '#374151' }} />
+                              <div className="absolute bottom-full mb-1 hidden group-hover:block bg-gray-900 border border-gray-700 rounded px-1.5 py-0.5 text-[10px] text-slate-300 whitespace-nowrap z-10">
+                                {String(hour).padStart(2,'0')}:00 — {num(count)} orders
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="flex justify-between text-[9px] text-slate-700 mt-1">
+                        <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:00</span>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2">Fulfillment Status</div>
+                        <div className="space-y-1">
+                          {selectedWh.fulfillStatuses.map(({ status, count: c }) => (
+                            <div key={status} className="flex items-center gap-2 text-xs">
+                              <span className="w-24 truncate capitalize text-slate-400">{status.replace(/_/g,' ')}</span>
+                              <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                                <div className="h-full rounded-full bg-blue-500/60" style={{ width:`${c/selectedWh.orders*100}%` }} />
+                              </div>
+                              <span className="w-8 text-right tabular-nums text-slate-500">{num(c)}</span>
+                              <span className="w-10 text-right tabular-nums text-slate-600">{dec(c/selectedWh.orders*100,1)}%</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2">Top SKUs from this Warehouse</div>
+                        <div className="space-y-1">
+                          {(selectedWh.skuList || []).slice(0, 8).map((s, i) => {
+                            const maxQ = selectedWh.skuList[0]?.qty || 1;
+                            return (
+                              <div key={i} className="flex items-center gap-2 text-xs">
+                                <span className="font-mono text-[10px] text-slate-400 w-20 truncate">{s.sku}</span>
+                                <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                                  <div className="h-full rounded-full bg-violet-500/60" style={{ width:`${s.qty/maxQ*100}%` }} />
+                                </div>
+                                <span className="w-10 text-right tabular-nums text-slate-500">{num(s.qty)} u</span>
+                                <span className="w-16 text-right tabular-nums text-emerald-400">{cur(s.revenue)}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+                )}
+
+              </motion.div>
+            );
+          })()}
+
+          {/* ═══════════════════════════════════════════════════════════
+              TAGS TAB
+          ═══════════════════════════════════════════════════════════ */}
+          {tab === 'tags' && (() => {
+            const wd = data.warehouseData;
+            if (!wd?.hasTagData) return (
+              <motion.div initial={{ opacity:0,y:8 }} animate={{ opacity:1,y:0 }}>
+                <Card>
+                  <div className="text-slate-500 text-sm text-center py-6">
+                    No order tags found. Tags are set in Shopify per-order and are used here for segmentation.
+                  </div>
+                </Card>
+              </motion.div>
+            );
+
+            const allTags = wd.warehouses; // each "warehouse" is a tag segment
+            const filteredTagList = tagSearch
+              ? allTags.filter(t => t.tag.toLowerCase().includes(tagSearch.toLowerCase()))
+              : allTags;
+            const compTags = selectedTags.length > 0
+              ? allTags.filter(t => selectedTags.includes(t.tag))
+              : allTags.slice(0, 8);
+
+            const maxTagOrders = allTags[0]?.orders || 1;
+
+            return (
+              <motion.div initial={{ opacity:0,y:8 }} animate={{ opacity:1,y:0 }} className="space-y-5">
+
+                {/* Tag multiselect */}
+                <Card>
+                  <div className="flex items-center gap-3 mb-3 flex-wrap">
+                    <ST>Tag Selector</ST>
+                    <input value={tagSearch} onChange={e => setTagSearch(e.target.value)}
+                      placeholder="Search tags..."
+                      className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-slate-200 placeholder-slate-600 focus:outline-none w-48" />
+                    <button onClick={() => setSelectedTags([])} className="text-[10px] text-slate-500 hover:text-slate-300">Clear</button>
+                    <span className="text-[10px] text-slate-600">{selectedTags.length > 0 ? `${selectedTags.length} selected` : 'Showing top 8 (select to compare)'}</span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {filteredTagList.map(t => (
+                      <button key={t.tag}
+                        onClick={() => setSelectedTags(prev => prev.includes(t.tag) ? prev.filter(x=>x!==t.tag) : [...prev, t.tag])}
+                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-medium transition-all border ${selectedTags.includes(t.tag) ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/40' : 'border-gray-700 text-slate-500 hover:text-slate-300 hover:border-gray-500'}`}>
+                        {t.tag}
+                        <span className="text-[9px] opacity-60">{t.orders}</span>
+                      </button>
+                    ))}
+                  </div>
+                </Card>
+
+                {/* KPI summary of selected tags */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  {(() => {
+                    const sel = compTags;
+                    return [
+                      { label:'Tags Compared', value: num(sel.length) },
+                      { label:'Total Orders',  value: num(sel.reduce((s,t)=>s+t.orders,0)) },
+                      { label:'Total Revenue', value: cur(sel.reduce((s,t)=>s+t.revenue,0)), color:'#22c55e' },
+                      { label:'Avg AOV',       value: cur(sel.length ? sel.reduce((s,t)=>s+t.aov,0)/sel.length : 0) },
+                    ].map(k => <KPI key={k.label} {...k} />);
+                  })()}
+                </div>
+
+                {/* Comparison bar chart — orders */}
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  <Card>
+                    <ST>Orders by Tag</ST>
+                    <ResponsiveContainer width="100%" height={Math.max(180, compTags.length * 28)}>
+                      <BarChart data={compTags} layout="vertical" barSize={14}>
+                        <XAxis type="number" tick={{ fill:'#64748b',fontSize:10 }} axisLine={false} tickLine={false} />
+                        <YAxis type="category" dataKey="tag" width={120} tick={{ fill:'#94a3b8',fontSize:9 }} axisLine={false} tickLine={false} />
+                        <Tooltip content={<CT/>} />
+                        <Bar dataKey="orders" name="Orders" radius={[0,3,3,0]}>
+                          {compTags.map((_,i)=><Cell key={i} fill={C[i%C.length]}/>)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </Card>
+                  <Card>
+                    <ST>Revenue by Tag</ST>
+                    <ResponsiveContainer width="100%" height={Math.max(180, compTags.length * 28)}>
+                      <BarChart data={compTags} layout="vertical" barSize={14}>
+                        <XAxis type="number" tick={{ fill:'#64748b',fontSize:10 }} axisLine={false} tickLine={false} tickFormatter={v=>`₹${(v/1000).toFixed(0)}k`} />
+                        <YAxis type="category" dataKey="tag" width={120} tick={{ fill:'#94a3b8',fontSize:9 }} axisLine={false} tickLine={false} />
+                        <Tooltip content={<CT/>} />
+                        <Bar dataKey="revenue" name="Revenue" radius={[0,3,3,0]}>
+                          {compTags.map((_,i)=><Cell key={i} fill={C[i%C.length]}/>)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </Card>
+                </div>
+
+                {/* Multi-metric comparison bars */}
+                <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                  <Card>
+                    <ST>Cancel Rate by Tag</ST>
+                    <div className="space-y-2">
+                      {compTags.sort((a,b)=>b.cancelPct-a.cancelPct).map((t,i)=>(
+                        <div key={i} className="flex items-center gap-2 text-xs">
+                          <span className="w-24 truncate text-slate-400">{t.tag}</span>
+                          <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+                            <div className="h-full rounded-full" style={{ width:`${Math.min(t.cancelPct,30)/30*100}%`, background: t.cancelPct>10?'#ef4444':t.cancelPct>5?'#f59e0b':'#22c55e' }} />
+                          </div>
+                          <span className="w-10 text-right tabular-nums text-slate-400">{t.cancelPct}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                  <Card>
+                    <ST>Refund Rate by Tag</ST>
+                    <div className="space-y-2">
+                      {compTags.sort((a,b)=>b.refundPct-a.refundPct).map((t,i)=>(
+                        <div key={i} className="flex items-center gap-2 text-xs">
+                          <span className="w-24 truncate text-slate-400">{t.tag}</span>
+                          <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+                            <div className="h-full rounded-full" style={{ width:`${Math.min(t.refundPct,20)/20*100}%`, background: t.refundPct>10?'#ef4444':t.refundPct>5?'#f59e0b':'#22c55e' }} />
+                          </div>
+                          <span className="w-10 text-right tabular-nums text-slate-400">{t.refundPct}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                  <Card>
+                    <ST>New Customer % by Tag</ST>
+                    <div className="space-y-2">
+                      {compTags.sort((a,b)=>b.newPct-a.newPct).map((t,i)=>(
+                        <div key={i} className="flex items-center gap-2 text-xs">
+                          <span className="w-24 truncate text-slate-400">{t.tag}</span>
+                          <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+                            <div className="h-full rounded-full bg-blue-500/70" style={{ width:`${t.newPct}%` }} />
+                          </div>
+                          <span className="w-10 text-right tabular-nums text-blue-400">{t.newPct}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                </div>
+
+                {/* Tag-level detail table */}
+                <Card className="overflow-x-auto">
+                  <div className="flex items-center justify-between mb-3">
+                    <ST>Full Tag Analytics</ST>
+                    <ExportBtn onClick={() => exportCSV('tag-analytics.csv', compTags, [
+                      { key:'tag', label:'Tag' },
+                      { key:'orders', label:'Orders' },
+                      { key:'revenue', label:'Revenue', fn: r => dec(r.revenue,0) },
+                      { key:'aov', label:'AOV', fn: r => dec(r.aov,0) },
+                      { key:'newPct', label:'New Cust%' },
+                      { key:'cancelPct', label:'Cancel%' },
+                      { key:'refundPct', label:'Refund%' },
+                      { key:'discountPct', label:'Discount%' },
+                      { key:'effScore', label:'Eff Score' },
+                    ])} />
+                  </div>
+                  <table className="w-full text-xs min-w-[700px]">
+                    <thead>
+                      <tr className="border-b border-gray-700">
+                        {['Tag','Orders','Revenue','AOV','New%','Cancel%','Refund%','Disc%','Avg Disc','Multi-item%'].map(h => (
+                          <th key={h} className="text-left px-2 py-2 text-[10px] text-slate-500 font-semibold uppercase tracking-wider">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredTagList.map((t, i) => (
+                        <tr key={i} className="border-b border-gray-800/40 hover:bg-gray-800/30">
+                          <td className="px-2 py-1.5">
+                            <div className="flex items-center gap-2">
+                              <div className="flex-shrink-0 w-16 h-1 bg-gray-800 rounded-full overflow-hidden">
+                                <div className="h-full bg-emerald-500/60 rounded-full" style={{ width:`${t.orders/maxTagOrders*100}%` }} />
+                              </div>
+                              <span className="font-semibold text-slate-200 truncate max-w-[120px]">{t.tag}</span>
+                            </div>
+                          </td>
+                          <td className="px-2 py-1.5 tabular-nums text-slate-300 font-semibold">{num(t.orders)}</td>
+                          <td className="px-2 py-1.5 tabular-nums text-emerald-400">{cur(t.revenue)}</td>
+                          <td className="px-2 py-1.5 tabular-nums text-slate-400">{cur(t.aov)}</td>
+                          <td className="px-2 py-1.5 tabular-nums text-blue-400">{t.newPct}%</td>
+                          <td className="px-2 py-1.5 tabular-nums">
+                            <span className={t.cancelPct>10?'text-red-400':t.cancelPct>5?'text-amber-400':'text-slate-400'}>{t.cancelPct}%</span>
+                          </td>
+                          <td className="px-2 py-1.5 tabular-nums">
+                            <span className={t.refundPct>10?'text-red-400':t.refundPct>5?'text-amber-400':'text-slate-400'}>{t.refundPct}%</span>
+                          </td>
+                          <td className="px-2 py-1.5 tabular-nums text-slate-400">{t.discountPct}%</td>
+                          <td className="px-2 py-1.5 tabular-nums text-slate-400">{cur(t.avgDiscount)}</td>
+                          <td className="px-2 py-1.5 tabular-nums text-slate-400">{t.multiItemPct}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </Card>
+
+              </motion.div>
+            );
+          })()}
 
           {/* ═══════════════════════════════════════════════════════════
               OPERATIONS

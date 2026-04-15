@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
   LineChart, Line, CartesianGrid, Legend, AreaChart, Area, PieChart, Pie,
+  RadarChart, Radar, PolarGrid, PolarAngleAxis, ScatterChart, Scatter, ZAxis,
 } from 'recharts';
 import {
   TrendingUp, Users, Globe, Monitor, Zap, Package, Tag, RefreshCw,
@@ -134,15 +135,19 @@ function UtmTree({ data }) {
 
 /* ─── TABS ──────────────────────────────────────────────────────── */
 const TABS = [
-  { id:'overview',    label:'Overview',     icon:TrendingUp  },
-  { id:'acquisition', label:'Acquisition',  icon:Zap         },
-  { id:'utm',         label:'UTM Drill',    icon:Tag         },
-  { id:'pages',       label:'Pages',        icon:Activity    },
-  { id:'ecommerce',   label:'Ecommerce',    icon:Package     },
-  { id:'audience',    label:'Audience',     icon:Users       },
-  { id:'geo',         label:'Geo',          icon:Globe       },
-  { id:'crossref',    label:'× Shopify+Meta', icon:ArrowUpRight },
+  { id:'overview',    label:'Overview',      icon:TrendingUp  },
+  { id:'acquisition', label:'Acquisition',   icon:Zap         },
+  { id:'utm',         label:'UTM Drill',     icon:Tag         },
+  { id:'pages',       label:'Pages',         icon:Activity    },
+  { id:'ecommerce',   label:'Ecommerce',     icon:Package     },
+  { id:'devices',     label:'Devices',       icon:Monitor     },
+  { id:'audience',    label:'Audience',      icon:Users       },
+  { id:'behavior',    label:'Behavior',      icon:Activity    },
+  { id:'geo',         label:'Geo',           icon:Globe       },
+  { id:'crossref',    label:'× Shopify+Meta',icon:ArrowUpRight },
 ];
+
+const DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 
 /* ─── PAGE ──────────────────────────────────────────────────────── */
 export default function GAInsights() {
@@ -518,42 +523,407 @@ export default function GAInsights() {
         </motion.div>
       )}
 
-      {/* ── AUDIENCE ─────────────────────────────────────────────── */}
-      {tab==='audience' && (
+      {/* ── DEVICES ──────────────────────────────────────────────── */}
+      {tab==='devices' && (
         <motion.div initial={{opacity:0,y:12}} animate={{opacity:1,y:0}} className="space-y-5">
-          {/* Device breakdown */}
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            {devices.length > 0 && (
-              <Card title="Device Breakdown">
-                <ResponsiveContainer width="100%" height={200}>
-                  <BarChart data={devices.filter((d,i,arr)=>arr.findIndex(x=>x.device===d.device)===i).map(d=>({...d,label:d.device})).slice(0,6)}>
-                    <CartesianGrid stroke="#1f2937" strokeDasharray="4 4"/>
-                    <XAxis dataKey="label" tick={{fill:'#64748b',fontSize:10}}/>
-                    <YAxis tick={{fill:'#64748b',fontSize:10}}/>
-                    <Tooltip content={<CT/>}/>
-                    <Legend wrapperStyle={{fontSize:11}}/>
-                    <Bar dataKey="sessions" fill="#3b82f6" name="Sessions" radius={[2,2,0,0]}/>
-                    <Bar dataKey="conversions" fill="#22c55e" name="Conversions" radius={[2,2,0,0]}/>
-                  </BarChart>
-                </ResponsiveContainer>
-              </Card>
-            )}
-            {events.length > 0 && (
-              <Card title="Top Events">
-                <div className="space-y-2">
-                  {events.slice(0,10).map((e,i)=>(
-                    <div key={i} className="flex items-center gap-3 text-xs">
-                      <span className="text-slate-300 flex-1 truncate font-mono">{e.event}</span>
-                      <span className="tabular-nums text-slate-400">{num(e.count)}</span>
-                      <span className="tabular-nums text-violet-400">{num(e.conversions)} conv</span>
+
+          {/* Device category KPIs */}
+          {devices.length > 0 && (() => {
+            const devCats = {};
+            devices.forEach(d => {
+              if (!devCats[d.device]) devCats[d.device] = { device:d.device, sessions:0, users:0, conversions:0, revenue:0 };
+              devCats[d.device].sessions    += n(d.sessions);
+              devCats[d.device].users       += n(d.users);
+              devCats[d.device].conversions += n(d.conversions);
+              devCats[d.device].revenue     += n(d.revenue);
+            });
+            const cats = Object.values(devCats).sort((a,b)=>b.sessions-a.sessions);
+            const totalSess = cats.reduce((s,c)=>s+c.sessions,0)||1;
+            return (
+              <>
+                <div className="grid grid-cols-3 gap-3">
+                  {cats.map((c,i)=>(
+                    <div key={i} className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Monitor size={14} className="text-slate-400"/>
+                        <span className="text-xs font-semibold text-white capitalize">{c.device}</span>
+                      </div>
+                      <div className="text-xl font-bold text-white">{pct(c.sessions/totalSess*100)}</div>
+                      <div className="h-1.5 bg-gray-800 rounded-full mt-2 overflow-hidden">
+                        <div className="h-full rounded-full" style={{width:`${c.sessions/totalSess*100}%`, background:COLORS[i%COLORS.length]}}/>
+                      </div>
+                      <div className="mt-2 space-y-1 text-[10px] text-slate-500">
+                        <div>{num(c.sessions)} sessions · {num(c.users)} users</div>
+                        <div>{num(c.conversions)} conv · {cur(c.revenue)}</div>
+                        <div>Conv rate: {pct(c.sessions>0?c.conversions/c.sessions*100:0)}</div>
+                      </div>
                     </div>
                   ))}
                 </div>
+
+                {/* Device + OS breakdown table */}
+                <Card title="Device × Operating System">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead><tr className="border-b border-gray-800">
+                        {['Device','OS','Sessions','Users','New Users','Conversions','Revenue','Conv%'].map(h=>(
+                          <th key={h} className="px-3 py-2 text-left text-[10px] text-slate-500 font-semibold uppercase whitespace-nowrap">{h}</th>
+                        ))}
+                      </tr></thead>
+                      <tbody>
+                        {devices.slice(0,30).map((r,i)=>(
+                          <tr key={i} className={`border-t border-gray-800/40 ${i%2===0?'bg-gray-950/30':''}`}>
+                            <td className="px-3 py-2 text-slate-300 capitalize font-medium">{r.device}</td>
+                            <td className="px-3 py-2 text-slate-400">{r.os}</td>
+                            <td className="px-3 py-2 tabular-nums text-slate-300">{num(r.sessions)}</td>
+                            <td className="px-3 py-2 tabular-nums text-slate-400">{num(r.users)}</td>
+                            <td className="px-3 py-2 tabular-nums text-blue-400">{num(r.newUsers)}</td>
+                            <td className="px-3 py-2 tabular-nums text-violet-400">{num(r.conversions)}</td>
+                            <td className="px-3 py-2 tabular-nums text-emerald-400">{cur(r.revenue)}</td>
+                            <td className="px-3 py-2 tabular-nums" style={{color:r.convRate>=3?'#22c55e':r.convRate>=1?'#f59e0b':'#64748b'}}>{pct(r.convRate)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              </>
+            );
+          })()}
+
+          {/* Device × Channel matrix */}
+          {gaData?.deviceChannel?.length > 0 && (
+            <Card title="Device × Channel — Conversion Matrix">
+              <p className="text-[10px] text-slate-500 mb-3">Which channels convert better on which devices?</p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr className="border-b border-gray-800">
+                    {['Device','Channel','Sessions','Conv Rate','Revenue','Bounce%','Avg Duration','Engagement%'].map(h=>(
+                      <th key={h} className="px-3 py-2 text-left text-[10px] text-slate-500 font-semibold uppercase whitespace-nowrap">{h}</th>
+                    ))}
+                  </tr></thead>
+                  <tbody>
+                    {gaData.deviceChannel.sort((a,b)=>n(b.sessions)-n(a.sessions)).slice(0,30).map((r,i)=>{
+                      const sess = n(r.sessions)||1;
+                      const convRate = n(r.conversions)/sess*100;
+                      const bounce = n(r.bounceRate)*100;
+                      const engRate = n(r.engagementRate)*100;
+                      return (
+                        <tr key={i} className={`border-t border-gray-800/40 ${i%2===0?'bg-gray-950/30':''}`}>
+                          <td className="px-3 py-2 text-slate-300 capitalize font-medium">{r.deviceCategory}</td>
+                          <td className="px-3 py-2 text-slate-400">{r.sessionDefaultChannelGrouping||'Other'}</td>
+                          <td className="px-3 py-2 tabular-nums text-slate-300">{num(sess)}</td>
+                          <td className="px-3 py-2 tabular-nums" style={{color:convRate>=3?'#22c55e':convRate>=1?'#f59e0b':'#64748b'}}>{pct(convRate)}</td>
+                          <td className="px-3 py-2 tabular-nums text-emerald-400">{cur(r.purchaseRevenue)}</td>
+                          <td className="px-3 py-2 tabular-nums" style={{color:bounce>60?'#ef4444':bounce>40?'#f59e0b':'#22c55e'}}>{pct(bounce)}</td>
+                          <td className="px-3 py-2 tabular-nums text-slate-400">{dur(n(r.averageSessionDuration))}</td>
+                          <td className="px-3 py-2 tabular-nums text-blue-400">{pct(engRate)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+
+          {/* Browser breakdown */}
+          {gaData?.browsers?.length > 0 && (
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <Card title="Browser × Device Sessions">
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={gaData.browsers.map(r=>({
+                    label:`${r.browser}/${(r.deviceCategory||'').slice(0,3)}`,
+                    sessions:n(r.sessions),
+                    conversions:n(r.conversions),
+                  })).slice(0,12)} layout="vertical" barSize={10}>
+                    <XAxis type="number" tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickLine={false}/>
+                    <YAxis type="category" dataKey="label" width={110} tick={{fill:'#94a3b8',fontSize:10}} axisLine={false} tickLine={false}/>
+                    <Tooltip content={<CT/>}/>
+                    <Legend wrapperStyle={{fontSize:11,color:'#94a3b8'}}/>
+                    <Bar dataKey="sessions" name="Sessions" fill="#3b82f6" radius={[0,3,3,0]}/>
+                    <Bar dataKey="conversions" name="Conversions" fill="#22c55e" radius={[0,3,3,0]}/>
+                  </BarChart>
+                </ResponsiveContainer>
               </Card>
-            )}
-          </div>
+              {/* OS version fragmentation */}
+              {gaData?.osVersion?.length > 0 && (
+                <Card title="OS Version Distribution (mobile fragmentation)">
+                  <div className="space-y-1.5 max-h-56 overflow-y-auto">
+                    {gaData.osVersion.sort((a,b)=>n(b.sessions)-n(a.sessions)).slice(0,20).map((r,i)=>{
+                      const maxSess = n(gaData.osVersion[0]?.sessions)||1;
+                      return (
+                        <div key={i} className="flex items-center gap-2 text-xs">
+                          <span className="text-slate-400 w-20 truncate">{r.operatingSystem}</span>
+                          <span className="text-slate-600 w-16 truncate text-[10px]">{r.operatingSystemVersion}</span>
+                          <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                            <div className="h-full rounded-full bg-violet-500/60" style={{width:`${n(r.sessions)/maxSess*100}%`}}/>
+                          </div>
+                          <span className="w-14 text-right tabular-nums text-slate-500">{num(r.sessions)}</span>
+                          <span className="w-14 text-right tabular-nums text-violet-400">{num(r.conversions)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              )}
+            </div>
+          )}
+
+          {/* Screen resolution */}
+          {gaData?.screenResolution?.length > 0 && (
+            <Card title="Screen Resolution Distribution">
+              <div className="grid grid-cols-2 xl:grid-cols-3 gap-2">
+                {gaData.screenResolution.sort((a,b)=>n(b.sessions)-n(a.sessions)).slice(0,12).map((r,i)=>{
+                  const maxSess = n(gaData.screenResolution[0]?.sessions)||1;
+                  return (
+                    <div key={i} className="flex items-center gap-2 text-xs bg-gray-800/40 rounded-lg px-3 py-2">
+                      <div className="flex-1">
+                        <div className="font-mono text-slate-300 text-[11px]">{r.screenResolution}</div>
+                        <div className="h-1 bg-gray-700 rounded-full mt-1 overflow-hidden">
+                          <div className="h-full rounded-full bg-blue-500/70" style={{width:`${n(r.sessions)/maxSess*100}%`}}/>
+                        </div>
+                      </div>
+                      <div className="text-slate-500 tabular-nums">{num(r.sessions)}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          )}
+
         </motion.div>
       )}
+
+      {/* ── AUDIENCE ─────────────────────────────────────────────── */}
+      {tab==='audience' && (
+        <motion.div initial={{opacity:0,y:12}} animate={{opacity:1,y:0}} className="space-y-5">
+          {/* New vs Returning */}
+          {gaData?.userType?.length > 0 && (
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <Card title="New vs Returning Users">
+                <div className="space-y-3">
+                  {gaData.userType.map((r,i)=>{
+                    const total = gaData.userType.reduce((s,x)=>s+n(x.sessions),0)||1;
+                    return (
+                      <div key={i} className="space-y-1">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="text-slate-300 capitalize">{r.newVsReturning}</span>
+                          <span className="text-slate-400">{num(r.sessions)} sessions · {pct(n(r.sessions)/total*100)}</span>
+                        </div>
+                        <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+                          <div className="h-full rounded-full" style={{width:`${n(r.sessions)/total*100}%`, background:i===0?'#3b82f6':'#22c55e'}}/>
+                        </div>
+                        <div className="text-[10px] text-slate-500">Conv rate: {pct(n(r.sessions)>0?n(r.conversions)/n(r.sessions)*100:0)} · Revenue: {cur(r.purchaseRevenue)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </Card>
+              <Card title="Top Events">
+                <div className="space-y-2">
+                  {events.slice(0,12).map((e,i)=>{
+                    const maxC = events[0]?.count||1;
+                    return (
+                      <div key={i} className="flex items-center gap-2 text-xs">
+                        <span className="text-slate-300 flex-1 truncate font-mono">{e.event}</span>
+                        <div className="w-24 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                          <div className="h-full rounded-full bg-blue-500/70" style={{width:`${e.count/maxC*100}%`}}/>
+                        </div>
+                        <span className="tabular-nums text-slate-400 w-16 text-right">{num(e.count)}</span>
+                        <span className="tabular-nums text-violet-400 w-16 text-right">{num(e.conversions)} cv</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </Card>
+            </div>
+          )}
+        </motion.div>
+      )}
+
+      {/* ── BEHAVIOR ─────────────────────────────────────────────── */}
+      {tab==='behavior' && (
+        <motion.div initial={{opacity:0,y:12}} animate={{opacity:1,y:0}} className="space-y-5">
+
+          {/* Hour × Day of week heatmap */}
+          {gaData?.sessionHour?.length > 0 && (() => {
+            const matrix = {};
+            gaData.sessionHour.forEach(r => {
+              const h = parseInt(r.hour||0);
+              const d = parseInt(r.dayOfWeek||0);
+              if (!matrix[d]) matrix[d] = {};
+              matrix[d][h] = (matrix[d][h]||0) + n(r.sessions);
+            });
+            const allVals = gaData.sessionHour.map(r=>n(r.sessions));
+            const maxVal = Math.max(...allVals, 1);
+            const hours = Array.from({length:24},(_,i)=>i);
+            const days = [0,1,2,3,4,5,6];
+            return (
+              <Card title="Traffic Heatmap — Hour × Day of Week">
+                <p className="text-[10px] text-slate-500 mb-3">Darker = more sessions. Peak times at a glance.</p>
+                <div className="overflow-x-auto">
+                  <table className="text-[9px]">
+                    <thead>
+                      <tr>
+                        <th className="w-8 pr-2 text-slate-600"/>
+                        {hours.map(h=>(
+                          <th key={h} className="w-7 text-center text-slate-600 font-normal pb-1">{h===0||h===6||h===12||h===18||h===23?`${h}h`:''}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {days.map(d=>(
+                        <tr key={d}>
+                          <td className="pr-2 text-slate-500 font-semibold text-[10px] whitespace-nowrap py-0.5">{DAY_NAMES[d]}</td>
+                          {hours.map(h=>{
+                            const v = matrix[d]?.[h]||0;
+                            const intensity = v/maxVal;
+                            return (
+                              <td key={h} className="p-0.5 group relative">
+                                <div className="w-6 h-5 rounded-sm cursor-default"
+                                  style={{background:`rgba(59,130,246,${0.05+intensity*0.85})`}}
+                                  title={`${DAY_NAMES[d]} ${h}:00 — ${num(v)} sessions`}/>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            );
+          })()}
+
+          {/* Channel engagement quality */}
+          {gaData?.engagementByChannel?.length > 0 && (
+            <Card title="Channel Quality — Engagement vs Conversion vs Bounce">
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead><tr className="border-b border-gray-800">
+                    {['Channel','Sessions','Engaged','Bounce%','Avg Duration','Pages/Sess','Conversions','Revenue','Conv%'].map(h=>(
+                      <th key={h} className="px-3 py-2 text-left text-[10px] text-slate-500 font-semibold uppercase whitespace-nowrap">{h}</th>
+                    ))}
+                  </tr></thead>
+                  <tbody>
+                    {gaData.engagementByChannel.map((r,i)=>{
+                      const sess = n(r.sessions)||1;
+                      const engaged = n(r.engagedSessions);
+                      const bounce = n(r.bounceRate)*100;
+                      const convRate = n(r.conversions)/sess*100;
+                      const pagesPerSess = n(r.screenPageViews)/sess;
+                      return (
+                        <tr key={i} className={`border-t border-gray-800/40 ${i%2===0?'bg-gray-950/30':''}`}>
+                          <td className="px-3 py-2 text-slate-200 font-medium whitespace-nowrap">{r.sessionDefaultChannelGrouping||'Other'}</td>
+                          <td className="px-3 py-2 tabular-nums text-slate-300">{num(sess)}</td>
+                          <td className="px-3 py-2 tabular-nums text-blue-400">{num(engaged)} <span className="text-slate-600 text-[10px]">({pct(engaged/sess*100)})</span></td>
+                          <td className="px-3 py-2 tabular-nums" style={{color:bounce>60?'#ef4444':bounce>40?'#f59e0b':'#22c55e'}}>{pct(bounce)}</td>
+                          <td className="px-3 py-2 tabular-nums text-slate-400">{dur(n(r.averageSessionDuration))}</td>
+                          <td className="px-3 py-2 tabular-nums text-slate-400">{dec(pagesPerSess,1)}</td>
+                          <td className="px-3 py-2 tabular-nums text-violet-400">{num(r.conversions)}</td>
+                          <td className="px-3 py-2 tabular-nums text-emerald-400 font-semibold">{cur(r.purchaseRevenue)}</td>
+                          <td className="px-3 py-2 tabular-nums" style={{color:convRate>=3?'#22c55e':convRate>=1?'#f59e0b':'#64748b'}}>{pct(convRate)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+
+          {/* Bounce rate by channel — bar visual */}
+          {gaData?.engagementByChannel?.length > 0 && (
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <Card title="Bounce Rate by Channel">
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={gaData.engagementByChannel.map(r=>({
+                    channel:(r.sessionDefaultChannelGrouping||'Other').replace('Organic ','').replace(' Shopping',''),
+                    bounce:+(n(r.bounceRate)*100).toFixed(1),
+                  }))}>
+                    <CartesianGrid stroke="#1f2937" strokeDasharray="4 4"/>
+                    <XAxis dataKey="channel" tick={{fill:'#64748b',fontSize:9}} angle={-20} textAnchor="end" height={36}/>
+                    <YAxis tick={{fill:'#64748b',fontSize:10}} domain={[0,100]} tickFormatter={v=>`${v}%`} axisLine={false} tickLine={false}/>
+                    <Tooltip formatter={v=>[`${v}%`,'Bounce Rate']}/>
+                    <Bar dataKey="bounce" radius={[2,2,0,0]} name="Bounce%">
+                      {gaData.engagementByChannel.map((r,i)=>{
+                        const v = n(r.bounceRate)*100;
+                        return <Cell key={i} fill={v>60?'#ef4444':v>40?'#f59e0b':'#22c55e'}/>;
+                      })}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </Card>
+              <Card title="Avg Session Duration by Channel">
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={gaData.engagementByChannel.map(r=>({
+                    channel:(r.sessionDefaultChannelGrouping||'Other').replace('Organic ','').replace(' Shopping',''),
+                    duration:+n(r.averageSessionDuration).toFixed(0),
+                  }))}>
+                    <CartesianGrid stroke="#1f2937" strokeDasharray="4 4"/>
+                    <XAxis dataKey="channel" tick={{fill:'#64748b',fontSize:9}} angle={-20} textAnchor="end" height={36}/>
+                    <YAxis tick={{fill:'#64748b',fontSize:10}} tickFormatter={v=>`${Math.floor(v/60)}m`} axisLine={false} tickLine={false}/>
+                    <Tooltip formatter={v=>[dur(v),'Avg Duration']}/>
+                    <Bar dataKey="duration" radius={[2,2,0,0]} name="Duration">
+                      {gaData.engagementByChannel.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </Card>
+            </div>
+          )}
+
+          {/* Session hour distribution chart */}
+          {gaData?.sessionHour?.length > 0 && (() => {
+            const hourAgg = {};
+            gaData.sessionHour.forEach(r => {
+              const h = parseInt(r.hour||0);
+              if (!hourAgg[h]) hourAgg[h] = { hour:h, label:`${String(h).padStart(2,'0')}:00`, sessions:0, conversions:0, revenue:0 };
+              hourAgg[h].sessions    += n(r.sessions);
+              hourAgg[h].conversions += n(r.conversions);
+              hourAgg[h].revenue     += n(r.purchaseRevenue);
+            });
+            const hourData = Object.values(hourAgg).sort((a,b)=>a.hour-b.hour);
+            return (
+              <Card title="Traffic & Conversions by Hour of Day">
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={hourData}>
+                    <CartesianGrid stroke="#1f2937" strokeDasharray="4 4"/>
+                    <XAxis dataKey="label" tick={{fill:'#64748b',fontSize:9}} interval={3}/>
+                    <YAxis yAxisId="s" tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickLine={false}/>
+                    <YAxis yAxisId="c" orientation="right" tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickLine={false}/>
+                    <Tooltip content={<CT/>}/>
+                    <Legend wrapperStyle={{fontSize:11,color:'#94a3b8'}}/>
+                    <Bar yAxisId="s" dataKey="sessions" name="Sessions" fill="#3b82f650" radius={[2,2,0,0]}/>
+                    <Bar yAxisId="c" dataKey="conversions" name="Conversions" fill="#22c55e" radius={[2,2,0,0]}/>
+                  </BarChart>
+                </ResponsiveContainer>
+              </Card>
+            );
+          })()}
+
+          {/* Daily trend extended */}
+          {dailyTrend.length > 0 && (
+            <Card title="Bounce Rate Trend Over Time">
+              <ResponsiveContainer width="100%" height={160}>
+                <AreaChart data={dailyTrend}>
+                  <defs>
+                    <linearGradient id="gBounce" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#ef4444" stopOpacity={0.3}/><stop offset="95%" stopColor="#ef4444" stopOpacity={0}/></linearGradient>
+                  </defs>
+                  <CartesianGrid stroke="#1f2937" strokeDasharray="4 4"/>
+                  <XAxis dataKey="date" tick={{fill:'#64748b',fontSize:10}} tickFormatter={v=>v.slice(5)} interval={Math.max(0,Math.floor(dailyTrend.length/8)-1)}/>
+                  <YAxis tick={{fill:'#64748b',fontSize:10}} tickFormatter={v=>`${v}%`} domain={[0,100]} axisLine={false} tickLine={false}/>
+                  <Tooltip content={<CT/>}/>
+                  <Area type="monotone" dataKey="bounceRate" stroke="#ef4444" fill="url(#gBounce)" strokeWidth={2} dot={false} name="Bounce%"/>
+                </AreaChart>
+              </ResponsiveContainer>
+            </Card>
+          )}
+        </motion.div>
+      )}
+
+      {/* ── GEO ──────────────────────────────────────────────────── */}
 
       {/* ── GEO ──────────────────────────────────────────────────── */}
       {tab==='geo' && (

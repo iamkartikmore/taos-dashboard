@@ -60,8 +60,21 @@ app.post('/api/shopify/inventory', async (req, res) => {
       });
     });
 
-    // Fetch inventory levels in batches of 50 (API limit)
+    // Step 2a: Fetch all locations (warehouses)
+    let locations = [];
+    try {
+      const locResp = await axios.get(
+        `https://${shopDomain}.myshopify.com/admin/api/2024-01/locations.json`,
+        { headers, timeout: 15000 }
+      );
+      locations = (locResp.data.locations || []).filter(l => l.active);
+    } catch (_) {}
+
+    // Step 2b: Fetch inventory levels in batches of 50 — collect per-location
     const itemIds = Object.keys(variantMap);
+    // inventoryByLocation: { [locationId]: { [inventoryItemId]: available } }
+    const inventoryByLocation = {};
+    // Also sum across all locations for total stock
     if (itemIds.length > 0) {
       for (let i = 0; i < itemIds.length; i += 50) {
         const batch = itemIds.slice(i, i + 50).join(',');
@@ -73,17 +86,26 @@ app.post('/api/shopify/inventory', async (req, res) => {
           (lvlResp.data.inventory_levels || []).forEach(lvl => {
             const v = variantMap[lvl.inventory_item_id];
             if (v) {
-              // Sum across all locations
               v._totalStock = (v._totalStock || 0) + (lvl.available || 0);
+              const locId = String(lvl.location_id);
+              if (!inventoryByLocation[locId]) inventoryByLocation[locId] = {};
+              inventoryByLocation[locId][String(lvl.inventory_item_id)] = lvl.available || 0;
             }
           });
-        } catch (_) {
-          // Inventory Levels API failed — fall back to variant.inventory_quantity
-        }
+        } catch (_) {}
       }
     }
 
-    res.json({ products: allProducts });
+    // Build SKU → inventoryItemId map for client-side cross-reference
+    const skuToItemId = {};
+    allProducts.forEach(p => {
+      (p.variants || []).forEach(v => {
+        const sku = (v.sku || '').trim().toUpperCase();
+        if (sku && v.inventory_item_id) skuToItemId[sku] = String(v.inventory_item_id);
+      });
+    });
+
+    res.json({ products: allProducts, locations, inventoryByLocation, skuToItemId });
   } catch (err) {
     const status = err.response?.status || 500;
     res.status(status).json({ error: err.response?.data?.errors || err.message });
@@ -270,10 +292,11 @@ app.post('/api/ga/report', async (req, res) => {
       }
     };
 
-    // All 13 reports run in parallel — validated against GA4 Data API v1beta schema
+    // All 18 reports run in parallel — validated against GA4 Data API v1beta schema
     const [
       dailyTrend, sourceMedium, campaigns, landingPages, devices,
       geo, pages, events, items, utmDrill, browsers, userType, monthlyTrend,
+      sessionHour, deviceChannel, osVersion, engagementByChannel, screenResolution,
     ] = await Promise.all([
       // 0: Daily trend
       run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'date'}],
@@ -299,27 +322,46 @@ app.post('/api/ga/report', async (req, res) => {
       // 7: Events
       run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'eventName'}],
         metrics:['eventCount','totalUsers','conversions'].map(n=>({name:n})), limit:50 }),
-      // 8: Ecommerce items — itemsPurchased is the correct GA4 metric (not itemsSold/itemPurchaseQuantity)
+      // 8: Ecommerce items
       run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'itemName'},{name:'itemId'},{name:'itemCategory'},{name:'itemBrand'}],
         metrics:['itemRevenue','itemsPurchased','addToCarts','checkouts'].map(n=>({name:n})), limit:200 }),
       // 9: UTM full drill
       run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'sessionSource'},{name:'sessionMedium'},{name:'sessionCampaignName'},{name:'sessionManualAdContent'}],
         metrics:['sessions','newUsers','conversions','purchaseRevenue'].map(n=>({name:n})), limit:500 }),
-      // 10: Browser
+      // 10: Browser + device
       run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'browser'},{name:'deviceCategory'}],
         metrics:['sessions','totalUsers','conversions'].map(n=>({name:n})), limit:30 }),
       // 11: User type (new vs returning)
       run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'newVsReturning'}],
         metrics:['sessions','totalUsers','conversions','purchaseRevenue','engagementRate'].map(n=>({name:n})) }),
-      // 12: Monthly trend (last 24 months) — use date + yearMonth dimension
+      // 12: Monthly trend (last 24 months)
       run({ dateRanges:[{startDate:'730daysAgo',endDate:until}], dimensions:[{name:'year'},{name:'month'}],
         metrics:['sessions','totalUsers','newUsers','conversions','purchaseRevenue'].map(n=>({name:n})) }),
+      // 13: Session hour heatmap (hour of day × day of week)
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'hour'},{name:'dayOfWeek'}],
+        metrics:['sessions','conversions','purchaseRevenue','engagedSessions'].map(n=>({name:n})), limit:200 }),
+      // 14: Device × Channel — conversion patterns across device+channel combos
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'deviceCategory'},{name:'sessionDefaultChannelGrouping'}],
+        metrics:['sessions','conversions','purchaseRevenue','bounceRate','engagementRate','averageSessionDuration'].map(n=>({name:n})), limit:50 }),
+      // 15: OS + OS version — mobile fragmentation
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'operatingSystem'},{name:'operatingSystemVersion'}],
+        metrics:['sessions','totalUsers','conversions'].map(n=>({name:n})), limit:60 }),
+      // 16: Engagement metrics per channel (session quality)
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'sessionDefaultChannelGrouping'}],
+        metrics:['sessions','engagedSessions','bounceRate','averageSessionDuration','screenPageViews','conversions','purchaseRevenue'].map(n=>({name:n})), limit:20 }),
+      // 17: Screen resolution (desktop/mobile viewport patterns)
+      run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'screenResolution'}],
+        metrics:['sessions','totalUsers','conversions'].map(n=>({name:n})), limit:30 }),
     ]);
 
     // Normalize monthlyTrend: merge year+month into yearMonth key for downstream compat
     const monthlyTrendNorm = monthlyTrend.map(r => ({ ...r, yearMonth: `${r.year}${r.month}` }));
 
-    res.json({ dailyTrend, sourceMedium, campaigns, landingPages, devices, geo, pages, events, items, utmDrill, browsers, userType, monthlyTrend: monthlyTrendNorm });
+    res.json({
+      dailyTrend, sourceMedium, campaigns, landingPages, devices, geo, pages, events, items,
+      utmDrill, browsers, userType, monthlyTrend: monthlyTrendNorm,
+      sessionHour, deviceChannel, osVersion, engagementByChannel, screenResolution,
+    });
   } catch (err) {
     const msg = err.response?.data?.error?.message || err.message;
     res.status(err.response?.status||500).json({ error: msg });
