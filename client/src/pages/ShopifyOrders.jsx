@@ -210,18 +210,34 @@ function UtmTree({ list }) {
 export default function ShopifyOrders() {
   const {
     brands, shopifyOrders, shopifyOrdersWindow,
-    setShopifyOrders, setShopifyOrdersStatus, inventoryMap, brandData, activeBrandIds,
+    setShopifyOrdersStatus, inventoryMap, brandData, activeBrandIds,
+    setBrandOrders,
   } = useStore();
 
-  // Use first brand with Shopify configured, or let user pick
+  // ALL Shopify-configured brands (not filtered by activeBrandIds)
   const shopifyBrands = (brands || []).filter(b => b.shopify?.shop && b.shopify?.clientId && b.shopify?.clientSecret);
-  const [selectedBrandId, setSelectedBrandId] = useState(() => shopifyBrands[0]?.id || '');
-  const activeBrand = shopifyBrands.find(b => b.id === selectedBrandId) || shopifyBrands[0];
-  const shopify = activeBrand?.shopify || {};
 
-  // Location / per-warehouse inventory from store
-  const activeBrandData = brandData?.[activeBrand?.id] || {};
-  const locations          = activeBrandData.locations           || [];
+  // Pull target: all brands selected by default
+  const [pullBrandIds, setPullBrandIds] = useState(() => shopifyBrands.map(b => b.id));
+  // View filter: 'all' = merged, or a specific brandId
+  const [viewBrandId, setViewBrandId] = useState('all');
+
+  // Sync pullBrandIds when shopifyBrands list changes (e.g. new brand added)
+  useEffect(() => {
+    setPullBrandIds(prev => {
+      const allIds = shopifyBrands.map(b => b.id);
+      // add newly added brands, keep existing selections
+      const merged = [...new Set([...prev, ...allIds])].filter(id => allIds.includes(id));
+      return merged;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shopifyBrands.map(b => b.id).join(',')]);
+
+  // Inventory for view: merge from all brands or just the viewed one
+  const activeBrandData = viewBrandId === 'all'
+    ? {}
+    : (brandData?.[viewBrandId] || {});
+  const locations           = activeBrandData.locations           || [];
   const inventoryByLocation = activeBrandData.inventoryByLocation || {};
   const skuToItemId         = activeBrandData.skuToItemId         || {};
 
@@ -258,25 +274,45 @@ export default function ShopifyOrders() {
 
   const canFetch = shopifyBrands.length > 0;
 
+  // Orders to display: filtered by view brand if one is selected
+  const visibleOrders = useMemo(() => {
+    if (!shopifyOrders.length) return [];
+    if (viewBrandId === 'all') return shopifyOrders;
+    return shopifyOrders.filter(o => o._brandId === viewBrandId);
+  }, [shopifyOrders, viewBrandId]);
+
   const addLog = msg => setFetchLog(prev => [...prev, `${new Date().toLocaleTimeString()} — ${msg}`]);
 
   const handleFetch = async () => {
-    if (!canFetch) return;
+    if (!canFetch || pullBrandIds.length === 0) return;
     setLoading(true); setError(null);
     setFetchLog([]);
     setShowLog(true);
     setShopifyOrdersStatus('loading');
+    const targetBrands = shopifyBrands.filter(b => pullBrandIds.includes(b.id));
+    const { since, until } = getWindowDates(win, customSince, customUntil);
+    addLog(`Window: ${since.slice(0,10)} → ${(until||'').slice(0,10)} · ${targetBrands.length} brand${targetBrands.length !== 1 ? 's' : ''}`);
+    let anyError = null;
     try {
-      const { since, until } = getWindowDates(win, customSince, customUntil);
-      addLog(`Window: ${since.slice(0,10)} → ${(until||'').slice(0,10)}`);
-      // fetchShopifyOrders now uses SSE — each server log line calls addLog in real-time
-      const result = await fetchShopifyOrders(
-        shopify.shop, shopify.clientId, shopify.clientSecret,
-        since, until,
-        msg => addLog(msg),   // ← SSE real-time callback
-      );
-      addLog(`Processing ${result.count.toLocaleString()} orders through analytics engine...`);
-      setShopifyOrders(result.orders, win);
+      for (const brand of targetBrands) {
+        const sh = brand.shopify;
+        addLog(`── ${brand.name}: fetching...`);
+        try {
+          const result = await fetchShopifyOrders(
+            sh.shop, sh.clientId, sh.clientSecret,
+            since, until,
+            msg => addLog(`  ${msg}`),
+          );
+          addLog(`  ${brand.name}: ${result.count.toLocaleString()} orders — processing...`);
+          setBrandOrders(brand.id, result.orders, win);
+          addLog(`  ✓ ${brand.name} done`);
+        } catch (e) {
+          anyError = e.message;
+          addLog(`  ✗ ${brand.name}: ${e.message}`);
+        }
+      }
+      setShopifyOrdersStatus(anyError ? 'error' : 'success');
+      if (anyError) setError(anyError);
     } catch (e) {
       setError(e.message);
       addLog(`✗ Error: ${e.message}`);
@@ -291,8 +327,8 @@ export default function ShopifyOrders() {
   }, [fetchLog]);
 
   const data = useMemo(
-    () => shopifyOrders.length ? processShopifyOrders(shopifyOrders, inventoryMap) : null,
-    [shopifyOrders, inventoryMap],
+    () => visibleOrders.length ? processShopifyOrders(visibleOrders, inventoryMap) : null,
+    [visibleOrders, inventoryMap],
   );
 
   // Analytics summary appended once data is processed
@@ -362,13 +398,39 @@ export default function ShopifyOrders() {
           </div>
         </div>
 
+        {/* Pull target: which brands to fetch (multi-select pills) */}
         {shopifyBrands.length > 1 && (
-          <select value={selectedBrandId} onChange={e => setSelectedBrandId(e.target.value)}
-            className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500">
-            {shopifyBrands.map(b => (
-              <option key={b.id} value={b.id}>{b.name}</option>
-            ))}
-          </select>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider">Pull:</span>
+            {shopifyBrands.map(b => {
+              const on = pullBrandIds.includes(b.id);
+              return (
+                <button key={b.id}
+                  onClick={() => setPullBrandIds(prev => on ? prev.filter(id => id !== b.id) : [...prev, b.id])}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-all ${
+                    on
+                      ? 'bg-emerald-600/25 border-emerald-500/40 text-emerald-300'
+                      : 'bg-gray-800 border-gray-700 text-slate-500'
+                  }`}>
+                  {b.name}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* View filter: which brand's data to show after pull */}
+        {shopifyOrders.length > 0 && shopifyBrands.length > 1 && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider">View:</span>
+            <select value={viewBrandId} onChange={e => setViewBrandId(e.target.value)}
+              className="px-2 py-1 bg-gray-800 border border-gray-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500">
+              <option value="all">All brands</option>
+              {shopifyBrands.map(b => (
+                <option key={b.id} value={b.id}>{b.name}</option>
+              ))}
+            </select>
+          </div>
         )}
 
         <div className="flex gap-1 p-1 bg-gray-900 border border-gray-800 rounded-xl ml-auto flex-wrap">
