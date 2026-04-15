@@ -122,6 +122,9 @@ function percentile(arr, pct) {
 
 /* ─── MAIN PROCESSOR ─────────────────────────────────────────────── */
 
+// Cap for O(n²) cross-sell/triplet analysis — prevents UI freeze on large datasets
+const COMBO_CAP = 2500;
+
 export function processShopifyOrders(orders, inventoryMap = {}) {
   if (!orders?.length) return null;
 
@@ -159,7 +162,8 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
   const fulfillTimes = [];  // hours from creation to first fulfillment
   const cancelMap   = {};   // cancel_reason → count + revenue
 
-  active.forEach(o => {
+  active.forEach((o, _idx) => {
+    const _doCombo = _idx < COMBO_CAP;
     const rev    = p(o.total_price);
     const disc   = p(o.total_discounts);
     const ship   = p(o.total_shipping_price_set?.shop_money?.amount) || p(o.shipping_lines?.[0]?.price);
@@ -332,21 +336,21 @@ export function processShopifyOrders(orders, inventoryMap = {}) {
     // ── per-SKU order count (for lift)
     uSkus.forEach(s => { skuOrdCnt[s] = (skuOrdCnt[s] || 0) + 1; });
 
-    // ── pairs
-    for (let i = 0; i < uSkus.length; i++)
-      for (let j = i + 1; j < uSkus.length; j++) {
-        const k = [uSkus[i], uSkus[j]].sort().join('|');
-        crossSell[k] = (crossSell[k] || 0) + 1;
-      }
-
-    // ── triplets
-    if (uSkus.length >= 3) {
+    // ── pairs + triplets (capped to avoid O(n²) freeze on large windows)
+    if (_doCombo) {
       for (let i = 0; i < uSkus.length; i++)
-        for (let j = i + 1; j < uSkus.length; j++)
-          for (let k = j + 1; k < uSkus.length; k++) {
-            const key = [uSkus[i], uSkus[j], uSkus[k]].sort().join('||');
-            tripMap[key] = (tripMap[key] || 0) + 1;
-          }
+        for (let j = i + 1; j < uSkus.length; j++) {
+          const k = [uSkus[i], uSkus[j]].sort().join('|');
+          crossSell[k] = (crossSell[k] || 0) + 1;
+        }
+      if (uSkus.length >= 3) {
+        for (let i = 0; i < uSkus.length; i++)
+          for (let j = i + 1; j < uSkus.length; j++)
+            for (let k = j + 1; k < uSkus.length; k++) {
+              const key = [uSkus[i], uSkus[j], uSkus[k]].sort().join('||');
+              tripMap[key] = (tripMap[key] || 0) + 1;
+            }
+      }
     }
 
     // ── customer orders for sequence analysis (use email key → catches guest repeats)

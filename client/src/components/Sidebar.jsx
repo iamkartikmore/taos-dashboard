@@ -1,7 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
-  Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity,
+  Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -22,6 +22,7 @@ const NAV = [
   { to: '/breakdowns', icon: BarChart2,    label: 'Breakdown Analytics',  group: 'intel' },
   { to: '/shopify',          icon: ShoppingBag, label: 'Shopify Orders',       group: 'intel' },
   { to: '/shopify-insights', icon: BarChart3,   label: 'Shopify Analytics',    group: 'intel' },
+  { to: '/shopify-ops',      icon: Truck,       label: 'Shopify Ops',          group: 'intel' },
   { to: '/ga',               icon: Activity,    label: 'GA Analytics',          group: 'intel' },
 ];
 
