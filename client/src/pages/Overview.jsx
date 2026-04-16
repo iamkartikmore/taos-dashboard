@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { useStore } from '../store';
+import { useNavigate } from 'react-router-dom';
 import {
   BarChart, Bar, PieChart, Pie, Cell, ScatterChart, Scatter,
   XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -7,7 +8,7 @@ import {
 import {
   AlertTriangle, TrendingUp, TrendingDown, Zap, Target, ShieldCheck,
   Activity, DollarSign, Package, BarChart3, ArrowUpRight, ArrowDownRight,
-  Minus, Flame, Skull, Trophy,
+  Minus, Flame, Skull, Trophy, Info,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { safeNum, fmt, aggregateMetrics, buildPatternSummary } from '../lib/analytics';
@@ -32,6 +33,14 @@ const SEVERITY_STYLES = {
 
 const SEVERITY_ICON = { critical: Skull, high: AlertTriangle, medium: Activity };
 
+const ALERT_ROUTES = {
+  fatigue:     '/creative-intel',
+  opportunity: '/scale',
+  stockout:    '/procurement',
+  waste:       '/kill',
+  worsening:   '/fix',
+};
+
 const deltaColor = v => v > 5 ? 'text-emerald-400' : v < -5 ? 'text-red-400' : 'text-slate-400';
 const deltaIcon  = v => v > 5 ? ArrowUpRight : v < -5 ? ArrowDownRight : Minus;
 
@@ -43,12 +52,41 @@ const MOMENTUM_BAND = score => {
   return               { label: 'Declining',  color: '#f87171' };
 };
 
+/* ─── PERIOD LABEL ───────────────────────────────────────────────── */
+
+function usePeriodLabel(rows) {
+  return useMemo(() => {
+    if (!rows?.length) return null;
+    const starts = rows.map(r => r.dateStart).filter(Boolean).sort();
+    const stops  = rows.map(r => r.dateStop).filter(Boolean).sort();
+    if (!starts.length) return { label: '7D' };
+    const fmtDate = d => {
+      try { return new Date(d).toLocaleDateString('en-IN', { month: 'short', day: 'numeric' }); }
+      catch { return d; }
+    };
+    return { label: '7D', start: fmtDate(starts[0]), stop: fmtDate(stops[stops.length - 1]) };
+  }, [rows]);
+}
+
+function PeriodBadge({ period }) {
+  if (!period) return null;
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] font-medium text-slate-500 bg-gray-800/80 border border-gray-700/60 px-2 py-0.5 rounded-md">
+      <Activity size={9} />
+      {period.start && period.stop ? `${period.start} – ${period.stop}` : 'Last 7 Days'}
+    </span>
+  );
+}
+
 /* ─── KPI CARD ───────────────────────────────────────────────────── */
 
-function KpiCard({ label, value, sub, delta, icon: Icon, iconColor = 'text-brand-400' }) {
+function KpiCard({ label, value, sub, delta, icon: Icon, iconColor = 'text-brand-400', onClick }) {
   const DIcon = deltaIcon(delta ?? 0);
   return (
-    <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4 flex flex-col gap-2">
+    <div
+      className={clsx('bg-gray-900 border border-gray-800/60 rounded-xl p-4 flex flex-col gap-2', onClick && 'cursor-pointer hover:border-gray-700 transition-colors')}
+      onClick={onClick}
+    >
       <div className="flex items-center justify-between">
         <span className="text-[11px] text-slate-500 uppercase tracking-wider">{label}</span>
         <Icon size={15} className={iconColor} />
@@ -71,23 +109,30 @@ function KpiCard({ label, value, sub, delta, icon: Icon, iconColor = 'text-brand
 
 /* ─── ALERT STRIP ────────────────────────────────────────────────── */
 
-function AlertStrip({ alerts }) {
+function AlertStrip({ alerts, navigate }) {
   if (!alerts?.length) return null;
   return (
     <div className="flex flex-col gap-2 mb-6">
       {alerts.slice(0, 5).map((a, i) => {
         const SevIcon = SEVERITY_ICON[a.severity] || AlertTriangle;
+        const route   = ALERT_ROUTES[a.type];
         return (
-          <div key={i} className={clsx(
-            'flex items-start gap-3 px-4 py-3 rounded-lg border text-sm',
-            SEVERITY_STYLES[a.severity] || SEVERITY_STYLES.medium
-          )}>
+          <div
+            key={i}
+            className={clsx(
+              'flex items-start gap-3 px-4 py-3 rounded-lg border text-sm transition-opacity',
+              SEVERITY_STYLES[a.severity] || SEVERITY_STYLES.medium,
+              route && 'cursor-pointer hover:opacity-80',
+            )}
+            onClick={() => route && navigate(route)}
+          >
             <SevIcon size={15} className="mt-0.5 shrink-0" />
             <div className="flex-1 min-w-0">
               <span className="font-semibold">{a.title}</span>
               {a.detail && <span className="ml-2 opacity-70 truncate">{a.detail}</span>}
             </div>
             <span className="text-[10px] uppercase tracking-wider opacity-60 shrink-0">{a.severity}</span>
+            {route && <ArrowUpRight size={13} className="mt-0.5 shrink-0 opacity-40" />}
           </div>
         );
       })}
@@ -110,19 +155,34 @@ function MomentumBar({ score }) {
   );
 }
 
-/* ─── FUNNEL ROW ─────────────────────────────────────────────────── */
+/* ─── FUNNEL BAR ─────────────────────────────────────────────────── */
+// Note: Meta's action attribution window (7d-click + 1d-view) means view-through
+// conversions are counted. LPV can exceed outbound clicks because someone who
+// *viewed* the ad (without clicking) and later visited the site still gets attributed.
+// ATC can exceed LPV because one page visit can trigger multiple add-to-cart events.
+// Rates > 100% are correct — they reflect Meta's attribution model, not a code bug.
 
-function FunnelBar({ label, rate, color, isLeak }) {
-  const pct = Math.min(100, safeNum(rate));
+function FunnelBar({ label, rate, color, isLeak, isAttr }) {
+  const raw = safeNum(rate);
+  const pct = Math.min(100, raw);
+  const isOver100 = raw > 100;
   return (
     <div className="flex items-center gap-3">
-      <span className="w-24 text-[11px] text-slate-400 shrink-0">{label}</span>
+      <div className="w-28 shrink-0">
+        <span className="text-[11px] text-slate-400">{label}</span>
+        {isOver100 && (
+          <span className="ml-1 text-[9px] text-slate-600" title="View-through attribution: Meta attributes LPV/ATC to ads even when the user viewed the ad without clicking, then visited the site. This can push rates above 100%.">(attr.)</span>
+        )}
+      </div>
       <div className="flex-1 h-3 bg-gray-800 rounded-full overflow-hidden">
         <div className={clsx('h-full rounded-full', isLeak && 'opacity-60')} style={{ width: `${pct}%`, background: color }} />
       </div>
-      <span className={clsx('w-12 text-right text-[11px] font-semibold shrink-0', isLeak ? 'text-red-400' : 'text-slate-300')}>
-        {safeNum(rate).toFixed(1)}%{isLeak && ' ⚠'}
-      </span>
+      <div className="w-16 text-right shrink-0">
+        <span className={clsx('text-[11px] font-semibold', isLeak ? 'text-red-400' : isOver100 ? 'text-sky-400' : 'text-slate-300')}>
+          {raw.toFixed(1)}%
+        </span>
+        {isLeak && <span className="text-red-400 ml-0.5">⚠</span>}
+      </div>
     </div>
   );
 }
@@ -130,11 +190,14 @@ function FunnelBar({ label, rate, color, isLeak }) {
 /* ─── MAIN ───────────────────────────────────────────────────────── */
 
 export default function Overview() {
+  const navigate = useNavigate();
   const { enrichedRows, shopifyOrders, inventoryMap, brandData, activeBrandIds, brands } = useStore();
+
+  const period7d = usePeriodLabel(enrichedRows);
 
   const agg7d = useMemo(() => aggregateMetrics(enrichedRows), [enrichedRows]);
 
-  // Simple 30d aggregate from raw brandData (not enriched, just for KPI deltas)
+  // 30d aggregate from raw brandData for KPI deltas
   const agg30d = useMemo(() => {
     const all30 = [];
     brands.filter(b => activeBrandIds.includes(b.id)).forEach(b => {
@@ -198,6 +261,9 @@ export default function Overview() {
   const cprDelta   = agg7d && agg30d ? pctDelta(agg7d.cpr,      agg30d.cpr)     : null;
   const revDelta   = agg7d && agg30d ? pctDelta(agg7d.revenue,  agg30d.revenue) : null;
 
+  // Funnel ATC→IC rate computed from aggregated counts
+  const atcToIcRate = agg7d && agg7d.atc > 0 ? (safeNum(agg7d.ic) / safeNum(agg7d.atc)) * 100 : 0;
+
   const hasData = enrichedRows.length > 0;
 
   if (!hasData) {
@@ -219,48 +285,57 @@ export default function Overview() {
   return (
     <div className="space-y-6">
 
+      {/* Page header with period */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-bold text-white">Overview</h1>
+          <div className="text-[11px] text-slate-500 mt-0.5">All active brands · Last 7 days data</div>
+        </div>
+        <PeriodBadge period={period7d} />
+      </div>
+
       {/* Alert Strip */}
-      <AlertStrip alerts={alerts} />
+      <AlertStrip alerts={alerts} navigate={navigate} />
 
       {/* KPI Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3">
         <KpiCard label="Total Spend"  value={fmt.currency(agg7d?.spend)}                    delta={spendDelta}           icon={DollarSign}  iconColor="text-amber-400" />
-        <KpiCard label="ROAS"         value={agg7d?.roas  ? fmt.roas(agg7d.roas)     : '—'} delta={roasDelta}            icon={TrendingUp}  iconColor="text-emerald-400" />
+        <KpiCard label="ROAS"         value={agg7d?.roas  ? fmt.roas(agg7d.roas)     : '—'} delta={roasDelta}            icon={TrendingUp}  iconColor="text-emerald-400" onClick={() => navigate('/scorecard')} />
         <KpiCard label="CPR"          value={agg7d?.cpr   ? fmt.currency(agg7d.cpr)  : '—'} delta={cprDelta !== null ? -cprDelta : null} icon={Target} iconColor="text-blue-400" />
-        <KpiCard label="Revenue"      value={fmt.currency(agg7d?.revenue)}                   delta={revDelta}             icon={BarChart3}   iconColor="text-purple-400" />
-        <KpiCard label="Purchases"    value={fmt.number(agg7d?.purchases)} sub={agg7d?.aov ? `AOV ${fmt.currency(agg7d.aov)}` : undefined} icon={ShieldCheck} iconColor="text-sky-400" />
-        <KpiCard label="CPM"          value={agg7d?.cpm ? fmt.currency(agg7d.cpm) : '—'}    icon={Activity}             iconColor="text-pink-400" />
-        <KpiCard label="Active Ads"   value={enrichedRows.length} sub={`${decisionData.find(d => d.name === 'Scale Hard')?.value || 0} Scale Hard`} icon={Zap} iconColor="text-brand-400" />
-        <KpiCard label="CTR"          value={agg7d?.ctr ? `${safeNum(agg7d.ctr).toFixed(2)}%` : '—'} icon={ArrowUpRight} iconColor="text-teal-400" />
+        <KpiCard label="Revenue"      value={fmt.currency(agg7d?.revenue)}                   delta={revDelta}             icon={BarChart3}   iconColor="text-purple-400" onClick={() => navigate('/breakdowns')} />
+        <KpiCard label="Purchases"    value={fmt.number(agg7d?.purchases)} sub={agg7d?.aov ? `AOV ${fmt.currency(agg7d.aov)}` : undefined} icon={ShieldCheck} iconColor="text-sky-400" onClick={() => navigate('/shopify-insights')} />
+        <KpiCard label="CPM"          value={agg7d?.cpm ? fmt.currency(agg7d.cpm) : '—'}    icon={Activity}             iconColor="text-pink-400" onClick={() => navigate('/patterns')} />
+        <KpiCard label="Active Ads"   value={enrichedRows.length} sub={`${decisionData.find(d => d.name === 'Scale Hard')?.value || 0} Scale Hard`} icon={Zap} iconColor="text-brand-400" onClick={() => navigate('/decisions')} />
+        <KpiCard label="CTR"          value={agg7d?.ctr ? `${safeNum(agg7d.ctr).toFixed(2)}%` : '—'} icon={ArrowUpRight} iconColor="text-teal-400" onClick={() => navigate('/breakdowns')} />
       </div>
 
       {/* Intelligence Summary */}
       {intel && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4">
+          <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4 cursor-pointer hover:border-gray-700 transition-colors" onClick={() => navigate('/momentum')}>
             <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-2">Portfolio Momentum</div>
             <div className="text-xl font-bold text-white mb-2">{intel.avgMomentum > 0 ? '+' : ''}{intel.avgMomentum}</div>
             <MomentumBar score={intel.avgMomentum} />
           </div>
-          <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4">
+          <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4 cursor-pointer hover:border-gray-700 transition-colors" onClick={() => navigate('/creative-intel')}>
             <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-2">Avg Fatigue Score</div>
             <div className={clsx('text-xl font-bold mb-1', intel.avgFatigue >= 60 ? 'text-red-400' : intel.avgFatigue >= 40 ? 'text-amber-400' : 'text-emerald-400')}>
               {intel.avgFatigue}/100
             </div>
-            <div className="text-[11px] text-slate-500">{intel.highFatigue} ads in danger zone (&gt;70)</div>
+            <div className="text-[11px] text-slate-500">{intel.highFatigue} ads in danger zone (&gt;70) · tap to review</div>
           </div>
-          <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4">
+          <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4 cursor-pointer hover:border-gray-700 transition-colors" onClick={() => navigate('/scale')}>
             <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-2">Surging Ads</div>
             <div className="text-xl font-bold text-emerald-400 mb-1">{intel.surging}</div>
-            <div className="text-[11px] text-slate-500">Momentum score ≥ 60</div>
+            <div className="text-[11px] text-slate-500">Momentum ≥ 60 · tap to scale</div>
           </div>
-          <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4">
+          <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4 cursor-pointer hover:border-gray-700 transition-colors" onClick={() => navigate('/decisions')}>
             <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-2">Primary Funnel Leak</div>
             <div className={clsx('text-xl font-bold mb-1', funnelDiag?.topStage !== 'None' ? 'text-amber-400' : 'text-emerald-400')}>
               {funnelDiag?.topStage || 'None'}
             </div>
             <div className="text-[11px] text-slate-500">
-              {funnelDiag?.breakdown?.find(b => b.stage === funnelDiag.topStage)?.pct || 0}% of ads leaking here
+              {funnelDiag?.breakdown?.find(b => b.stage === funnelDiag.topStage)?.pct || 0}% of ads leaking here · tap to fix
             </div>
           </div>
         </div>
@@ -272,7 +347,8 @@ export default function Overview() {
           <div className="flex items-center gap-2 mb-3">
             <Trophy size={15} className="text-amber-400" />
             <span className="text-sm font-semibold text-white">Top 6 Ads by ROAS</span>
-            <span className="text-[10px] text-slate-500 ml-auto">Min ₹500 spend · 7D</span>
+            <span className="text-[10px] text-slate-500 ml-auto">Min ₹500 spend</span>
+            <PeriodBadge period={period7d} />
           </div>
           <div className="space-y-2">
             {topAds.length === 0
@@ -280,7 +356,11 @@ export default function Overview() {
               : topAds.map((r, i) => {
                 const momBand = MOMENTUM_BAND(r.momentumScore || 0);
                 return (
-                  <div key={r.adId} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-gray-800/40 hover:bg-gray-800/80 transition-colors">
+                  <div
+                    key={r.adId}
+                    className="flex items-center gap-3 px-3 py-2 rounded-lg bg-gray-800/40 hover:bg-gray-800/80 transition-colors cursor-pointer"
+                    onClick={() => navigate('/scale')}
+                  >
                     <span className="text-[11px] font-bold text-slate-500 w-4">{i + 1}</span>
                     <div className="flex-1 min-w-0">
                       <div className="text-[12px] font-medium text-slate-200 truncate">{r.adName}</div>
@@ -301,6 +381,11 @@ export default function Overview() {
               })
             }
           </div>
+          <div className="mt-3 pt-2 border-t border-gray-800/40">
+            <button className="text-[11px] text-brand-400 hover:text-brand-300 transition-colors" onClick={() => navigate('/decisions')}>
+              View all ads in Decision Queue →
+            </button>
+          </div>
         </div>
 
         <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4">
@@ -318,7 +403,15 @@ export default function Overview() {
           </ResponsiveContainer>
           <div className="grid grid-cols-2 gap-1 mt-2">
             {decisionData.map(({ name, value }) => (
-              <div key={name} className="flex items-center gap-1.5 text-[10px]">
+              <div
+                key={name}
+                className="flex items-center gap-1.5 text-[10px] cursor-pointer hover:opacity-80"
+                onClick={() => {
+                  const routes = { 'Scale Hard': '/scale', 'Scale Carefully': '/scale', 'Fix': '/fix', 'Defend': '/defend', 'Kill': '/kill' };
+                  const r = routes[name];
+                  if (r) navigate(r);
+                }}
+              >
                 <div className="w-2 h-2 rounded-full shrink-0" style={{ background: DECISION_COLORS[name] || '#64748b' }} />
                 <span className="text-slate-400 truncate">{name}</span>
                 <span className="text-slate-500 ml-auto">{value}</span>
@@ -331,28 +424,34 @@ export default function Overview() {
       {/* Funnel + Collection ROAS */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-4">
+          <div className="flex items-center gap-2 mb-1">
             <Target size={14} className="text-blue-400" />
             <span className="text-sm font-semibold text-white">Conversion Funnel</span>
+            <PeriodBadge period={period7d} />
             {funnelDiag?.topStage !== 'None' && (
               <span className="ml-auto text-[10px] text-amber-400 flex items-center gap-1">
                 <AlertTriangle size={11} />Leak: {funnelDiag?.topStage}
               </span>
             )}
           </div>
+          {/* Attribution note */}
+          <div className="flex items-start gap-1.5 text-[10px] text-slate-600 mb-3 mt-1">
+            <Info size={10} className="mt-0.5 shrink-0" />
+            <span>Rates marked <span className="text-sky-700">(attr.)</span> may exceed 100% — Meta attributes actions via view-through window (7d-click + 1d-view), so LPV/ATC counts include people who saw the ad but clicked elsewhere.</span>
+          </div>
           <div className="space-y-3">
-            <FunnelBar label="Hook Rate"     rate={agg7d?.lpvRate}      color="#60a5fa" isLeak={funnelDiag?.topStage === 'LPV'} />
-            <FunnelBar label="LPV → ATC"    rate={agg7d?.atcRate}      color="#a78bfa" isLeak={funnelDiag?.topStage === 'ATC'} />
-            <FunnelBar label="ATC → Checkout" rate={agg7d ? safeNum(agg7d.ic > 0 ? (agg7d.atc > 0 ? agg7d.ic / agg7d.atc * 100 : 0) : 0) : 0} color="#f59e0b" />
-            <FunnelBar label="IC → Purchase" rate={agg7d?.purchaseRate} color="#22c55e" isLeak={funnelDiag?.topStage === 'Purchase'} />
-            <FunnelBar label="Overall Conv"  rate={agg7d?.convRate}     color="#06b6d4" />
+            <FunnelBar label="Hook Rate"      rate={agg7d?.lpvRate}   color="#60a5fa" isLeak={funnelDiag?.topStage === 'LPV'} />
+            <FunnelBar label="LPV → ATC"     rate={agg7d?.atcRate}   color="#a78bfa" isLeak={funnelDiag?.topStage === 'ATC'} />
+            <FunnelBar label="ATC → Checkout" rate={atcToIcRate}      color="#f59e0b" />
+            <FunnelBar label="IC → Purchase"  rate={agg7d?.purchaseRate} color="#22c55e" isLeak={funnelDiag?.topStage === 'Purchase'} />
+            <FunnelBar label="Overall Conv"   rate={agg7d?.convRate}  color="#06b6d4" />
           </div>
           {funnelDiag && (
             <div className="mt-4 pt-3 border-t border-gray-800/60">
               <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-2">Leak Distribution</div>
               <div className="grid grid-cols-3 gap-2">
                 {funnelDiag.breakdown.filter(b => b.stage !== 'None').map(b => (
-                  <div key={b.stage} className="text-center">
+                  <div key={b.stage} className="text-center cursor-pointer hover:opacity-80" onClick={() => navigate('/decisions')}>
                     <div className="text-[13px] font-bold text-amber-400">{b.pct}%</div>
                     <div className="text-[10px] text-slate-500">{b.stage}</div>
                   </div>
@@ -366,35 +465,42 @@ export default function Overview() {
           <div className="flex items-center gap-2 mb-4">
             <BarChart3 size={14} className="text-purple-400" />
             <span className="text-sm font-semibold text-white">Collection ROAS</span>
+            <PeriodBadge period={period7d} />
           </div>
           <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={collectionData.slice(0, 7)} margin={{ left: -20, right: 8 }}>
+            <BarChart data={collectionData.slice(0, 7)} margin={{ left: -20, right: 8 }}
+              onClick={({ activePayload }) => activePayload?.length && navigate('/patterns')}>
               <XAxis dataKey="label" tick={{ fontSize: 9, fill: '#64748b' }} />
               <YAxis tick={{ fontSize: 10, fill: '#64748b' }} />
               <Tooltip contentStyle={{ background: '#111827', border: '1px solid #374151', borderRadius: 8, fontSize: 12 }} formatter={v => [`${safeNum(v).toFixed(2)}x`, 'ROAS']} />
-              <Bar dataKey="roas" radius={[4, 4, 0, 0]}>
+              <Bar dataKey="roas" radius={[4, 4, 0, 0]} cursor="pointer">
                 {collectionData.slice(0, 7).map((entry, i) => (
                   <Cell key={i} fill={entry.roas >= 4 ? '#22c55e' : entry.roas >= 3 ? '#60a5fa' : entry.roas >= 2 ? '#f59e0b' : '#f87171'} />
                 ))}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
+          <div className="mt-2 text-center">
+            <button className="text-[11px] text-brand-400 hover:text-brand-300 transition-colors" onClick={() => navigate('/patterns')}>
+              Full pattern analysis →
+            </button>
+          </div>
         </div>
       </div>
 
       {/* Hook × Hold Scatter */}
       {hookHold.length > 2 && (
-        <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4">
+        <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4 cursor-pointer hover:border-gray-700 transition-colors" onClick={() => navigate('/creative-intel')}>
           <div className="flex items-center gap-2 mb-1">
             <Flame size={14} className="text-orange-400" />
             <span className="text-sm font-semibold text-white">Hook × Hold Creative Map</span>
-            <span className="text-[10px] text-slate-500 ml-auto">Top-right quadrant = best creatives</span>
+            <span className="text-[10px] text-slate-500 ml-auto">Top-right quadrant = best creatives · tap for full analysis</span>
           </div>
-          <div className="text-[10px] text-slate-500 mb-3">Hook Rate (X axis) vs Hold Rate (Y axis) — green = ROAS ≥4x</div>
+          <div className="text-[10px] text-slate-500 mb-3">Hook Rate (X) vs Hold Rate (Y) — both capped at 100% on chart</div>
           <ResponsiveContainer width="100%" height={220}>
             <ScatterChart margin={{ left: -10, right: 20, top: 10, bottom: 10 }}>
-              <XAxis type="number" dataKey="hookRate" name="Hook Rate" unit="%" tick={{ fontSize: 10, fill: '#64748b' }} />
-              <YAxis type="number" dataKey="holdRate" name="Hold Rate" unit="%" tick={{ fontSize: 10, fill: '#64748b' }} />
+              <XAxis type="number" dataKey="hookRate" name="Hook Rate" unit="%" tick={{ fontSize: 10, fill: '#64748b' }} domain={[0, 100]} />
+              <YAxis type="number" dataKey="holdRate" name="Hold Rate" unit="%" tick={{ fontSize: 10, fill: '#64748b' }} domain={[0, 100]} />
               <Tooltip
                 contentStyle={{ background: '#111827', border: '1px solid #374151', borderRadius: 8, fontSize: 11 }}
                 content={({ active, payload }) => {
@@ -410,7 +516,7 @@ export default function Overview() {
                   );
                 }}
               />
-              <Scatter data={hookHold.slice(0, 60)}>
+              <Scatter data={hookHold.slice(0, 60).map(h => ({ ...h, hookRate: Math.min(h.hookRate, 100) }))}>
                 {hookHold.slice(0, 60).map((entry, i) => (
                   <Cell key={i} fill={entry.roas >= 4 ? '#22c55e' : entry.roas >= 2.5 ? '#60a5fa' : '#f87171'} opacity={0.8} />
                 ))}
@@ -431,10 +537,15 @@ export default function Overview() {
           <div className="flex items-center gap-2 mb-3">
             <Skull size={15} className="text-red-400" />
             <span className="text-sm font-semibold text-white">Lowest ROAS (Active Spend)</span>
+            <PeriodBadge period={period7d} />
           </div>
           <div className="space-y-2">
             {worstAds.map(r => (
-              <div key={r.adId} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-gray-800/40">
+              <div
+                key={r.adId}
+                className="flex items-center gap-3 px-3 py-2 rounded-lg bg-gray-800/40 hover:bg-gray-800/60 transition-colors cursor-pointer"
+                onClick={() => navigate(r.decision === 'Kill' ? '/kill' : r.decision === 'Fix' ? '/fix' : '/decisions')}
+              >
                 <div className="flex-1 min-w-0">
                   <div className="text-[12px] font-medium text-slate-300 truncate">{r.adName}</div>
                   <div className="text-[10px] text-slate-500">{r.collection || r.campaignName} · Fatigue {r.fatigueScore ?? 0}/100</div>
@@ -450,12 +561,18 @@ export default function Overview() {
               </div>
             ))}
           </div>
+          <div className="mt-3 pt-2 border-t border-gray-800/40">
+            <button className="text-[11px] text-red-400 hover:text-red-300 transition-colors" onClick={() => navigate('/kill')}>
+              View Kill Board →
+            </button>
+          </div>
         </div>
 
         <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4">
           <div className="flex items-center gap-2 mb-3">
             <Package size={15} className="text-teal-400" />
             <span className="text-sm font-semibold text-white">Collection × Offer ROAS</span>
+            <PeriodBadge period={period7d} />
           </div>
           <div className="space-y-2 max-h-52 overflow-y-auto">
             {offerMatrix.length === 0
@@ -480,13 +597,21 @@ export default function Overview() {
               ))
             }
           </div>
+          <div className="mt-3 pt-2 border-t border-gray-800/40">
+            <button className="text-[11px] text-brand-400 hover:text-brand-300 transition-colors" onClick={() => navigate('/creative-intel')}>
+              Full Creative Intel →
+            </button>
+          </div>
         </div>
       </div>
 
       {/* Account Breakdown */}
       {accountData.length > 0 && (
         <div className="bg-gray-900 border border-gray-800/60 rounded-xl p-4">
-          <div className="text-sm font-semibold text-white mb-3">Account Performance</div>
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-sm font-semibold text-white">Account Performance</span>
+            <PeriodBadge period={period7d} />
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-[12px]">
               <thead>
@@ -498,7 +623,7 @@ export default function Overview() {
               </thead>
               <tbody>
                 {accountData.map(row => (
-                  <tr key={row.label} className="border-b border-gray-800/40 hover:bg-gray-800/20 transition-colors">
+                  <tr key={row.label} className="border-b border-gray-800/40 hover:bg-gray-800/20 transition-colors cursor-pointer" onClick={() => navigate('/decisions')}>
                     <td className="py-2 pr-4 font-medium text-slate-200">{row.label}</td>
                     <td className="py-2 px-3 text-right text-slate-300">{fmt.currency(row.spend)}</td>
                     <td className={clsx('py-2 px-3 text-right font-bold',

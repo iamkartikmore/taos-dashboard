@@ -21,6 +21,7 @@ const Procurement    = lazy(() => import('./pages/Procurement'));
 const CreativeIntel  = lazy(() => import('./pages/CreativeIntel'));
 const Attribution    = lazy(() => import('./pages/Attribution'));
 const Momentum       = lazy(() => import('./pages/Momentum'));
+const InactiveAds    = lazy(() => import('./pages/InactiveAds'));
 
 function PageFallback() {
   return (
@@ -57,6 +58,7 @@ export default function App() {
             <Route path="/creative-intel"   element={<CreativeIntel />} />
             <Route path="/attribution"      element={<Attribution />} />
             <Route path="/momentum"         element={<Momentum />} />
+            <Route path="/inactive"         element={<InactiveAds />} />
             <Route path="*"                 element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

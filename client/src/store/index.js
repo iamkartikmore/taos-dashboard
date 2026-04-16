@@ -143,7 +143,7 @@ export const useStore = create((set, get) => {
       }));
     });
 
-    set({ enrichedRows, adsetMap, campaignMap, inventoryMap, shopifyOrders, rawAccounts, fetchStatus, lastFetchAt: Date.now() });
+    set({ enrichedRows, adsetMap, campaignMap, adMap, inventoryMap, shopifyOrders, rawAccounts, fetchStatus, lastFetchAt: Date.now() });
   }
 
   return {
@@ -289,6 +289,7 @@ export const useStore = create((set, get) => {
     rawAccounts:   [],
     adsetMap:      {},
     campaignMap:   {},
+    adMap:         {},
     inventoryMap:  {},
     shopifyOrders: [],
     customerCache: customerCache,

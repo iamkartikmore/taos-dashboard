@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
   Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck, ClipboardList,
-  Flame, GitMerge,
+  Flame, GitMerge, PauseCircle,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -24,6 +24,7 @@ const NAV = [
   { to: '/creative-intel', icon: Flame,         label: 'Creative Intel',     group: 'advanced' },
   { to: '/attribution',  icon: GitMerge,        label: 'Attribution',        group: 'advanced' },
   { to: '/momentum',     icon: TrendingUp,      label: 'Momentum',           group: 'advanced' },
+  { to: '/inactive',     icon: PauseCircle,     label: 'Inactive Ads',       group: 'advanced' },
   { to: '/shopify',          icon: ShoppingBag, label: 'Shopify Orders',   group: 'shopify' },
   { to: '/shopify-insights', icon: BarChart3,   label: 'Shopify Analytics',group: 'shopify' },
   { to: '/shopify-ops',      icon: Truck,       label: 'Shopify Ops',      group: 'shopify' },
