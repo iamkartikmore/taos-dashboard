@@ -1,53 +1,66 @@
+import { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
-import Setup from './pages/Setup';
-import Overview from './pages/Overview';
-import DecisionQueue from './pages/DecisionQueue';
-import Board from './pages/Boards';
-import Patterns from './pages/Patterns';
-import Scorecard from './pages/Scorecard';
-import FlatData from './pages/FlatData';
-import VideoInsights from './pages/VideoInsights';
-import SkuInsights from './pages/SkuInsights';
-import Breakdowns from './pages/Breakdowns';
-import ShopifyOrders from './pages/ShopifyOrders';
-import ShopifyInsights from './pages/ShopifyInsights';
-import ShopifyOps from './pages/ShopifyOps';
-import GAInsights from './pages/GAInsights';
-import Procurement from './pages/Procurement';
-import CreativeIntel from './pages/CreativeIntel';
-import Attribution from './pages/Attribution';
-import Momentum from './pages/Momentum';
+
+// Heavy pages — code-split so only the active page's JS is parsed
+const Setup          = lazy(() => import('./pages/Setup'));
+const Overview       = lazy(() => import('./pages/Overview'));
+const DecisionQueue  = lazy(() => import('./pages/DecisionQueue'));
+const Board          = lazy(() => import('./pages/Boards'));
+const Patterns       = lazy(() => import('./pages/Patterns'));
+const Scorecard      = lazy(() => import('./pages/Scorecard'));
+const FlatData       = lazy(() => import('./pages/FlatData'));
+const VideoInsights  = lazy(() => import('./pages/VideoInsights'));
+const SkuInsights    = lazy(() => import('./pages/SkuInsights'));
+const Breakdowns     = lazy(() => import('./pages/Breakdowns'));
+const ShopifyOrders  = lazy(() => import('./pages/ShopifyOrders'));
+const ShopifyInsights= lazy(() => import('./pages/ShopifyInsights'));
+const ShopifyOps     = lazy(() => import('./pages/ShopifyOps'));
+const GAInsights     = lazy(() => import('./pages/GAInsights'));
+const Procurement    = lazy(() => import('./pages/Procurement'));
+const CreativeIntel  = lazy(() => import('./pages/CreativeIntel'));
+const Attribution    = lazy(() => import('./pages/Attribution'));
+const Momentum       = lazy(() => import('./pages/Momentum'));
+
+function PageFallback() {
+  return (
+    <div className="flex items-center justify-center min-h-[50vh]">
+      <div className="w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+    </div>
+  );
+}
 
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route element={<Layout />}>
-          <Route path="/"          element={<Overview />} />
-          <Route path="/setup"     element={<Setup />} />
-          <Route path="/decisions" element={<DecisionQueue />} />
-          <Route path="/scale"     element={<Board />} />
-          <Route path="/fix"       element={<Board />} />
-          <Route path="/defend"    element={<Board />} />
-          <Route path="/kill"      element={<Board />} />
-          <Route path="/patterns"  element={<Patterns />} />
-          <Route path="/scorecard" element={<Scorecard />} />
-          <Route path="/video"     element={<VideoInsights />} />
-          <Route path="/sku"       element={<SkuInsights />} />
-          <Route path="/flat"       element={<FlatData />} />
-          <Route path="/breakdowns" element={<Breakdowns />} />
-          <Route path="/shopify"          element={<ShopifyOrders />} />
-          <Route path="/shopify-insights" element={<ShopifyInsights />} />
-          <Route path="/shopify-ops"      element={<ShopifyOps />} />
-          <Route path="/ga"               element={<GAInsights />} />
-          <Route path="/procurement"      element={<Procurement />} />
-          <Route path="/creative-intel"   element={<CreativeIntel />} />
-          <Route path="/attribution"      element={<Attribution />} />
-          <Route path="/momentum"         element={<Momentum />} />
-          <Route path="*"           element={<Navigate to="/" replace />} />
-        </Route>
-      </Routes>
+      <Suspense fallback={<PageFallback />}>
+        <Routes>
+          <Route element={<Layout />}>
+            <Route path="/"                 element={<Overview />} />
+            <Route path="/setup"            element={<Setup />} />
+            <Route path="/decisions"        element={<DecisionQueue />} />
+            <Route path="/scale"            element={<Board />} />
+            <Route path="/fix"              element={<Board />} />
+            <Route path="/defend"           element={<Board />} />
+            <Route path="/kill"             element={<Board />} />
+            <Route path="/patterns"         element={<Patterns />} />
+            <Route path="/scorecard"        element={<Scorecard />} />
+            <Route path="/video"            element={<VideoInsights />} />
+            <Route path="/sku"              element={<SkuInsights />} />
+            <Route path="/flat"             element={<FlatData />} />
+            <Route path="/breakdowns"       element={<Breakdowns />} />
+            <Route path="/shopify"          element={<ShopifyOrders />} />
+            <Route path="/shopify-insights" element={<ShopifyInsights />} />
+            <Route path="/shopify-ops"      element={<ShopifyOps />} />
+            <Route path="/ga"               element={<GAInsights />} />
+            <Route path="/procurement"      element={<Procurement />} />
+            <Route path="/creative-intel"   element={<CreativeIntel />} />
+            <Route path="/attribution"      element={<Attribution />} />
+            <Route path="/momentum"         element={<Momentum />} />
+            <Route path="*"                 element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
+      </Suspense>
     </BrowserRouter>
   );
 }

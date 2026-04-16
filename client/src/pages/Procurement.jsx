@@ -731,26 +731,25 @@ export default function Procurement() {
         ))}
       </div>
 
-      {/* Tab content */}
-      {activeTab === 'overview'  && <OverviewTab summary={summary} rows={rows} />}
-      {activeTab === 'reorder'   && (
-        <ReorderPlanner
-          rows={rows}
-          suppliers={suppliers}
-          onUpdateSupplier={(sku, data) => setProcurementSupplier(sku, data)}
-        />
-      )}
-      {activeTab === 'abc'       && <AbcAnalysis rows={rows} />}
-      {activeTab === 'velocity'  && <VelocityAnalysis rows={rows} />}
-      {activeTab === 'dead'      && <DeadStock rows={rows} />}
-      {activeTab === 'po'        && (
-        <PurchaseOrders
-          purchaseOrders={purchaseOrders}
-          onAdd={addProcurementPO}
-          onUpdate={updateProcurementPO}
-          onDelete={deleteProcurementPO}
-        />
-      )}
+      {/* Tab content — kept mounted, hidden via CSS so tabs switch instantly */}
+      <div style={{ display: activeTab === 'overview' ? undefined : 'none' }}>
+        <OverviewTab summary={summary} rows={rows} />
+      </div>
+      <div style={{ display: activeTab === 'reorder' ? undefined : 'none' }}>
+        <ReorderPlanner rows={rows} suppliers={suppliers} onUpdateSupplier={(sku, data) => setProcurementSupplier(sku, data)} />
+      </div>
+      <div style={{ display: activeTab === 'abc' ? undefined : 'none' }}>
+        <AbcAnalysis rows={rows} />
+      </div>
+      <div style={{ display: activeTab === 'velocity' ? undefined : 'none' }}>
+        <VelocityAnalysis rows={rows} />
+      </div>
+      <div style={{ display: activeTab === 'dead' ? undefined : 'none' }}>
+        <DeadStock rows={rows} />
+      </div>
+      <div style={{ display: activeTab === 'po' ? undefined : 'none' }}>
+        <PurchaseOrders purchaseOrders={purchaseOrders} onAdd={addProcurementPO} onUpdate={updateProcurementPO} onDelete={deleteProcurementPO} />
+      </div>
     </div>
   );
 }
