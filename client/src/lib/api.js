@@ -235,6 +235,7 @@ export async function fetchShopifyInventory(shop, clientId, clientSecret) {
           stock,
           price:           parseFloat(v.price) || 0,
           productType:     p.product_type || '',
+          tags:            p.tags || '',
           inventoryItemId: String(v.inventory_item_id || ''),
         };
       }

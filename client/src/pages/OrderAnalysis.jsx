@@ -7,7 +7,7 @@ import {
   TrendingUp, TrendingDown, Minus, AlertTriangle, CheckCircle,
   Info, Activity, Calendar, Clock, MapPin, Tag,
   ShoppingCart, CreditCard, Users, Package, Zap, ChevronDown,
-  ChevronUp, ArrowDownRight, ArrowUpRight,
+  ChevronUp, ArrowDownRight, ArrowUpRight, Layers, BarChart3,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -18,6 +18,7 @@ import {
   buildSkuDeepDive, buildTrafficComparison, buildDiscountAnalysis,
   buildGeoComparison, buildPaymentComparison, buildOrderValueDistribution,
   aggregateInsightRows, buildAdComparison, computeDeepRootCauses,
+  buildCollectionBreakdown, buildGaCrossAnalysis, buildAdStockoutImpact,
 } from '../lib/periodAnalysis';
 
 /* ─── constants ──────────────────────────────────────────────────────────── */
@@ -37,17 +38,19 @@ const COMP_MODES = [
 ];
 
 const TABS = [
-  { id:'overview',   label:'Overview',       icon: Activity },
-  { id:'time',       label:'Time',           icon: Clock },
-  { id:'products',   label:'Products',       icon: Package },
-  { id:'traffic',    label:'Traffic',        icon: Zap },
-  { id:'customers',  label:'Customers',      icon: Users },
-  { id:'orders',     label:'Orders',         icon: ShoppingCart },
-  { id:'diagnosis',  label:'Root Cause',     icon: AlertTriangle },
+  { id:'overview',     label:'Overview',       icon: Activity },
+  { id:'time',         label:'Time',           icon: Clock },
+  { id:'collections',  label:'Collections',    icon: Layers },
+  { id:'products',     label:'Products',       icon: Package },
+  { id:'traffic',      label:'Traffic',        icon: Zap },
+  { id:'customers',    label:'Customers',      icon: Users },
+  { id:'orders',       label:'Orders',         icon: ShoppingCart },
+  { id:'ga',           label:'GA Insights',    icon: BarChart3 },
+  { id:'diagnosis',    label:'Root Cause',     icon: AlertTriangle },
 ];
 
 const SEV_COLORS = { high:'text-red-400', medium:'text-amber-400', low:'text-slate-400' };
-const CAT_LABEL  = { meta:'Meta', creative:'Creative', funnel:'Funnel', shopify:'Shopify', traffic:'Traffic', inventory:'Inventory', structure:'Structure' };
+const CAT_LABEL  = { meta:'Meta', creative:'Creative', funnel:'Funnel', shopify:'Shopify', traffic:'Traffic', inventory:'Inventory', structure:'Structure', ga:'GA4', collection:'Collection', 'collection':'Collection' };
 
 /* ─── tiny helpers ───────────────────────────────────────────────────────── */
 const p      = v => parseFloat(v || 0);
@@ -186,7 +189,7 @@ const CauseCard = ({ cause, rank }) => {
    MAIN PAGE
 ══════════════════════════════════════════════════════════════════════════ */
 export default function OrderAnalysis() {
-  const { rawAccounts, shopifyOrders, inventoryMap } = useStore();
+  const { rawAccounts, shopifyOrders, inventoryMap, manualMap, brandData, brands, activeBrandIds } = useStore();
 
   const [period,     setPeriod]     = useState('yesterday');
   const [compMode,   setCompMode]   = useState('same_day_lw');
@@ -235,12 +238,40 @@ export default function OrderAnalysis() {
   const newAdsCount     = useMemo(() => adComp.filter(a=>a.status==='new').length,     [adComp]);
   const stoppedAdsCount = useMemo(() => adComp.filter(a=>a.status==='stopped').length, [adComp]);
 
+  /* collection breakdown */
+  const collectionData = useMemo(
+    () => buildCollectionBreakdown(curOrders, priorOrders, inventoryMap),
+    [curOrders, priorOrders, inventoryMap],
+  );
+
+  /* ad stockout impact */
+  const adStockoutData = useMemo(
+    () => buildAdStockoutImpact(adComp, manualMap, inventoryMap),
+    [adComp, manualMap, inventoryMap],
+  );
+
+  /* GA data — aggregate across active brands */
+  const gaData = useMemo(() => {
+    const active = (brands || []).filter(b => (activeBrandIds || []).includes(b.id));
+    for (const b of active) {
+      const d = brandData?.[b.id];
+      if (d?.gaData?.dailyTrend?.length) return d.gaData;
+    }
+    return null;
+  }, [brands, activeBrandIds, brandData]);
+
+  const gaAnalysis = useMemo(
+    () => gaData ? buildGaCrossAnalysis(gaData, dates.curSince, dates.curUntil, dates.priorSince, dates.priorUntil) : null,
+    [gaData, dates],
+  );
+
   /* root causes */
   const causes = useMemo(() => computeDeepRootCauses({
     curAgg, priorAgg, skuData, trafficData,
     discountData: discData, geoData, paymentData: payData,
     metaCur, metaPrior, newAdsCount, stoppedAdsCount,
-  }), [curAgg, priorAgg, skuData, trafficData, discData, geoData, payData, metaCur, metaPrior, newAdsCount, stoppedAdsCount]);
+    gaAnalysis, collectionData, adStockoutData,
+  }), [curAgg, priorAgg, skuData, trafficData, discData, geoData, payData, metaCur, metaPrior, newAdsCount, stoppedAdsCount, gaAnalysis, collectionData, adStockoutData]);
 
   const highCauses = causes.filter(c => c.severity === 'high');
 
@@ -780,14 +811,173 @@ export default function OrderAnalysis() {
     );
   };
 
+  /* ════════════════════════════════════════════════════════════════════
+     COLLECTIONS TAB
+  ════════════════════════════════════════════════════════════════════ */
+  const CollectionsTab = () => {
+    if (!hasShopData) return <p className="text-slate-500 text-sm py-8 text-center">No Shopify orders loaded.</p>;
+    const noInv = !Object.keys(inventoryMap).length;
+
+    return (
+      <div className="space-y-4">
+        {noInv && (
+          <div className="flex items-center gap-2 p-3 bg-amber-900/20 border border-amber-800/30 rounded-lg text-xs text-amber-300">
+            <AlertTriangle size={13}/>
+            Inventory not loaded — collections derived from vendor field. Load inventory from Setup for accurate product-type grouping.
+          </div>
+        )}
+
+        {/* stockout alerts */}
+        {adStockoutData.length > 0 && (
+          <div className="p-3 bg-red-900/20 border border-red-800/40 rounded-lg">
+            <div className="text-xs font-semibold text-red-400 mb-2 flex items-center gap-1.5">
+              <AlertTriangle size={12}/> {adStockoutData.length} Ad{adStockoutData.length>1?'s':''} Running on Zero-Stock Collections
+            </div>
+            <div className="space-y-1.5">
+              {adStockoutData.slice(0, 4).map(a => (
+                <div key={a.adId} className="flex items-center justify-between text-[11px]">
+                  <span className="text-slate-300 truncate max-w-[55%]">{a.adName}</span>
+                  <span className="text-slate-500">{a.collection}</span>
+                  <span className="text-red-400 font-semibold">~₹{a.wastedEst} wasted</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* collection table */}
+        <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
+          <div className="grid grid-cols-[2fr_80px_80px_90px_90px_70px_80px] gap-2 px-4 py-2.5 border-b border-gray-800 text-[10px] font-bold uppercase text-slate-600">
+            <div>Collection</div>
+            <div className="text-right">Cur Units</div>
+            <div className="text-right">Prior</div>
+            <div className="text-right">Cur Rev</div>
+            <div className="text-right">Prior Rev</div>
+            <div className="text-right">Rev Δ</div>
+            <div className="text-right">Stock</div>
+          </div>
+          {collectionData.length === 0 && (
+            <p className="text-slate-600 text-xs text-center py-8">No collection data for this window</p>
+          )}
+          <div className="divide-y divide-gray-800/40">
+            {collectionData.map(c => (
+              <div key={c.collection} className={clsx(
+                'grid grid-cols-[2fr_80px_80px_90px_90px_70px_80px] gap-2 px-4 py-2 items-center hover:bg-gray-800/20',
+                c.oosSkusNow?.length > 0 && 'bg-red-900/5',
+              )}>
+                <div>
+                  <div className="text-xs text-slate-200 font-medium truncate">{c.collection}</div>
+                  {c.oosSkusNow?.length > 0 && (
+                    <div className="text-[9px] text-red-400">{c.oosSkusNow.length} OOS · {c.lowSkusNow?.length||0} low stock</div>
+                  )}
+                </div>
+                <div className="text-right text-xs text-slate-200">{fmtNum(c.curUnits)}</div>
+                <div className="text-right text-xs text-slate-500">{fmtNum(c.priorUnits)}</div>
+                <div className="text-right text-xs text-slate-300">{fmtCur(c.curRev)}</div>
+                <div className="text-right text-xs text-slate-500">{fmtCur(c.priorRev)}</div>
+                <DeltaCell v={c.revDelta}/>
+                <div className="text-right text-[10px]">
+                  {c.oosSkusNow?.length > 0
+                    ? <span className="text-red-400 font-bold">{c.oosSkusNow.length} OOS</span>
+                    : c.lowSkusNow?.length > 0
+                      ? <span className="text-amber-400">{c.lowSkusNow.length} low</span>
+                      : <span className="text-emerald-500/60">ok</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {!noInv && (
+          <p className="text-[10px] text-slate-600 flex items-center gap-1">
+            <Info size={10}/>
+            Collections = Shopify product_type. Stock shown from last inventory fetch.
+          </p>
+        )}
+      </div>
+    );
+  };
+
+  /* ════════════════════════════════════════════════════════════════════
+     GA INSIGHTS TAB
+  ════════════════════════════════════════════════════════════════════ */
+  const GaTab = () => {
+    if (!gaData) return (
+      <div className="flex flex-col items-center gap-3 py-12">
+        <BarChart3 size={36} className="text-slate-700"/>
+        <p className="text-slate-500 text-sm">No GA4 data loaded — connect Google Analytics from Setup.</p>
+      </div>
+    );
+    if (!gaAnalysis) return <p className="text-slate-500 text-sm py-8 text-center">GA data loaded but no matching dates in the selected window.</p>;
+
+    const gaMetrics = [
+      { label:'Sessions',        cur: gaAnalysis.curSessions,  prior: gaAnalysis.priorSessions,  fmt: fmtNum },
+      { label:'Users',           cur: gaAnalysis.curUsers,     prior: gaAnalysis.priorUsers,     fmt: fmtNum },
+      { label:'Conv Rate',       cur: gaAnalysis.curConvRate,  prior: gaAnalysis.priorConvRate,  fmt: v => `${p(v).toFixed(2)}%` },
+      { label:'Bounce Rate',     cur: gaAnalysis.curBounce,    prior: gaAnalysis.priorBounce,    fmt: v => `${p(v).toFixed(1)}%`, invert: true },
+      { label:'GA Revenue',      cur: gaAnalysis.curRevenue,   prior: gaAnalysis.priorRevenue,   fmt: fmtCur },
+    ];
+
+    return (
+      <div className="space-y-4">
+        {/* diagnosis banners */}
+        {gaAnalysis.diagnosis.map((d, i) => (
+          <div key={i} className={clsx(
+            'p-3 rounded-lg border text-xs',
+            d.severity === 'high' ? 'bg-red-900/20 border-red-800/40 text-red-200' : 'bg-amber-900/20 border-amber-800/40 text-amber-200',
+          )}>
+            <div className="font-semibold mb-1 flex items-center gap-1.5">
+              <AlertTriangle size={12}/> {d.label}
+            </div>
+            <p className="text-[11px] opacity-80 mb-1.5">{d.detail}</p>
+            {d.action && <p className="text-[10px] opacity-60"><strong>Action:</strong> {d.action}</p>}
+          </div>
+        ))}
+
+        {gaAnalysis.diagnosis.length === 0 && (
+          <div className="flex items-center gap-2 p-3 bg-emerald-900/10 border border-emerald-800/30 rounded-lg text-xs text-emerald-400">
+            <CheckCircle size={12}/> No significant GA anomalies detected for this period.
+          </div>
+        )}
+
+        {/* KPI grid */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          {gaMetrics.map(m => {
+            const pct = m.prior > 0 ? (m.cur - m.prior) / m.prior * 100 : 0;
+            const pos = m.invert ? pct < 0 : pct >= 0;
+            return (
+              <div key={m.label} className="bg-gray-900 rounded-xl border border-gray-800 p-4">
+                <div className="text-[11px] text-slate-500 mb-1">{m.label}</div>
+                <div className="text-xl font-bold text-white">{m.fmt(m.cur)}</div>
+                <div className={clsx('text-[11px] font-semibold mt-1 flex items-center gap-0.5', pos?'text-emerald-400':'text-red-400')}>
+                  {pos ? <ArrowUpRight size={11}/> : <ArrowDownRight size={11}/>}
+                  {pct >= 0 ? '+' : ''}{pct.toFixed(1)}%
+                </div>
+                <div className="text-[10px] text-slate-600">Prior: {m.fmt(m.prior)}</div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* GA cross vs Meta note */}
+        <div className="p-3 bg-gray-900/50 rounded-lg border border-gray-800 text-[11px] text-slate-600 flex items-start gap-2">
+          <Info size={11} className="mt-0.5 shrink-0"/>
+          GA data compares daily sessions/conversions for the selected date window. Meta data always reflects 7D vs prior 7D. Use both together for a complete picture.
+        </div>
+      </div>
+    );
+  };
+
   const TAB_CONTENT = {
-    overview:  <OverviewTab/>,
-    time:      <TimeTab/>,
-    products:  <ProductsTab/>,
-    traffic:   <TrafficTab/>,
-    customers: <CustomersTab/>,
-    orders:    <OrdersTab/>,
-    diagnosis: <DiagnosisTab/>,
+    overview:    <OverviewTab/>,
+    time:        <TimeTab/>,
+    collections: <CollectionsTab/>,
+    products:    <ProductsTab/>,
+    traffic:     <TrafficTab/>,
+    customers:   <CustomersTab/>,
+    orders:      <OrdersTab/>,
+    ga:          <GaTab/>,
+    diagnosis:   <DiagnosisTab/>,
   };
 
   /* ════════════════════════════════════════════════════════════════════

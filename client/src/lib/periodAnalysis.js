@@ -702,8 +702,62 @@ export function computeDeepRootCauses({
       );
   }
 
-  // ── 9. Hourly pattern shift (if hourly data provided — detect "cliff" hours)
-  // This is detected by the caller and passed in as a flag if needed.
+  // ── 9. GA cross-analysis (traffic vs conversion diagnosis)
+  if (gaAnalysis?.hasCurData) {
+    for (const diag of (gaAnalysis.diagnosis || [])) {
+      push(
+        diag.label,
+        diag.type === 'traffic' ? gaAnalysis.sessionDelta : gaAnalysis.convRateDelta,
+        'down', diag.detail, diag.severity, 'ga', diag.action,
+      );
+    }
+    // GA revenue delta if significant and no other GA cause yet
+    if (Math.abs(gaAnalysis.gaRevDelta) >= 15 && gaAnalysis.priorRevenue > 0 && !gaAnalysis.diagnosis.length) {
+      push(
+        'GA Revenue Delta',
+        gaAnalysis.gaRevDelta,
+        gaAnalysis.gaRevDelta > 0 ? 'up' : 'down',
+        `GA reports revenue ${gaAnalysis.gaRevDelta > 0 ? 'up' : 'down'} ${Math.abs(gaAnalysis.gaRevDelta).toFixed(0)}% — cross-checking with Shopify data`,
+        Math.abs(gaAnalysis.gaRevDelta) > 30 ? 'medium' : 'low', 'ga', null,
+      );
+    }
+  }
+
+  // ── 10. Collection-level drops (top declining collection)
+  if (collectionData?.length) {
+    const decliners = collectionData
+      .filter(c => c.priorRev >= 500 && c.revDelta <= -25)
+      .sort((a, b) => a.revDelta - b.revDelta);
+    for (const col of decliners.slice(0, 2)) {
+      const stockNote = col.oosSkusNow?.length ? ` ${col.oosSkusNow.length} SKU(s) currently OOS.` : '';
+      push(
+        `Collection Drop: ${col.collection}`,
+        col.revDelta, 'down',
+        `"${col.collection}" revenue down ${Math.abs(col.revDelta).toFixed(0)}% (₹${Math.round(col.priorRev)} → ₹${Math.round(col.curRev)}).${stockNote}`,
+        Math.abs(col.revDelta) > 50 ? 'high' : 'medium', 'collection',
+        col.oosSkusNow?.length
+          ? 'Replenish OOS SKUs or pause ads for this collection until stock is restored.'
+          : 'Check if ads are still active for this collection. Review pricing and offer.',
+        col.oosSkusNow?.slice(0, 3).map(s => `OOS: ${s}`) || [],
+      );
+    }
+  }
+
+  // ── 11. Ad stockout impact (ads wasting spend on OOS collections)
+  if (adStockoutData?.length) {
+    const highImpact = adStockoutData.filter(a => a.severity === 'high' || a.wastedEst > 500);
+    if (highImpact.length) {
+      const totalWasted = highImpact.reduce((s, a) => s + a.wastedEst, 0);
+      push(
+        'Ads Running on OOS Collections',
+        -Math.min(highImpact.length * 20, 80), 'down',
+        `${highImpact.length} ad${highImpact.length > 1 ? 's' : ''} spending on collections with zero-stock SKUs. ~₹${Math.round(totalWasted)} estimated wasted this period.`,
+        totalWasted > 2000 ? 'high' : 'medium', 'inventory',
+        'Pause ads for OOS collections immediately. Redirect budget to in-stock collections or use catalog ads with inventory filter.',
+        highImpact.slice(0, 3).map(a => `${a.adName}: ₹${a.spend7d.toFixed(0)} spend, ${a.oosCount} OOS SKUs`),
+      );
+    }
+  }
 
   // Sort by severity then magnitude
   const sevR = {high:2, medium:1, low:0};
