@@ -3,6 +3,7 @@ import {
   AlertTriangle, Package, TrendingDown, BarChart3, ShoppingCart,
   Settings, RefreshCw, Download, Search, ChevronUp, ChevronDown,
   Truck, DollarSign, Clock, Star, Archive, Plus, Trash2, Save, CheckCircle,
+  TrendingUp, Info, RotateCcw, Flame,
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -12,6 +13,7 @@ import { useStore } from '../store';
 import {
   buildProcurementTable, calcProcurementSummary, calcAbcAnalysis,
   getTopMovers, getSlowMovers, HEALTH_META,
+  buildTop30Demand, buildRefundImpact,
 } from '../lib/procurementAnalytics';
 
 /* ─── FORMATTERS ──────────────────────────────────────────────────── */
@@ -664,12 +666,305 @@ function OverviewTab({ summary, rows }) {
   );
 }
 
+/* ─── DEMAND FORECAST TAB ─────────────────────────────────────────── */
+function DemandForecast({ rows, daysLoaded }) {
+  const [search, setSearch] = useState('');
+  const top30 = useMemo(() => buildTop30Demand(rows, daysLoaded), [rows, daysLoaded]);
+
+  const filtered = useMemo(() => {
+    if (!search) return top30;
+    const q = search.toLowerCase();
+    return top30.filter(r => r.sku.toLowerCase().includes(q) || r.title.toLowerCase().includes(q));
+  }, [top30, search]);
+
+  const coverageSummary = useMemo(() => ({
+    critical: top30.filter(r => r.stockDays < 30).length,
+    at_risk:  top30.filter(r => r.stockDays >= 30 && r.stockDays < 60).length,
+    ok:       top30.filter(r => r.stockDays >= 60).length,
+  }), [top30]);
+
+  const handleExport = useCallback(() => {
+    const rows2 = filtered;
+    const csv = [
+      'Rank,SKU,Product,1Y Gross Sold,1Y Refunds,1Y Net Consumed,Refund Rate,Daily Vel,Stock,Stock Days,90D Gap,Rec Order',
+      ...rows2.map(r => [
+        r.rank, `"${r.sku}"`, `"${r.title}"`,
+        r.annualGross, r.annualRefund, r.annualNet,
+        `${(r.refundRate365 * 100).toFixed(1)}%`,
+        r.planVel.toFixed(3),
+        r.stock, r.stockDays,
+        r.gap90, r.recOrder,
+      ].join(',')),
+    ].join('\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    a.download = 'top30_demand_forecast.csv';
+    a.click();
+  }, [filtered]);
+
+  return (
+    <div className="space-y-5">
+      {/* Context banner */}
+      <div className="flex items-center gap-3 p-3 bg-gray-900 border border-gray-800 rounded-xl">
+        <Info size={14} className="text-brand-400 shrink-0" />
+        <div className="text-xs text-slate-400 flex-1">
+          Demand ranked by consumption over{' '}
+          <span className="text-white font-semibold">{daysLoaded} days</span> of loaded orders.
+          {daysLoaded < 365 && (
+            <span className="text-amber-400"> Annual figures are extrapolated — load more history for accuracy.</span>
+          )}
+          {' '}Net demand excludes refunded units. Refund rate flags quality/fulfilment issues.
+        </div>
+      </div>
+
+      {/* Coverage chips */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="bg-red-950/30 border border-red-800/40 rounded-xl p-3">
+          <div className="text-[10px] text-red-400 font-bold uppercase tracking-wide mb-1">Critical — Under 30 Days</div>
+          <div className="text-2xl font-bold text-red-300">{coverageSummary.critical}</div>
+          <div className="text-[10px] text-slate-500 mt-0.5">of top 30 SKUs need urgent reorder</div>
+        </div>
+        <div className="bg-amber-950/30 border border-amber-800/40 rounded-xl p-3">
+          <div className="text-[10px] text-amber-400 font-bold uppercase tracking-wide mb-1">At Risk — 30–60 Days</div>
+          <div className="text-2xl font-bold text-amber-300">{coverageSummary.at_risk}</div>
+          <div className="text-[10px] text-slate-500 mt-0.5">plan reorder within 2 weeks</div>
+        </div>
+        <div className="bg-emerald-950/30 border border-emerald-800/40 rounded-xl p-3">
+          <div className="text-[10px] text-emerald-400 font-bold uppercase tracking-wide mb-1">Covered — 60+ Days</div>
+          <div className="text-2xl font-bold text-emerald-300">{coverageSummary.ok}</div>
+          <div className="text-[10px] text-slate-500 mt-0.5">of top 30 are adequately stocked</div>
+        </div>
+      </div>
+
+      {/* Search + export */}
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1 max-w-xs">
+          <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+          <input value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Filter SKU / product..."
+            className="pl-7 pr-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500 w-full" />
+        </div>
+        <button onClick={handleExport}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700/20 hover:bg-emerald-700/40 border border-emerald-700/30 rounded-lg text-xs font-medium text-emerald-300 transition-all">
+          <Download size={11} /> Export Top 30
+        </button>
+      </div>
+
+      {/* Table */}
+      <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="border-b border-gray-800 bg-gray-950/60">
+              <tr>
+                {[
+                  '#', 'SKU', 'Product',
+                  daysLoaded < 365 ? `Gross Sold (${daysLoaded}d→1Y est)` : 'Gross Sold (1Y)',
+                  'Refunds (1Y)', 'Net Consumed (1Y)', 'Refund %',
+                  'Daily Vel', 'Stock Now', 'Days Cover', '90D Gap', 'Action',
+                ].map(h => (
+                  <th key={h} className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-widest whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-800/40">
+              {filtered.map(r => {
+                const isUrgent  = r.stockDays < 30;
+                const isRisk    = r.stockDays >= 30 && r.stockDays < 60;
+                const hiRefund  = r.refundRate365 > 0.1;
+                return (
+                  <tr key={r.sku} className={`hover:bg-gray-800/30 transition-colors ${isUrgent ? 'bg-red-950/10' : ''}`}>
+                    <td className="px-3 py-2.5">
+                      <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full text-[9px] font-bold ${
+                        r.rank <= 10 ? 'bg-amber-500/20 text-amber-300' : 'bg-gray-800 text-slate-500'
+                      }`}>{r.rank}</span>
+                    </td>
+                    <td className="px-3 py-2.5 font-mono text-slate-300 whitespace-nowrap">{r.sku}</td>
+                    <td className="px-3 py-2.5 text-slate-200 max-w-[180px]">
+                      <div className="truncate font-medium">{r.title}</div>
+                      {r.variantTitle && <div className="text-[10px] text-slate-500 truncate">{r.variantTitle}</div>}
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-200 font-semibold">
+                      {fmtNum(r.annualGross)}
+                      {r.isExtrapolated && <span className="text-[9px] text-slate-600 ml-0.5">est</span>}
+                    </td>
+                    <td className={`px-3 py-2.5 font-medium ${r.annualRefund > 0 ? 'text-amber-400' : 'text-slate-600'}`}>
+                      {r.annualRefund > 0 ? fmtNum(r.annualRefund) : '—'}
+                    </td>
+                    <td className="px-3 py-2.5 text-emerald-300 font-semibold">{fmtNum(r.annualNet)}</td>
+                    <td className="px-3 py-2.5">
+                      {hiRefund ? (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-red-500/15 text-red-400">
+                          <AlertTriangle size={8}/> {(r.refundRate365 * 100).toFixed(0)}%
+                        </span>
+                      ) : (
+                        <span className="text-slate-500 text-[10px]">{(r.refundRate365 * 100).toFixed(1)}%</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-300">{r.planVel >= 1 ? `${r.planVel.toFixed(1)}/d` : `${(r.planVel * 30).toFixed(1)}/mo`}</td>
+                    <td className="px-3 py-2.5 text-slate-200 font-medium">{fmtNum(r.stock)}</td>
+                    <td className={`px-3 py-2.5 font-bold ${
+                      isUrgent ? 'text-red-400' : isRisk ? 'text-amber-400' : 'text-emerald-400'
+                    }`}>
+                      {r.stockDays >= 999 ? '∞' : `${r.stockDays}d`}
+                    </td>
+                    <td className={`px-3 py-2.5 font-medium ${r.gap90 > 0 ? 'text-red-400' : 'text-slate-600'}`}>
+                      {r.gap90 > 0 ? `−${fmtNum(r.gap90)}` : '—'}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {r.recOrder > 0 ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold bg-red-500/15 text-red-400 whitespace-nowrap">
+                          <RotateCcw size={9}/> Order {fmtNum(r.recOrder)}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-medium bg-emerald-500/10 text-emerald-500">
+                          <CheckCircle size={9}/> OK
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {filtered.length === 0 && (
+                <tr><td colSpan={12} className="px-4 py-8 text-center text-slate-600">
+                  {top30.length === 0 ? 'No order history loaded — fetch Shopify orders to see demand data' : 'No SKUs match filter'}
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── REFUND IMPACT TAB ───────────────────────────────────────────── */
+function RefundImpact({ rows, summary }) {
+  const refundRows = useMemo(() => buildRefundImpact(rows), [rows]);
+
+  if (refundRows.length === 0) {
+    return (
+      <div className="text-center py-12">
+        <CheckCircle size={32} className="text-emerald-400 mx-auto mb-3" />
+        <div className="text-sm font-semibold text-white">No significant refund activity detected</div>
+        <div className="text-xs text-slate-500 mt-1">Needs at least 365 days of order history for meaningful analysis</div>
+      </div>
+    );
+  }
+
+  const totalRefunds = refundRows.reduce((s, r) => s + r.refQty365, 0);
+  const totalRevLost = refundRows.reduce((s, r) => s + r.revLost365, 0);
+  const criticalSkus = refundRows.filter(r => r.isCritical);
+
+  return (
+    <div className="space-y-5">
+      {/* Summary */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <div className="text-[10px] text-slate-500 mb-1">SKUs with Refunds</div>
+          <div className="text-xl font-bold text-white">{refundRows.length}</div>
+          <div className="text-[10px] text-slate-600 mt-0.5">in last 12 months</div>
+        </div>
+        <div className="bg-red-950/20 border border-red-800/30 rounded-xl p-4">
+          <div className="text-[10px] text-red-400 mb-1">High Refund Rate (&gt;15%)</div>
+          <div className="text-xl font-bold text-red-300">{criticalSkus.length}</div>
+          <div className="text-[10px] text-slate-600 mt-0.5">SKUs — quality/fulfilment issue</div>
+        </div>
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <div className="text-[10px] text-slate-500 mb-1">Total Units Refunded (1Y)</div>
+          <div className="text-xl font-bold text-white">{fmtNum(totalRefunds)}</div>
+        </div>
+        <div className="bg-amber-950/20 border border-amber-800/30 rounded-xl p-4">
+          <div className="text-[10px] text-amber-400 mb-1">Revenue Lost to Refunds (1Y)</div>
+          <div className="text-xl font-bold text-amber-300">{fmtCur(totalRevLost)}</div>
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+          <span className="text-xs font-semibold text-slate-300">SKUs Ranked by Refund Rate (1-Year)</span>
+          <span className="text-[10px] text-slate-600">Refunds attributed to order date · Rates &gt;10% are flagged</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-gray-950/60 border-b border-gray-800">
+              <tr>
+                {['SKU','Product','Gross Sold','Refunded','Net Sold','Refund Rate','Rev Lost','30d Rate','Stock','Signal'].map(h => (
+                  <th key={h} className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-400 uppercase tracking-widest whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-800/40">
+              {refundRows.map(r => (
+                <tr key={r.sku} className={`hover:bg-gray-800/30 ${r.isCritical ? 'bg-red-950/10' : ''}`}>
+                  <td className="px-3 py-2 font-mono text-slate-300">{r.sku}</td>
+                  <td className="px-3 py-2 text-slate-200 max-w-[160px] truncate">{r.title}</td>
+                  <td className="px-3 py-2 text-slate-300">{fmtNum(r.qty365)}</td>
+                  <td className="px-3 py-2 text-amber-400 font-medium">{fmtNum(r.refQty365)}</td>
+                  <td className="px-3 py-2 text-slate-200 font-medium">{fmtNum(r.netQty365)}</td>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-1.5">
+                      <div className="flex-1 max-w-[80px] bg-gray-800 rounded-full h-1.5">
+                        <div className={`h-1.5 rounded-full ${r.isCritical ? 'bg-red-500' : r.isElevated ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                          style={{ width: `${Math.min(100, r.refundPct365)}%` }} />
+                      </div>
+                      <span className={`font-semibold ${r.isCritical ? 'text-red-400' : r.isElevated ? 'text-amber-400' : 'text-slate-400'}`}>
+                        {r.refundPct365.toFixed(1)}%
+                      </span>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-red-400">{fmtCur(r.revLost365)}</td>
+                  <td className={`px-3 py-2 ${r.refundPct30 > 10 ? 'text-amber-400 font-medium' : 'text-slate-500'}`}>
+                    {r.refundPct30.toFixed(1)}%
+                  </td>
+                  <td className="px-3 py-2 text-slate-300">{fmtNum(r.stock)}</td>
+                  <td className="px-3 py-2">
+                    {r.isCritical ? (
+                      <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-red-500/15 text-red-400">Quality/OOS?</span>
+                    ) : r.isElevated ? (
+                      <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-500/15 text-amber-400">Monitor</span>
+                    ) : (
+                      <span className="px-1.5 py-0.5 rounded-full text-[9px] bg-gray-800 text-slate-500">Normal</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Interpretation note */}
+      <div className="p-4 bg-gray-900/60 border border-gray-800 rounded-xl">
+        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-2">How to interpret refund rates</div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-[11px] text-slate-400">
+          <div><span className="text-emerald-400 font-semibold">0–8%:</span> Normal — expected return/cancel rate for e-commerce</div>
+          <div><span className="text-amber-400 font-semibold">8–15%:</span> Elevated — investigate: packaging damage, description mismatch, or OOS cancellations</div>
+          <div><span className="text-red-400 font-semibold">&gt;15%:</span> Critical — likely quality defect, supplier issue, or systematic OOS problem masking as refunds</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── MAIN PAGE ───────────────────────────────────────────────────── */
 export default function Procurement() {
   const { inventoryMap, shopifyOrders, procurement, setProcurementSupplier, addProcurementPO, updateProcurementPO, deleteProcurementPO } = useStore();
 
   const suppliers      = procurement?.suppliers      || {};
   const purchaseOrders = procurement?.purchaseOrders || [];
+
+  // How many days of order history are actually loaded
+  const ordersCoverage = useMemo(() => {
+    if (!shopifyOrders.length) return { earliest: null, latest: null, daysLoaded: 0 };
+    const dates = shopifyOrders.map(o => (o.created_at || '').slice(0, 10)).filter(Boolean).sort();
+    const earliest = dates[0];
+    const latest   = dates[dates.length - 1];
+    const daysLoaded = earliest && latest
+      ? Math.ceil((new Date(latest) - new Date(earliest)) / 86400000) + 1
+      : 0;
+    return { earliest, latest, daysLoaded };
+  }, [shopifyOrders]);
 
   const rows    = useMemo(() => buildProcurementTable(inventoryMap, shopifyOrders, suppliers), [inventoryMap, shopifyOrders, suppliers]);
   const summary = useMemo(() => calcProcurementSummary(rows), [rows]);
@@ -691,32 +986,49 @@ export default function Procurement() {
   }
 
   const TABS = [
-    { id: 'overview',  label: 'Overview',        icon: BarChart3 },
-    { id: 'reorder',   label: `Reorder Planner (${summary.reorderCount})`, icon: AlertTriangle },
-    { id: 'abc',       label: 'ABC Analysis',     icon: Star },
-    { id: 'velocity',  label: 'Velocity',         icon: TrendingDown },
-    { id: 'dead',      label: `Dead Stock (${summary.deadStockCount})`, icon: Archive },
-    { id: 'po',        label: `Purchase Orders (${purchaseOrders.length})`, icon: ShoppingCart },
+    { id: 'overview',  label: 'Overview',                                                  icon: BarChart3 },
+    { id: 'demand',    label: 'Demand Forecast',                                           icon: Flame },
+    { id: 'reorder',   label: `Reorder (${summary.reorderCount})`,                        icon: AlertTriangle },
+    { id: 'abc',       label: 'ABC Analysis',                                              icon: Star },
+    { id: 'velocity',  label: 'Velocity',                                                  icon: TrendingDown },
+    { id: 'refunds',   label: `Refunds (${summary.highRefundSkus})`,                      icon: RotateCcw },
+    { id: 'dead',      label: `Dead Stock (${summary.deadStockCount})`,                   icon: Archive },
+    { id: 'po',        label: `Purchase Orders (${purchaseOrders.length})`,               icon: ShoppingCart },
   ];
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-white">Procurement</h1>
-        <p className="text-sm text-slate-400 mt-1">
-          {summary.totalSkus} SKUs · {fmtCur(summary.totalValue)} inventory value · Powered by Shopify inventory + orders
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-white">Procurement</h1>
+          <p className="text-sm text-slate-400 mt-1">
+            {summary.totalSkus} SKUs · {fmtCur(summary.totalValue)} inventory value
+          </p>
+        </div>
+        {ordersCoverage.daysLoaded > 0 && (
+          <div className="text-right text-[10px] text-slate-600">
+            <div>Orders: {ordersCoverage.earliest} → {ordersCoverage.latest}</div>
+            <div className={ordersCoverage.daysLoaded >= 365 ? 'text-emerald-500' : 'text-amber-500'}>
+              {ordersCoverage.daysLoaded}d loaded
+              {ordersCoverage.daysLoaded < 365 && ` · fetch 365d for full 1Y analysis`}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-6 gap-3">
-        <MetricCard label="Inventory Value"   value={fmtCur(summary.totalValue)}    icon={DollarSign} color="violet" />
-        <MetricCard label="Reorder Alerts"    value={summary.reorderCount}          icon={AlertTriangle} danger={summary.reorderCount > 0} />
-        <MetricCard label="Stockouts"         value={summary.stockoutCount}         icon={Package}  danger={summary.stockoutCount > 0} />
-        <MetricCard label="Dead Stock"        value={fmtCur(summary.deadStockValue)} icon={Archive} warn={summary.deadStockValue > 0} />
-        <MetricCard label="Avg Days of Stock" value={`${summary.avgDoi}d`}          icon={Clock}   color="green" />
-        <MetricCard label="30d Revenue"       value={fmtCur(summary.totalRev30)}    icon={BarChart3} color="green" />
+      <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-3">
+        <MetricCard label="Inventory Value"      value={fmtCur(summary.totalValue)}      icon={DollarSign}    color="violet" />
+        <MetricCard label="Reorder Alerts"       value={summary.reorderCount}            icon={AlertTriangle} danger={summary.reorderCount > 0} />
+        <MetricCard label="Stockouts"            value={summary.stockoutCount}           icon={Package}       danger={summary.stockoutCount > 0} />
+        <MetricCard label="Dead Stock"           value={fmtCur(summary.deadStockValue)}  icon={Archive}       warn={summary.deadStockValue > 0} />
+        <MetricCard label="Avg Days of Stock"    value={`${summary.avgDoi}d`}            icon={Clock}         color="green" />
+        <MetricCard label="30d Revenue"          value={fmtCur(summary.totalRev30)}      icon={BarChart3}     color="green" />
+        <MetricCard label="1Y Revenue"           value={fmtCur(summary.totalRev365)}     icon={TrendingUp}    color="green"
+          sub={ordersCoverage.daysLoaded < 365 ? `${ordersCoverage.daysLoaded}d loaded` : '365d'} />
+        <MetricCard label="Refund Impact (1Y)"   value={fmtCur(summary.totalRefundRev365)} icon={RotateCcw}  warn={summary.totalRefundRev365 > 0}
+          sub={`${fmtNum(summary.totalRefunds365)} units`} />
       </div>
 
       {/* Tabs */}
@@ -735,6 +1047,9 @@ export default function Procurement() {
       <div style={{ display: activeTab === 'overview' ? undefined : 'none' }}>
         <OverviewTab summary={summary} rows={rows} />
       </div>
+      <div style={{ display: activeTab === 'demand' ? undefined : 'none' }}>
+        <DemandForecast rows={rows} daysLoaded={ordersCoverage.daysLoaded || 30} />
+      </div>
       <div style={{ display: activeTab === 'reorder' ? undefined : 'none' }}>
         <ReorderPlanner rows={rows} suppliers={suppliers} onUpdateSupplier={(sku, data) => setProcurementSupplier(sku, data)} />
       </div>
@@ -743,6 +1058,9 @@ export default function Procurement() {
       </div>
       <div style={{ display: activeTab === 'velocity' ? undefined : 'none' }}>
         <VelocityAnalysis rows={rows} />
+      </div>
+      <div style={{ display: activeTab === 'refunds' ? undefined : 'none' }}>
+        <RefundImpact rows={rows} summary={summary} />
       </div>
       <div style={{ display: activeTab === 'dead' ? undefined : 'none' }}>
         <DeadStock rows={rows} />

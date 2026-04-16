@@ -1,7 +1,6 @@
 /* ─── PROCUREMENT ANALYTICS ──────────────────────────────────────────
    PERFORMANCE: buildProcurementTable does a single O(orders) pre-pass to
    index all SKU metrics, then builds the table in O(skus) lookups.
-   This replaces the original O(skus × orders × 6) approach.
 ──────────────────────────────────────────────────────────────────── */
 
 /* ─── STOCK HEALTH ────────────────────────────────────────────────── */
@@ -29,35 +28,62 @@ export const HEALTH_META = {
 
 /* ─── ORDER INDEX (single-pass pre-computation) ───────────────────── */
 // Builds SKU-keyed lookup maps in ONE pass through orders.
-// Called once in buildProcurementTable — all subsequent lookups are O(1).
+// Tracks gross sales + refunds across 7d / 30d / 90d / 365d windows.
+
+function mkSkuEntry() {
+  return {
+    qty7: 0, qty30: 0, qty90: 0, qty365: 0,          // gross units sold
+    rev30: 0, rev90: 0, rev365: 0,                    // gross revenue
+    refQty30: 0, refQty365: 0,                        // refunded units
+    refRev30: 0, refRev365: 0,                        // refunded revenue
+    lastTs: 0,
+  };
+}
 
 function buildOrderIndex(orders) {
-  const now = Date.now();
-  const cutoff7  = now - 7  * 86400000;
-  const cutoff30 = now - 30 * 86400000;
-  const cutoff90 = now - 90 * 86400000;
+  const now       = Date.now();
+  const cutoff7   = now - 7   * 86400000;
+  const cutoff30  = now - 30  * 86400000;
+  const cutoff90  = now - 90  * 86400000;
+  const cutoff365 = now - 365 * 86400000;
 
-  // { sku → { qty7, qty30, qty90, rev30, rev90, lastTs } }
   const index = {};
 
   for (const o of orders) {
-    if (o.cancelled_at) continue;
     const ts = new Date(o.created_at || o.createdAt).getTime();
     if (isNaN(ts)) continue;
+    const isCancelled = !!o.cancelled_at;
 
     for (const item of (o.line_items || o.lineItems || [])) {
-      const raw = (item.sku || item.SKU || '').trim().toUpperCase();
-      if (!raw) continue;
+      const sku   = (item.sku || item.SKU || '').trim().toUpperCase();
+      if (!sku) continue;
       const qty   = parseInt(item.quantity) || 0;
-      const price = parseFloat(item.price) || 0;
+      const price = parseFloat(item.price)  || 0;
 
-      if (!index[raw]) index[raw] = { qty7: 0, qty30: 0, qty90: 0, rev30: 0, rev90: 0, lastTs: 0 };
-      const e = index[raw];
+      if (!isCancelled) {
+        if (!index[sku]) index[sku] = mkSkuEntry();
+        const e = index[sku];
+        if (ts > e.lastTs) e.lastTs = ts;
+        if (ts >= cutoff7)   e.qty7   += qty;
+        if (ts >= cutoff30)  { e.qty30  += qty; e.rev30  += qty * price; }
+        if (ts >= cutoff90)  { e.qty90  += qty; e.rev90  += qty * price; }
+        if (ts >= cutoff365) { e.qty365 += qty; e.rev365 += qty * price; }
+      }
+    }
 
-      if (ts > e.lastTs) e.lastTs = ts;
-      if (ts >= cutoff7)  e.qty7  += qty;
-      if (ts >= cutoff30) { e.qty30 += qty; e.rev30 += qty * price; }
-      if (ts >= cutoff90) { e.qty90 += qty; e.rev90 += qty * price; }
+    // Process refunds — use order.created_at for consistent window attribution
+    for (const refund of (o.refunds || [])) {
+      for (const rli of (refund.refund_line_items || [])) {
+        const sku  = ((rli.line_item?.sku || '').trim().toUpperCase());
+        if (!sku) continue;
+        const rqty = parseInt(rli.quantity) || 0;
+        const rrev = parseFloat(rli.subtotal) || 0;
+
+        if (!index[sku]) index[sku] = mkSkuEntry();
+        const e = index[sku];
+        if (ts >= cutoff30)  { e.refQty30  += rqty; e.refRev30  += rrev; }
+        if (ts >= cutoff365) { e.refQty365 += rqty; e.refRev365 += rrev; }
+      }
     }
   }
 
@@ -95,19 +121,38 @@ export function calcSkuRevenue(orders, sku, days = 30) {
 /* ─── MAIN PROCUREMENT TABLE ──────────────────────────────────────── */
 
 export function buildProcurementTable(inventoryMap, orders, suppliers = {}) {
-  // Single O(orders × line_items) pass — all SKU metrics pre-computed
   const idx = buildOrderIndex(orders);
   const now = Date.now();
   const rows = [];
 
   for (const [sku, inv] of Object.entries(inventoryMap)) {
-    const sup  = suppliers[sku] || {};
-    const e    = idx[sku.trim().toUpperCase()] || {};
+    const sup = suppliers[sku] || {};
+    const e   = idx[sku.trim().toUpperCase()] || {};
 
-    const vel7  = (e.qty7  || 0) / 7;
-    const vel30 = (e.qty30 || 0) / 30;
-    const vel90 = (e.qty90 || 0) / 90;
-    const planVelocity = vel30 > 0 ? vel30 : vel90;
+    const vel7   = (e.qty7   || 0) / 7;
+    const vel30  = (e.qty30  || 0) / 30;
+    const vel90  = (e.qty90  || 0) / 90;
+    const vel365 = (e.qty365 || 0) / 365;
+
+    // Net demand (after refunds) — for 1Y planning
+    const netQty365 = Math.max(0, (e.qty365 || 0) - (e.refQty365 || 0));
+    const netVel365 = netQty365 / 365;
+
+    // Refund rates
+    const refundRate365 = e.qty365 > 0 ? (e.refQty365 || 0) / e.qty365 : 0;
+    const refundRate30  = e.qty30  > 0 ? (e.refQty30  || 0) / e.qty30  : 0;
+
+    // Planning velocity: weight long-period data more for annual planning,
+    // but lean on recent data when short-term trend diverges significantly.
+    // Priority: 365d blend > 90d > 30d
+    let planVelocity;
+    if (vel365 > 0) {
+      planVelocity = vel365 * 0.35 + vel90 * 0.40 + vel30 * 0.25;
+    } else if (vel90 > 0) {
+      planVelocity = vel90;
+    } else {
+      planVelocity = vel30;
+    }
 
     const doi    = calcDaysOfInventory(inv.stock, planVelocity);
     const health = classifyStockHealth(doi, inv.stock);
@@ -117,12 +162,9 @@ export function buildProcurementTable(inventoryMap, orders, suppliers = {}) {
     const safetyDays = sup.safetyDays ?? 7;
     const costPrice  = sup.costPrice > 0 ? sup.costPrice : (inv.price * 0.4);
 
-    const rop        = calcReorderPoint(planVelocity, leadTime, safetyDays);
+    const rop         = calcReorderPoint(planVelocity, leadTime, safetyDays);
     const shouldReorder = inv.stock <= rop && planVelocity > 0;
-    const reorderQty = calcReorderQty(planVelocity, moq, leadTime);
-
-    const rev30 = e.rev30 || 0;
-    const rev90 = e.rev90 || 0;
+    const reorderQty  = calcReorderQty(planVelocity, moq, leadTime);
 
     const inventoryValue = inv.stock * (inv.price || 0);
     const costValue      = inv.stock * (costPrice || 0);
@@ -130,22 +172,25 @@ export function buildProcurementTable(inventoryMap, orders, suppliers = {}) {
     const lastTs       = e.lastTs || 0;
     const lastSaleDateObj = lastTs ? new Date(lastTs) : null;
     const daysSinceSale   = lastTs ? Math.floor((now - lastTs) / 86400000) : 999;
-    const isDead       = daysSinceSale > 90 && inv.stock > 0;
+    const isDead          = daysSinceSale > 90 && inv.stock > 0;
+
+    // Days of stock at 1-year net velocity (more accurate for annual planning)
+    const doi365 = netVel365 > 0 ? Math.floor(inv.stock / netVel365) : (inv.stock > 0 ? 999 : 0);
 
     let priority = 6;
-    if      (health === 'stockout')                         priority = 1;
-    else if (health === 'critical' && shouldReorder)        priority = 2;
-    else if (health === 'critical')                         priority = 3;
-    else if (health === 'low'      && shouldReorder)        priority = 4;
-    else if (health === 'low')                              priority = 5;
-    else if (isDead)                                        priority = 7;
-    else if (health === 'overstock')                        priority = 8;
+    if      (health === 'stockout')                  priority = 1;
+    else if (health === 'critical' && shouldReorder) priority = 2;
+    else if (health === 'critical')                  priority = 3;
+    else if (health === 'low'      && shouldReorder) priority = 4;
+    else if (health === 'low')                       priority = 5;
+    else if (isDead)                                 priority = 7;
+    else if (health === 'overstock')                 priority = 8;
 
     rows.push({
       sku,
       title:         inv.title || sku,
       variantTitle:  inv.variantTitle || '',
-      productType:   inv.productType || '',
+      productType:   inv.productType  || '',
       stock:         inv.stock,
       price:         inv.price,
       costPrice,
@@ -154,20 +199,31 @@ export function buildProcurementTable(inventoryMap, orders, suppliers = {}) {
       vel7,
       vel30,
       vel90,
+      vel365,
+      netVel365,
       planVelocity,
-      units30:       Math.round(vel30 * 30),
+      units30:  Math.round(vel30 * 30),
+      qty365:   e.qty365  || 0,
+      rev365:   e.rev365  || 0,
+      netQty365,
+      refQty365: e.refQty365 || 0,
+      refQty30:  e.refQty30  || 0,
+      refRev365: e.refRev365 || 0,
+      refundRate365,
+      refundRate30,
       doi,
+      doi365,
       health,
-      rop:           Math.ceil(rop),
+      rop:          Math.ceil(rop),
       shouldReorder,
       reorderQty,
-      supplier:      sup.supplier || '',
+      supplier:     sup.supplier || '',
       leadTime,
       moq,
       safetyDays,
-      rev30,
-      rev90,
-      lastSaleDate:  lastSaleDateObj,
+      rev30:  e.rev30 || 0,
+      rev90:  e.rev90 || 0,
+      lastSaleDate: lastSaleDateObj,
       daysSinceSale,
       isDead,
       priority,
@@ -193,26 +249,105 @@ export function calcProcurementSummary(rows) {
   const avgDoi  = doiVals.length > 0
     ? Math.round(doiVals.reduce((s, r) => s + r.doi, 0) / doiVals.length) : 0;
 
-  const totalRev30 = rows.reduce((s, r) => s + r.rev30, 0);
+  const totalRev30  = rows.reduce((s, r) => s + r.rev30, 0);
+  const totalRev365 = rows.reduce((s, r) => s + r.rev365, 0);
+  const totalRefunds365  = rows.reduce((s, r) => s + r.refQty365, 0);
+  const totalRefundRev365= rows.reduce((s, r) => s + r.refRev365, 0);
+  const highRefundSkus   = rows.filter(r => r.refundRate365 > 0.1 && r.qty365 >= 5).length;
+
   const estReorderTotal = toReorder.reduce((s, r) => s + r.estReorderCost, 0);
 
   return {
-    totalSkus:      rows.length,
-    activeSkus:     rows.filter(r => r.stock > 0 || r.vel30 > 0).length,
+    totalSkus:       rows.length,
+    activeSkus:      rows.filter(r => r.stock > 0 || r.vel30 > 0).length,
     totalValue,
     totalCostVal,
-    atRiskCount:    atRisk.length,
-    atRiskValue:    atRisk.reduce((s, r) => s + r.inventoryValue, 0),
-    deadStockCount: deadStock.length,
-    deadStockValue: deadStock.reduce((s, r) => s + r.inventoryValue, 0),
-    reorderCount:   toReorder.length,
+    atRiskCount:     atRisk.length,
+    atRiskValue:     atRisk.reduce((s, r) => s + r.inventoryValue, 0),
+    deadStockCount:  deadStock.length,
+    deadStockValue:  deadStock.reduce((s, r) => s + r.inventoryValue, 0),
+    reorderCount:    toReorder.length,
     estReorderTotal,
-    overstockCount: overstock.length,
-    overstockValue: overstock.reduce((s, r) => s + r.inventoryValue, 0),
+    overstockCount:  overstock.length,
+    overstockValue:  overstock.reduce((s, r) => s + r.inventoryValue, 0),
     avgDoi,
     totalRev30,
-    stockoutCount:  rows.filter(r => r.health === 'stockout').length,
+    totalRev365,
+    totalRefunds365,
+    totalRefundRev365,
+    highRefundSkus,
+    stockoutCount:   rows.filter(r => r.health === 'stockout').length,
   };
+}
+
+/* ─── TOP 30 DEMAND ───────────────────────────────────────────────── */
+// Returns top 30 SKUs ranked by consumption over the loaded period.
+// daysLoaded: how many days of orders are actually available (used to
+// annotate extrapolated annualized figures correctly).
+
+export function buildTop30Demand(rows, daysLoaded = 365) {
+  // Sort by best available long-period demand signal
+  const sorted = [...rows]
+    .filter(r => r.qty365 > 0 || r.vel30 > 0)
+    .sort((a, b) => {
+      // primary: gross units over available history
+      const aSignal = a.qty365 || a.vel30 * 30;
+      const bSignal = b.qty365 || b.vel30 * 30;
+      return bSignal - aSignal;
+    })
+    .slice(0, 30);
+
+  return sorted.map((r, i) => {
+    // Annualised figures — scale from loaded days if < 365
+    const scaleFactor  = daysLoaded < 365 ? 365 / daysLoaded : 1;
+    const annualGross  = Math.round(r.qty365  * scaleFactor);
+    const annualNet    = Math.round(r.netQty365 * scaleFactor);
+    const annualRefund = Math.round(r.refQty365 * scaleFactor);
+
+    // How many days of current stock at net 1Y velocity
+    const planVel = r.netVel365 > 0 ? r.netVel365
+                  : r.vel90 > 0     ? r.vel90
+                  : r.vel30;
+    const stockDays = planVel > 0 ? Math.floor(r.stock / planVel) : (r.stock > 0 ? 999 : 0);
+
+    // Demand gap: how many units short for next 90 days at plan velocity
+    const needed90 = Math.ceil(planVel * 90);
+    const gap90    = Math.max(0, needed90 - r.stock);
+
+    // Recommended reorder to cover 90 days + safety buffer
+    const recOrder = gap90 > 0 ? gap90 + Math.ceil(planVel * (r.leadTime || 14)) : 0;
+
+    return {
+      ...r,
+      rank:          i + 1,
+      annualGross,
+      annualNet,
+      annualRefund,
+      planVel,
+      stockDays,
+      gap90,
+      recOrder,
+      isExtrapolated: daysLoaded < 365,
+    };
+  });
+}
+
+/* ─── REFUND IMPACT ───────────────────────────────────────────────── */
+// Returns SKUs with notable refunds, sorted by refund rate descending.
+// Useful for identifying quality/fulfilment problems.
+
+export function buildRefundImpact(rows) {
+  return [...rows]
+    .filter(r => r.refQty365 > 0 && r.qty365 >= 3) // at least 3 sales to be meaningful
+    .map(r => ({
+      ...r,
+      refundPct365:  r.refundRate365 * 100,
+      refundPct30:   r.refundRate30  * 100,
+      revLost365:    r.refRev365 || 0,
+      isCritical:    r.refundRate365 > 0.15,  // >15% rate is a red flag
+      isElevated:    r.refundRate365 > 0.08,  // >8% is worth watching
+    }))
+    .sort((a, b) => b.refundPct365 - a.refundPct365);
 }
 
 /* ─── ABC ANALYSIS ────────────────────────────────────────────────── */
