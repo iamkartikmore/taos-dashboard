@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useCallback } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
   LineChart, Line, CartesianGrid, ComposedChart, Area,
@@ -7,11 +7,12 @@ import {
   TrendingUp, TrendingDown, Minus, AlertTriangle, CheckCircle,
   Info, Activity, Calendar, Clock, MapPin, Tag,
   ShoppingCart, CreditCard, Users, Package, Zap, ChevronDown,
-  ChevronUp, ArrowDownRight, ArrowUpRight, Layers, BarChart3,
+  ChevronUp, ArrowDownRight, ArrowUpRight, Layers, BarChart3, RefreshCw,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
 import { fmt, safeNum } from '../lib/analytics';
+import { fetchShopifyOrders } from '../lib/api';
 import {
   getPeriodDates, filterByDate, getDataCoverage,
   aggregateOrdersFull, buildHourlyBreakdown, buildDailyTrend,
@@ -189,7 +190,11 @@ const CauseCard = ({ cause, rank }) => {
    MAIN PAGE
 ══════════════════════════════════════════════════════════════════════════ */
 export default function OrderAnalysis() {
-  const { rawAccounts, shopifyOrders, inventoryMap, manualMap, brandData, brands, activeBrandIds } = useStore();
+  const {
+    rawAccounts, shopifyOrders, inventoryMap, manualMap,
+    brandData, brands, activeBrandIds,
+    setBrandOrders,
+  } = useStore();
 
   const [period,     setPeriod]     = useState('yesterday');
   const [compMode,   setCompMode]   = useState('same_day_lw');
@@ -199,6 +204,8 @@ export default function OrderAnalysis() {
   const [adFilter,   setAdFilter]   = useState('all');
   const [geoView,    setGeoView]    = useState('states');
   const [expanded,   setExpanded]   = useState(null);
+  const [fetching,   setFetching]   = useState(false);
+  const [fetchMsg,   setFetchMsg]   = useState('');
 
   /* date windows */
   const dates = useMemo(
@@ -208,6 +215,45 @@ export default function OrderAnalysis() {
 
   /* data coverage */
   const coverage = useMemo(() => getDataCoverage(shopifyOrders), [shopifyOrders]);
+
+  /* coverage gap: does prior period fall outside loaded orders? */
+  const coverageGap = useMemo(() => {
+    if (!coverage?.earliest || !dates.priorSince) return false;
+    return dates.priorSince < coverage.earliest;
+  }, [coverage, dates]);
+
+  const daysNeeded = useMemo(() => {
+    if (!dates.priorSince) return 60;
+    const start = new Date(dates.priorSince + 'T12:00:00');
+    return Math.ceil((Date.now() - start.getTime()) / 86400000) + 2;
+  }, [dates]);
+
+  /* inline fetch for missing order range */
+  const handleFetchMissing = useCallback(async () => {
+    const shopifyBrands = (brands || []).filter(b =>
+      (activeBrandIds || []).includes(b.id) &&
+      b.shopify?.shop && b.shopify?.clientId && b.shopify?.clientSecret,
+    );
+    if (!shopifyBrands.length) return;
+    setFetching(true);
+    const since = dates.priorSince + 'T00:00:00';
+    const until = new Date().toISOString();
+    for (const brand of shopifyBrands) {
+      try {
+        setFetchMsg(`Fetching ${brand.name}...`);
+        const result = await fetchShopifyOrders(
+          brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
+          since, until, msg => setFetchMsg(msg),
+        );
+        setBrandOrders(brand.id, result.orders, `${daysNeeded}d`);
+      } catch (e) {
+        setFetchMsg(`Error: ${e.message}`);
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+    setFetching(false);
+    setFetchMsg('');
+  }, [brands, activeBrandIds, dates, daysNeeded, setBrandOrders]);
 
   /* filtered order sets */
   const curOrders   = useMemo(() => filterByDate(shopifyOrders, dates.curSince,   dates.curUntil),   [shopifyOrders, dates]);
@@ -256,7 +302,12 @@ export default function OrderAnalysis() {
   }, [period, rowsToday, rows7d, rows14d, rows30d, dates]);
 
   const metaCur   = useMemo(() => aggregateInsightRows(metaCurRows),   [metaCurRows]);
-  const adComp    = useMemo(() => buildAdComparison(metaCurRows, metaTotalRows), [metaCurRows, metaTotalRows]);
+  // Only run comparison when prior data actually exists — empty metaTotalRows means no prior window
+  // available, and buildAdComparison would falsely label all ads as 'new'.
+  const adComp    = useMemo(
+    () => metaTotalRows.length ? buildAdComparison(metaCurRows, metaTotalRows) : [],
+    [metaCurRows, metaTotalRows],
+  );
   const priorRows = useMemo(() => adComp.filter(a => a.prior?.spend > 0).map(a => a.prior), [adComp]);
   const metaPrior = useMemo(() => aggregateInsightRows(priorRows), [priorRows]);
 
@@ -423,9 +474,16 @@ export default function OrderAnalysis() {
       )}
 
       {/* Quick metrics vs Meta */}
-      {rows7d.length > 0 && (
+      {metaCurRows.length > 0 && (
         <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
-          <div className="text-xs font-semibold text-slate-400 mb-3">Meta {metaWindowLabel}</div>
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-xs font-semibold text-slate-400">Meta {metaWindowLabel}</div>
+            {metaTotalRows.length === 0 && (
+              <span className="text-[10px] text-slate-600 flex items-center gap-1">
+                <Info size={10}/>No prior window available for {period} — pull a custom range for comparison
+              </span>
+            )}
+          </div>
           <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
             {[
               { label:'ROAS',     cur:metaCur.roas,     prior:metaPrior.roas,     fmt:fmtRoas },
@@ -1083,6 +1141,34 @@ export default function OrderAnalysis() {
           </span>
         )}
       </div>
+
+      {/* Coverage gap banner — prior period not loaded */}
+      {coverageGap && (
+        <div className="mb-4 rounded-xl border border-amber-700/50 bg-amber-950/20 p-3.5 flex items-center justify-between gap-4">
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle size={15} className="text-amber-400 mt-0.5 shrink-0"/>
+            <div>
+              <div className="text-sm font-semibold text-amber-300">Prior period data missing</div>
+              <div className="text-xs text-amber-400/70 mt-0.5">
+                Orders loaded from <span className="font-medium text-amber-300">{coverage?.earliest}</span>.
+                Comparing <span className="font-medium text-amber-300">{dates.label}</span> vs{' '}
+                <span className="font-medium text-amber-300">{dates.compLabel}</span> needs data back to{' '}
+                <span className="font-medium text-amber-300">{dates.priorSince}</span>.
+                Prior period shows as 0 — numbers are wrong until data is fetched.
+              </div>
+              {fetchMsg && <div className="text-[10px] text-amber-500 mt-1 font-mono">{fetchMsg}</div>}
+            </div>
+          </div>
+          <button
+            onClick={handleFetchMissing}
+            disabled={fetching}
+            className="shrink-0 flex items-center gap-1.5 px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-semibold rounded-lg transition-colors"
+          >
+            <RefreshCw size={12} className={fetching ? 'animate-spin' : ''}/>
+            {fetching ? 'Fetching…' : `Fetch ${daysNeeded}D`}
+          </button>
+        </div>
+      )}
 
       {/* Tab bar */}
       <div className="flex gap-0.5 border-b border-gray-800 mb-5 overflow-x-auto">

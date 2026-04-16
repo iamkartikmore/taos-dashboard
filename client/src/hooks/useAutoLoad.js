@@ -108,10 +108,13 @@ export function useAutoLoad() {
               console.warn('[AutoLoad] Shopify inventory failed:', e.message);
             }
 
-            // Pull last 30 days of orders
+            // Pull last 60 days of orders (enough for any standard comparison window)
             try {
-              const orders = await fetchShopifyOrders(shop, clientId, clientSecret, '30d');
-              setBrandOrders(brand.id, orders, '30d');
+              const now    = new Date();
+              const since  = new Date(now - 60 * 86400000).toISOString();
+              const until  = now.toISOString();
+              const result = await fetchShopifyOrders(shop, clientId, clientSecret, since, until);
+              setBrandOrders(brand.id, result.orders, '60d');
             } catch (e) {
               console.warn('[AutoLoad] Shopify orders failed:', e.message);
             }
