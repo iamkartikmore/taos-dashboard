@@ -1,11 +1,11 @@
 import { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key, Users,
+  Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key,
   BookOpen, Upload, ShoppingBag, Zap, ChevronDown, ChevronRight,
-  Palette, Activity,
+  Package, BarChart3,
 } from 'lucide-react';
-import { useStore, makeBrand, BRAND_COLORS } from '../store';
+import { useStore, BRAND_COLORS } from '../store';
 import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData } from '../lib/api';
 import { BREAKDOWN_SPECS, pullAllBreakdowns } from '../lib/breakdownApi';
 import { parseCsv, csvRowsToManualMap, detectListsFromCsvRows } from '../lib/csvImport';
@@ -25,13 +25,22 @@ const daysToRange = days => {
 
 const ORDER_WINDOWS = [
   { value: 'yesterday', label: 'Yesterday' },
-  { value: 7,           label: 'Last 7 days' },
-  { value: 14,          label: 'Last 14 days' },
-  { value: 30,          label: 'Last 30 days' },
-  { value: 90,          label: 'Last 90 days' },
-  { value: 180,         label: 'Last 180 days' },
-  { value: 365,         label: 'Last 365 days' },
+  { value: 7,           label: 'Last 7d' },
+  { value: 14,          label: 'Last 14d' },
+  { value: 30,          label: 'Last 30d' },
+  { value: 90,          label: 'Last 90d' },
+  { value: 180,         label: 'Last 180d' },
+  { value: 365,         label: 'Last 365d' },
   { value: 'all',       label: 'All time' },
+];
+
+const GA_WINDOWS = [
+  { value: '7daysAgo',   label: 'Last 7d' },
+  { value: '14daysAgo',  label: 'Last 14d' },
+  { value: '30daysAgo',  label: 'Last 30d' },
+  { value: '90daysAgo',  label: 'Last 90d' },
+  { value: '180daysAgo', label: 'Last 180d' },
+  { value: '365daysAgo', label: 'Last 365d' },
 ];
 
 /* ─── STATUS DOT ─────────────────────────────────────────────────── */
@@ -42,8 +51,25 @@ function StatusDot({ status }) {
   if (status === 'error')    return <span className="w-2 h-2 rounded-full bg-red-400 shrink-0" />;
 }
 
+function WinSelect({ value, onChange, options, disabled, color = 'violet' }) {
+  const cls = {
+    violet: 'bg-violet-900/20 border-violet-700/30 text-violet-300 focus:ring-violet-500',
+    blue:   'bg-blue-900/20 border-blue-700/30 text-blue-300 focus:ring-blue-500',
+    brand:  'bg-brand-900/20 border-brand-700/30 text-brand-300 focus:ring-brand-500',
+  }[color];
+  return (
+    <select value={value} onChange={e => {
+      const v = e.target.value;
+      onChange(['all','yesterday'].includes(v) ? v : isNaN(Number(v)) ? v : Number(v));
+    }} disabled={disabled}
+      className={`px-2 py-1 rounded-lg text-xs border focus:outline-none focus:ring-1 disabled:opacity-40 ${cls}`}>
+      {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>
+  );
+}
+
 /* ─── BRAND CARD ─────────────────────────────────────────────────── */
-function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
+function BrandCard({ brand, brandInfo }) {
   const {
     updateBrand, removeBrand, addBrandAccount, updateBrandAccount, removeBrandAccount,
     setBrandMetaData, setBrandMetaStatus,
@@ -53,11 +79,19 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
     appendLog,
   } = useStore();
 
-  const [expanded, setExpanded]   = useState(true);
-  const [pulling, setPulling]     = useState(false);
-  const [verifying, setVerifying] = useState(false);
-  const [verifyOk, setVerifyOk]   = useState(null);
+  const [expanded, setExpanded]       = useState(true);
+  const [verifying, setVerifying]     = useState(false);
+  const [verifyOk, setVerifyOk]       = useState(null);
   const [showPalette, setShowPalette] = useState(false);
+  const [pullingMeta, setPullingMeta]       = useState(false);
+  const [pullingInv, setPullingInv]         = useState(false);
+  const [pullingOrders, setPullingOrders]   = useState(false);
+  const [pullingGa, setPullingGa]           = useState(false);
+  const [pullingAll, setPullingAll]         = useState(false);
+
+  // Per-brand time windows
+  const [ordersDays, setOrdersDays] = useState(7);
+  const [gaDays, setGaDays]         = useState('7daysAgo');
 
   const bd = brandInfo || {};
   const metaStatus      = bd.metaStatus      || 'idle';
@@ -66,9 +100,11 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
   const gaStatus        = bd.gaStatus        || 'idle';
   const hasToken   = !!brand.meta.token;
   const hasAccts   = brand.meta.accounts.filter(a => a.key && a.id).length > 0;
-  const hasShopify = brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret;
-  const hasGa      = brand.ga?.propertyId && brand.ga?.serviceAccountJson;
+  const hasShopify = !!(brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret);
+  const hasGa      = !!(brand.ga?.propertyId && brand.ga?.serviceAccountJson);
+  const anyBusy    = pullingMeta || pullingInv || pullingOrders || pullingGa || pullingAll;
 
+  /* ── individual pull handlers ───────────────────────────────────── */
   const handleVerify = async () => {
     if (!hasToken) return;
     setVerifying(true); setVerifyOk(null);
@@ -79,80 +115,100 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
     finally { setVerifying(false); }
   };
 
-  const handlePullMeta = async () => {
+  const doPullMeta = async () => {
     const accounts = brand.meta.accounts.filter(a => a.key && a.id);
     if (!hasToken || !accounts.length) return;
-    setPulling(true);
     setBrandMetaStatus(brand.id, 'loading');
     appendLog(`[${brand.name}] Starting Meta pull...`);
-    try {
-      let combined = { campaigns: [], adsets: [], ads: [], insightsToday: [], insights7d: [], insights14d: [], insights30d: [] };
-      for (const acc of accounts) {
-        const r = await pullAccount(
-          { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
-          msg => appendLog(`[${brand.name}] ${msg}`),
-        );
-        combined.campaigns.push(...r.campaigns);
-        combined.adsets.push(...r.adsets);
-        combined.ads.push(...r.ads);
-        combined.insightsToday.push(...r.insightsToday);
-        combined.insights7d.push(...r.insights7d);
-        combined.insights14d.push(...r.insights14d);
-        combined.insights30d.push(...r.insights30d);
-      }
-      setBrandMetaData(brand.id, combined);
-      appendLog(`[${brand.name}] ✅ Meta done`);
-    } catch (e) {
-      setBrandMetaStatus(brand.id, 'error', e.message);
-      appendLog(`[${brand.name}] ❌ Meta error: ${e.message}`);
-    } finally { setPulling(false); }
+    let combined = { campaigns: [], adsets: [], ads: [], insightsToday: [], insights7d: [], insights14d: [], insights30d: [] };
+    for (const acc of accounts) {
+      const r = await pullAccount(
+        { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
+        msg => appendLog(`[${brand.name}] ${msg}`),
+      );
+      combined.campaigns.push(...r.campaigns);
+      combined.adsets.push(...r.adsets);
+      combined.ads.push(...r.ads);
+      combined.insightsToday.push(...r.insightsToday);
+      combined.insights7d.push(...r.insights7d);
+      combined.insights14d.push(...r.insights14d);
+      combined.insights30d.push(...r.insights30d);
+    }
+    setBrandMetaData(brand.id, combined);
+    appendLog(`[${brand.name}] ✅ Meta done`);
+  };
+
+  const doPullInventory = async () => {
+    setBrandInventoryStatus(brand.id, 'loading');
+    const result = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
+    setBrandInventory(brand.id, result.map, result.locations, result.inventoryByLocation, result.skuToItemId);
+    appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(result.map).length} SKUs · ${result.locations.length} locations`);
+  };
+
+  const doPullOrders = async (days = ordersDays) => {
+    setBrandOrdersStatus(brand.id, 'loading');
+    const { since, until } = daysToRange(days);
+    const { orders: fetched, count } = await fetchShopifyOrders(
+      brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
+      since, until, msg => appendLog(`[${brand.name}] ${msg}`),
+    );
+    setBrandOrders(brand.id, fetched, days);
+    appendLog(`[${brand.name}] ✅ Orders — ${count} orders`);
+  };
+
+  const doPullGa = async (since = gaDays) => {
+    setBrandGaStatus(brand.id, 'loading');
+    const data = await fetchGaData(
+      brand.ga.serviceAccountJson, brand.ga.propertyId,
+      { since, until: 'today' },
+      msg => appendLog(`[${brand.name}] ${msg}`),
+    );
+    setBrandGaData(brand.id, data);
+    appendLog(`[${brand.name}] ✅ GA — ${data.dailyTrend?.length || 0} days`);
+  };
+
+  const handlePullMeta = async () => {
+    setPullingMeta(true);
+    try { await doPullMeta(); } catch (e) { setBrandMetaStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Meta: ${e.message}`); }
+    finally { setPullingMeta(false); }
   };
 
   const handlePullInventory = async () => {
     if (!hasShopify) return;
-    setBrandInventoryStatus(brand.id, 'loading');
-    try {
-      const result = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
-      setBrandInventory(brand.id, result.map, result.locations, result.inventoryByLocation, result.skuToItemId);
-      appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(result.map).length} SKUs · ${result.locations.length} locations`);
-    } catch (e) {
-      setBrandInventoryStatus(brand.id, 'error');
-      appendLog(`[${brand.name}] ❌ Inventory error: ${e.message}`);
-    }
+    setPullingInv(true);
+    try { await doPullInventory(); } catch (e) { setBrandInventoryStatus(brand.id, 'error'); appendLog(`[${brand.name}] ❌ Inventory: ${e.message}`); }
+    finally { setPullingInv(false); }
   };
 
   const handlePullOrders = async () => {
     if (!hasShopify) return;
-    setBrandOrdersStatus(brand.id, 'loading');
-    try {
-      const { since, until } = daysToRange(ordersDays);
-      const { orders: fetchedOrders, count } = await fetchShopifyOrders(
-        brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
-        since, until, msg => appendLog(`[${brand.name}] ${msg}`),
-      );
-      setBrandOrders(brand.id, fetchedOrders, ordersDays);
-      appendLog(`[${brand.name}] ✅ Orders — ${count} orders`);
-    } catch (e) {
-      setBrandOrdersStatus(brand.id, 'error', e.message);
-      appendLog(`[${brand.name}] ❌ Orders error: ${e.message}`);
-    }
+    setPullingOrders(true);
+    try { await doPullOrders(); } catch (e) { setBrandOrdersStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Orders: ${e.message}`); }
+    finally { setPullingOrders(false); }
   };
 
   const handlePullGa = async () => {
-    if (!brand.ga?.propertyId || !brand.ga?.serviceAccountJson) return;
-    setBrandGaStatus(brand.id, 'loading');
-    try {
-      const data = await fetchGaData(
-        brand.ga.serviceAccountJson, brand.ga.propertyId,
-        { since: '7daysAgo', until: 'today' },
-        msg => appendLog(`[${brand.name}] ${msg}`),
-      );
-      setBrandGaData(brand.id, data);
-      appendLog(`[${brand.name}] ✅ GA — ${data.dailyTrend?.length || 0} days of data`);
-    } catch (e) {
-      setBrandGaStatus(brand.id, 'error', e.message);
-      appendLog(`[${brand.name}] ❌ GA error: ${e.message}`);
+    if (!hasGa) return;
+    setPullingGa(true);
+    try { await doPullGa(); } catch (e) { setBrandGaStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ GA: ${e.message}`); }
+    finally { setPullingGa(false); }
+  };
+
+  const handlePullAll = async () => {
+    setPullingAll(true);
+    appendLog(`━━━ ${brand.name} — Pull All ━━━`);
+    if (hasToken && hasAccts) {
+      try { await doPullMeta(); } catch (e) { setBrandMetaStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Meta: ${e.message}`); }
     }
+    if (hasShopify) {
+      try { await doPullInventory(); } catch (e) { setBrandInventoryStatus(brand.id, 'error'); appendLog(`[${brand.name}] ❌ Inventory: ${e.message}`); }
+      try { await doPullOrders(); } catch (e) { setBrandOrdersStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Orders: ${e.message}`); }
+    }
+    if (hasGa) {
+      try { await doPullGa(); } catch (e) { setBrandGaStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ GA: ${e.message}`); }
+    }
+    appendLog(`[${brand.name}] 🎉 Pull All complete`);
+    setPullingAll(false);
   };
 
   return (
@@ -183,16 +239,12 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
         />
 
         {/* Status dots */}
-        <div className="flex items-center gap-1.5" title="Meta · Inventory · Orders">
+        <div className="flex items-center gap-1.5" title="Meta · Inventory · Orders · GA">
           <StatusDot status={metaStatus} />
           <StatusDot status={inventoryStatus} />
           <StatusDot status={ordersStatus} />
+          <StatusDot status={gaStatus} />
         </div>
-
-        <button onClick={handlePullMeta} disabled={pulling || !hasToken || !hasAccts}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 bg-brand-600/20 hover:bg-brand-600/40 disabled:opacity-30 rounded-lg text-xs font-medium text-brand-300 transition-all border border-brand-700/30">
-          {pulling ? <Spinner size="sm" /> : <RefreshCw size={11} />} Pull Meta
-        </button>
 
         <button onClick={() => setExpanded(v => !v)}
           className="p-1.5 text-slate-500 hover:text-slate-300 transition-colors">
@@ -218,6 +270,7 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
                 <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-widest">
                   <Key size={11} /> Meta Ads
                   <StatusDot status={metaStatus} />
+                  {bd.metaFetchAt && <span className="text-[10px] text-slate-600 font-normal ml-1">{new Date(bd.metaFetchAt).toLocaleTimeString()}</span>}
                 </div>
 
                 <div>
@@ -282,6 +335,19 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
                     )}
                   </div>
                 </div>
+
+                {/* Meta pull button */}
+                <div className="flex items-center gap-2 pt-1">
+                  <button onClick={handlePullMeta} disabled={anyBusy || !hasToken || !hasAccts}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-600/20 hover:bg-brand-600/40 disabled:opacity-30 rounded-lg text-xs font-medium text-brand-300 transition-all border border-brand-700/30">
+                    {pullingMeta ? <Spinner size="sm" /> : <RefreshCw size={11} />} Pull Meta
+                  </button>
+                  {bd.insights7d && (
+                    <span className="px-2 py-0.5 rounded-full bg-brand-900/30 text-brand-400 text-[10px]">
+                      {bd.insights7d.length} ads · Today/7D/14D/30D
+                    </span>
+                  )}
+                </div>
               </div>
 
               {/* ── SHOPIFY ────────────────────────────────────────── */}
@@ -317,42 +383,41 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
                     className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
                 </div>
 
-                <div className="flex gap-2 pt-1">
-                  <button onClick={handlePullInventory} disabled={!hasShopify || inventoryStatus === 'loading'}
+                {/* Inventory pull */}
+                <div className="flex items-center gap-2 pt-1">
+                  <button onClick={handlePullInventory} disabled={anyBusy || !hasShopify}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700/30 hover:bg-emerald-700/50 disabled:opacity-30 rounded-lg text-xs font-medium text-emerald-300 transition-all border border-emerald-700/30">
-                    {inventoryStatus === 'loading' ? <Spinner size="sm" /> : <ShoppingBag size={11} />} Inventory
+                    {pullingInv ? <Spinner size="sm" /> : <Package size={11} />} Pull Inventory
                   </button>
-                  <button onClick={handlePullOrders} disabled={!hasShopify || ordersStatus === 'loading'}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-700/30 hover:bg-violet-700/50 disabled:opacity-30 rounded-lg text-xs font-medium text-violet-300 transition-all border border-violet-700/30">
-                    {ordersStatus === 'loading' ? <Spinner size="sm" /> : <ShoppingBag size={11} />} Orders
-                  </button>
-                </div>
-
-                {/* Status tags */}
-                <div className="flex flex-wrap gap-1.5 text-[10px]">
                   {bd.inventoryMap && Object.keys(bd.inventoryMap).length > 0 && (
-                    <span className="px-2 py-0.5 rounded-full bg-emerald-900/30 text-emerald-400">
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-900/30 text-emerald-400 text-[10px]">
                       {Object.keys(bd.inventoryMap).length} SKUs
                     </span>
                   )}
-                  {bd.orders && (
-                    <span className="px-2 py-0.5 rounded-full bg-violet-900/30 text-violet-400">
-                      {bd.orders.length} orders
-                    </span>
-                  )}
-                  {bd.metaFetchAt && (
-                    <span className="px-2 py-0.5 rounded-full bg-brand-900/30 text-brand-400">
-                      Meta: {new Date(bd.metaFetchAt).toLocaleTimeString()}
-                    </span>
-                  )}
+                </div>
+
+                {/* Orders pull + window */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] text-slate-500">Orders window</label>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <WinSelect value={ordersDays} onChange={setOrdersDays} options={ORDER_WINDOWS} disabled={anyBusy} color="violet" />
+                    <button onClick={handlePullOrders} disabled={anyBusy || !hasShopify}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-700/30 hover:bg-violet-700/50 disabled:opacity-30 rounded-lg text-xs font-medium text-violet-300 transition-all border border-violet-700/30">
+                      {pullingOrders ? <Spinner size="sm" /> : <ShoppingBag size={11} />} Pull Orders
+                    </button>
+                    {bd.orders && (
+                      <span className="px-2 py-0.5 rounded-full bg-violet-900/30 text-violet-400 text-[10px]">
+                        {bd.orders.length} orders
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
 
               {/* ── GOOGLE ANALYTICS ───────────────────────────────── */}
               <div className="space-y-3 xl:col-span-2">
                 <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-widest">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
-                  Google Analytics 4
+                  <BarChart3 size={11} /> Google Analytics 4
                   <StatusDot status={gaStatus} />
                   {bd.gaFetchAt && <span className="text-[10px] text-slate-600 font-normal ml-1">Last: {new Date(bd.gaFetchAt).toLocaleTimeString()}</span>}
                 </div>
@@ -391,19 +456,37 @@ function BrandCard({ brand, brandInfo, onOrdersDaysChange, ordersDays }) {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3 flex-wrap">
-                  <button onClick={handlePullGa} disabled={!hasGa || gaStatus === 'loading'}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-700/30 hover:bg-blue-700/50 disabled:opacity-30 rounded-lg text-xs font-medium text-blue-300 transition-all border border-blue-700/30">
-                    {gaStatus === 'loading' ? <Spinner size="sm" /> : <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>}
-                    Pull GA4 Data
-                  </button>
-                  {bd.gaData && (
-                    <span className="px-2 py-0.5 rounded-full bg-blue-900/30 text-blue-400 text-[10px]">
-                      {bd.gaData.dailyTrend?.length || 0}d trend · {bd.gaData.campaigns?.length || 0} campaigns
-                    </span>
-                  )}
+                {/* GA pull + window */}
+                <div className="space-y-1.5">
+                  <label className="text-[10px] text-slate-500">GA date range</label>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <WinSelect value={gaDays} onChange={setGaDays} options={GA_WINDOWS} disabled={anyBusy} color="blue" />
+                    <button onClick={handlePullGa} disabled={anyBusy || !hasGa}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-700/30 hover:bg-blue-700/50 disabled:opacity-30 rounded-lg text-xs font-medium text-blue-300 transition-all border border-blue-700/30">
+                      {pullingGa ? <Spinner size="sm" /> : <BarChart3 size={11} />} Pull GA4
+                    </button>
+                    {bd.gaData && (
+                      <span className="px-2 py-0.5 rounded-full bg-blue-900/30 text-blue-400 text-[10px]">
+                        {bd.gaData.dailyTrend?.length || 0}d trend · {bd.gaData.campaigns?.length || 0} campaigns
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
+            </div>
+
+            {/* ── PULL ALL for this brand ─────────────────────────── */}
+            <div className="border-t border-gray-800/60 px-4 py-3 bg-gray-950/40 flex items-center gap-3 flex-wrap">
+              <span className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider shrink-0">Pull All — {brand.name}</span>
+              <span className="text-[10px] text-slate-600">Orders: {ORDER_WINDOWS.find(w => w.value == ordersDays)?.label}</span>
+              <span className="text-[10px] text-slate-600">GA: {GA_WINDOWS.find(w => w.value === gaDays)?.label}</span>
+              <div className="flex-1" />
+              <button onClick={handlePullAll} disabled={anyBusy}
+                className="flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition-all disabled:opacity-40"
+                style={{ background: brand.color + '22', color: brand.color, border: `1px solid ${brand.color}44` }}>
+                {pullingAll ? <Spinner size="sm" /> : <Zap size={11} />}
+                {pullingAll ? 'Pulling…' : `Pull All`}
+              </button>
             </div>
           </motion.div>
         )}
@@ -417,7 +500,7 @@ export default function Setup() {
   const {
     brands, addBrand, brandData,
     manualMap, setManualMap, setManualRow, rebuildEnriched,
-    fetchLog, appendLog, clearLog, setFetchStatus,
+    fetchLog, appendLog, clearLog,
     enrichedRows, dynamicLists, mergeDynamicLists,
     setBrandMetaData, setBrandMetaStatus,
     setBrandInventory, setBrandInventoryStatus,
@@ -428,21 +511,14 @@ export default function Setup() {
 
   const LISTS = dynamicLists;
 
-  const [activeTab, setActiveTab]   = useState('brands');
+  const [activeTab, setActiveTab]       = useState('brands');
   const [megaFetching, setMegaFetching] = useState(false);
-  const [megaStep, setMegaStep]     = useState('');
-  const [ordersDays, setOrdersDays] = useState(7);
+  const [megaStep, setMegaStep]         = useState('');
+  const [globalOrdersDays, setGlobalOrdersDays] = useState(7);
+  const [globalGaDays, setGlobalGaDays]         = useState('7daysAgo');
   const [manualSearch, setManualSearch] = useState('');
-  const [csvStatus, setCsvStatus]   = useState(null);
-  const [savedFlash, setSavedFlash] = useState(false);
-  const csvRef = useRef(null);
-  const saveTimer = useRef(null);
-
-  const flashSaved = () => {
-    setSavedFlash(true);
-    clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => setSavedFlash(false), 2000);
-  };
+  const [csvStatus, setCsvStatus]       = useState(null);
+  const csvRef    = useRef(null);
 
   /* ── CSV import ────────────────────────────────────────────────── */
   const handleCsv = async e => {
@@ -453,26 +529,25 @@ export default function Setup() {
       mergeDynamicLists(detectListsFromCsvRows(rows));
       rebuildEnriched();
       setCsvStatus({ count: Object.keys(csvRowsToManualMap(rows)).length });
-      flashSaved();
-    } catch (err) { setCsvStatus({ error: err.message }); }
+         } catch (err) { setCsvStatus({ error: err.message }); }
     e.target.value = '';
   };
 
-  /* ── Pull Everything ───────────────────────────────────────────── */
+  /* ── Pull Everything (all brands) ──────────────────────────────── */
   const handlePullEverything = async () => {
     setMegaFetching(true);
     clearLog();
     setActiveTab('log');
 
     for (const brand of brands) {
-      const accounts  = brand.meta.accounts.filter(a => a.key && a.id);
-      const hasMeta   = !!brand.meta.token && accounts.length > 0;
-      const hasShopify = brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret;
+      const accounts   = brand.meta.accounts.filter(a => a.key && a.id);
+      const hasMeta    = !!brand.meta.token && accounts.length > 0;
+      const hasShopify = !!(brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret);
+      const hasGa      = !!(brand.ga?.propertyId && brand.ga?.serviceAccountJson);
 
       appendLog(`━━━ ${brand.name} ━━━`);
 
       if (hasMeta) {
-        // Meta
         setMegaStep(`${brand.id}:meta`);
         appendLog(`[${brand.name}] Fetching Meta ads...`);
         setBrandMetaStatus(brand.id, 'loading');
@@ -498,7 +573,6 @@ export default function Setup() {
           appendLog(`[${brand.name}] ❌ Meta: ${e.message}`);
         }
 
-        // Breakdowns
         setMegaStep(`${brand.id}:breakdowns`);
         appendLog(`[${brand.name}] Fetching 7D breakdowns...`);
         setBreakdownStatus('loading');
@@ -518,7 +592,6 @@ export default function Setup() {
       }
 
       if (hasShopify) {
-        // Inventory
         setMegaStep(`${brand.id}:inventory`);
         appendLog(`[${brand.name}] Fetching Shopify inventory...`);
         setBrandInventoryStatus(brand.id, 'loading');
@@ -531,18 +604,17 @@ export default function Setup() {
           appendLog(`[${brand.name}] ❌ Inventory: ${e.message}`);
         }
 
-        // Orders
         setMegaStep(`${brand.id}:orders`);
-        const label = ordersDays === 'all' ? 'all time' : ordersDays === 'yesterday' ? 'yesterday' : `last ${ordersDays}d`;
-        appendLog(`[${brand.name}] Fetching Shopify orders (${label})...`);
+        const odLabel = globalOrdersDays === 'all' ? 'all time' : globalOrdersDays === 'yesterday' ? 'yesterday' : `last ${globalOrdersDays}d`;
+        appendLog(`[${brand.name}] Fetching Shopify orders (${odLabel})...`);
         setBrandOrdersStatus(brand.id, 'loading');
         try {
-          const { since, until } = daysToRange(ordersDays);
+          const { since, until } = daysToRange(globalOrdersDays);
           const { orders: fetched, count } = await fetchShopifyOrders(
             brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
             since, until, msg => appendLog(`[${brand.name}] ${msg}`),
           );
-          setBrandOrders(brand.id, fetched, ordersDays);
+          setBrandOrders(brand.id, fetched, globalOrdersDays);
           appendLog(`[${brand.name}] ✅ Orders — ${count} orders`);
         } catch (e) {
           setBrandOrdersStatus(brand.id, 'error', e.message);
@@ -552,15 +624,14 @@ export default function Setup() {
         appendLog(`[${brand.name}] ⚠️ Shopify not configured — skipped`);
       }
 
-      // GA
-      if (brand.ga?.propertyId && brand.ga?.serviceAccountJson) {
+      if (hasGa) {
         setMegaStep(`${brand.id}:ga`);
-        appendLog(`[${brand.name}] Fetching Google Analytics...`);
+        appendLog(`[${brand.name}] Fetching Google Analytics (${globalGaDays})...`);
         setBrandGaStatus(brand.id, 'loading');
         try {
           const gaResult = await fetchGaData(
             brand.ga.serviceAccountJson, brand.ga.propertyId,
-            { since: '7daysAgo', until: 'today' },
+            { since: globalGaDays, until: 'today' },
             msg => appendLog(`[${brand.name}] ${msg}`),
           );
           setBrandGaData(brand.id, gaResult);
@@ -597,7 +668,7 @@ export default function Setup() {
       <div>
         <h1 className="text-2xl font-bold text-white">Study Manual</h1>
         <p className="text-sm text-slate-400 mt-1">
-          Manage brands, connect Meta + Shopify, pull data, and apply manual labels.
+          Manage brands, connect data sources, and pull data with full time control.
         </p>
       </div>
 
@@ -617,15 +688,9 @@ export default function Setup() {
       {activeTab === 'brands' && (
         <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} className="space-y-4">
 
-          {/* Brand cards */}
+          {/* Brand cards — each is fully self-contained with own time windows */}
           {brands.map(brand => (
-            <BrandCard
-              key={brand.id}
-              brand={brand}
-              brandInfo={brandData[brand.id]}
-              ordersDays={ordersDays}
-              onOrdersDaysChange={setOrdersDays}
-            />
+            <BrandCard key={brand.id} brand={brand} brandInfo={brandData[brand.id]} />
           ))}
 
           <button onClick={addBrand}
@@ -633,31 +698,34 @@ export default function Setup() {
             <Plus size={14} /> Add Brand
           </button>
 
-          {/* Pull Everything */}
+          {/* ── Ultimate Pull Everything ──────────────────────────── */}
           <div className="bg-gradient-to-br from-brand-900/40 to-violet-900/30 rounded-2xl border border-brand-700/40 p-5 space-y-4">
             <div className="flex items-center gap-2">
               <div className="p-1.5 rounded-lg bg-brand-600/30"><Zap size={16} className="text-brand-300" /></div>
               <div>
-                <div className="text-white font-bold text-sm">Pull Everything</div>
-                <div className="text-[11px] text-slate-400">{brands.length} brand{brands.length > 1 ? 's' : ''} · Meta ads · 7D breakdowns · Shopify inventory + orders · Google Analytics</div>
+                <div className="text-white font-bold text-sm">Pull Everything — All Brands</div>
+                <div className="text-[11px] text-slate-400">{brands.length} brand{brands.length > 1 ? 's' : ''} · Meta (Today/7D/14D/30D) · 7D Breakdowns · Inventory · Orders · GA</div>
               </div>
             </div>
 
-            <div className="flex items-center gap-3 flex-wrap">
-              <label className="text-xs text-slate-400 shrink-0">Shopify orders window</label>
-              <select
-                value={ordersDays}
-                onChange={e => { const v = e.target.value; setOrdersDays(['all','yesterday'].includes(v) ? v : Number(v)); }}
-                disabled={megaFetching}
-                className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-violet-500 disabled:opacity-50">
-                {ORDER_WINDOWS.map(w => <option key={w.value} value={w.value}>{w.label}</option>)}
-              </select>
+            {/* Global time windows */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-[10px] text-slate-400 font-medium">Shopify Orders window (all brands)</label>
+                <WinSelect value={globalOrdersDays} onChange={setGlobalOrdersDays} options={ORDER_WINDOWS} disabled={megaFetching} color="violet" />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] text-slate-400 font-medium">GA date range (all brands)</label>
+                <WinSelect value={globalGaDays} onChange={setGlobalGaDays} options={GA_WINDOWS} disabled={megaFetching} color="blue" />
+              </div>
             </div>
 
             <button onClick={handlePullEverything} disabled={megaFetching}
               className="w-full flex items-center justify-center gap-2.5 px-6 py-3.5 bg-brand-600 hover:bg-brand-500 disabled:opacity-50 rounded-xl text-sm font-bold text-white transition-all">
               {megaFetching ? <Spinner size="sm" /> : <Zap size={16} />}
-              {megaFetching ? (megaStep ? `${megaStep.split(':')[1]} — ${brands.find(b=>b.id===megaStep.split(':')[0])?.name || '...'}` : 'Working...') : 'Pull Everything'}
+              {megaFetching
+                ? (megaStep ? `${megaStep.split(':')[1]} — ${brands.find(b=>b.id===megaStep.split(':')[0])?.name || '...'}` : 'Working...')
+                : `Pull Everything — ${brands.length} Brand${brands.length > 1 ? 's' : ''}`}
             </button>
 
             {megaFetching && (
@@ -683,7 +751,7 @@ export default function Setup() {
             <p className="text-sm text-slate-400">Upload your exported <span className="font-mono text-slate-300">02_MANUAL.csv</span>. All columns are loaded automatically.</p>
             <label className="flex flex-col items-center justify-center gap-3 border-2 border-dashed border-gray-700 hover:border-brand-500 rounded-xl p-8 cursor-pointer transition-colors">
               <Upload size={28} className="text-slate-500" />
-              <span className="text-sm text-slate-400">Click to choose file or drag & drop</span>
+              <span className="text-sm text-slate-400">Click to choose file or drag &amp; drop</span>
               <input ref={csvRef} type="file" accept=".csv,text/csv" onChange={handleCsv} className="hidden" />
             </label>
             {csvStatus && !csvStatus.error && (
@@ -759,6 +827,9 @@ export default function Setup() {
       {/* ── LOG TAB ────────────────────────────────────────────────── */}
       {activeTab === 'log' && (
         <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }}>
+          <div className="flex justify-end mb-2">
+            <button onClick={clearLog} className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors px-2 py-1 rounded">Clear log</button>
+          </div>
           <div className="bg-gray-900 rounded-xl border border-gray-800 p-4 font-mono text-xs text-slate-300 h-[480px] overflow-y-auto space-y-0.5">
             {fetchLog.length === 0
               ? <span className="text-slate-600">No log entries yet.</span>
