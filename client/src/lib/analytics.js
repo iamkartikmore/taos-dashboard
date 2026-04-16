@@ -306,6 +306,11 @@ export function classifyDecision(r, manual) {
 
 /* ─── BUILD FLAT ENRICHED ROWS ───────────────────────────────────── */
 
+import {
+  calcFatigueScore, calcMomentumScore, calcFunnelLeak,
+  predictRoas7d, calcDaysUntilFatigue,
+} from './metaIntelligence.js';
+
 export function buildEnrichedRows(insights7d, insights30d, manualMap, adsetMap = {}, campaignMap = {}, adMap = {}) {
   // Only include rows where the ad (and its adset + campaign) are fully ACTIVE.
   // Meta's effective_status already rolls up the hierarchy — if it's ACTIVE the whole chain is active.
@@ -408,6 +413,25 @@ export function buildEnrichedRows(insights7d, insights30d, manualMap, adsetMap =
       budget,
       budgetType,
       budgetLevel,
+
+      // ─── Advanced intelligence fields ───────────────────────────
+      // Hook rate: what % of outbound clicks land on page
+      hookRate: safeDivide(r.lpv, r.outboundClicks) * 100,
+
+      // Fatigue / momentum scores (0-100 and -100..100)
+      fatigueScore:      calcFatigueScore(r, t30),
+      momentumScore:     calcMomentumScore(r, t30),
+      daysUntilFatigue:  calcDaysUntilFatigue(r, t30),
+
+      // Predicted ROAS in next 7 days
+      predictedRoas7d: predictRoas7d(r, t30),
+
+      // Funnel leak: which stage is most below account median
+      funnelLeak: calcFunnelLeak(r, {
+        lpvRate:      med.lpvRate      || 0,
+        atcRate:      med.atcRate      || 0,
+        purchaseRate: med.purchaseRate || 0,
+      }),
     };
   });
 }

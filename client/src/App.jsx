@@ -15,6 +15,9 @@ import ShopifyInsights from './pages/ShopifyInsights';
 import ShopifyOps from './pages/ShopifyOps';
 import GAInsights from './pages/GAInsights';
 import Procurement from './pages/Procurement';
+import CreativeIntel from './pages/CreativeIntel';
+import Attribution from './pages/Attribution';
+import Momentum from './pages/Momentum';
 
 export default function App() {
   return (
@@ -39,6 +42,9 @@ export default function App() {
           <Route path="/shopify-ops"      element={<ShopifyOps />} />
           <Route path="/ga"               element={<GAInsights />} />
           <Route path="/procurement"      element={<Procurement />} />
+          <Route path="/creative-intel"   element={<CreativeIntel />} />
+          <Route path="/attribution"      element={<Attribution />} />
+          <Route path="/momentum"         element={<Momentum />} />
           <Route path="*"           element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

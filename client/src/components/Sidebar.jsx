@@ -2,6 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
   Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck, ClipboardList,
+  Flame, GitMerge,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -14,12 +15,15 @@ const NAV = [
   { to: '/fix',         icon: Wrench,          label: 'Fix Board',         group: 'boards' },
   { to: '/defend',      icon: Shield,          label: 'Defend Board',      group: 'boards' },
   { to: '/kill',        icon: Skull,           label: 'Kill Board',        group: 'boards' },
-  { to: '/patterns',    icon: Layers,          label: 'Pattern Analysis',  group: 'intel' },
-  { to: '/scorecard',   icon: Trophy,          label: 'Scorecard',         group: 'intel' },
-  { to: '/video',       icon: Play,            label: 'Video Insights',    group: 'intel' },
-  { to: '/sku',         icon: Package,         label: 'SKU Intelligence',  group: 'intel' },
-  { to: '/flat',        icon: Database,        label: 'Raw Flat Data',     group: 'intel' },
-  { to: '/breakdowns',  icon: BarChart2,       label: 'Breakdown Analytics',group: 'intel' },
+  { to: '/patterns',      icon: Layers,          label: 'Pattern Analysis',   group: 'intel' },
+  { to: '/scorecard',    icon: Trophy,          label: 'Scorecard',          group: 'intel' },
+  { to: '/video',        icon: Play,            label: 'Video Insights',     group: 'intel' },
+  { to: '/sku',          icon: Package,         label: 'SKU Intelligence',   group: 'intel' },
+  { to: '/flat',         icon: Database,        label: 'Raw Flat Data',      group: 'intel' },
+  { to: '/breakdowns',   icon: BarChart2,       label: 'Breakdown Analytics',group: 'intel' },
+  { to: '/creative-intel', icon: Flame,         label: 'Creative Intel',     group: 'advanced' },
+  { to: '/attribution',  icon: GitMerge,        label: 'Attribution',        group: 'advanced' },
+  { to: '/momentum',     icon: TrendingUp,      label: 'Momentum',           group: 'advanced' },
   { to: '/shopify',          icon: ShoppingBag, label: 'Shopify Orders',   group: 'shopify' },
   { to: '/shopify-insights', icon: BarChart3,   label: 'Shopify Analytics',group: 'shopify' },
   { to: '/shopify-ops',      icon: Truck,       label: 'Shopify Ops',      group: 'shopify' },
@@ -28,11 +32,12 @@ const NAV = [
 ];
 
 const GROUP_LABELS = {
-  config:  'Configuration',
-  dash:    'Dashboard',
-  boards:  'Action Boards',
-  intel:   'Intelligence',
-  shopify: 'Commerce & Ops',
+  config:   'Configuration',
+  dash:     'Dashboard',
+  boards:   'Action Boards',
+  intel:    'Intelligence',
+  advanced: 'AI Intelligence',
+  shopify:  'Commerce & Ops',
 };
 
 export default function Sidebar() {

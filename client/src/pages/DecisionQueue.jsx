@@ -57,11 +57,11 @@ export default function DecisionQueue() {
       key: 'decision', label: 'Action', width: 130,
       render: v => <Badge label={v} />,
     },
-    { key: 'adName',       label: 'Ad',        width: 220, render: (v, row) => <span className="text-slate-200 font-medium leading-snug break-words whitespace-normal" title={v}>{v}</span> },
-    { key: 'campaignName', label: 'Campaign',  width: 160, render: v => <span className="text-slate-400 text-xs" title={v}>{v}</span> },
-    { key: 'accountKey',   label: 'Account',   width: 90  },
+    { key: 'adName',       label: 'Ad',        width: 200, render: (v) => <span className="text-slate-200 font-medium leading-snug break-words whitespace-normal" title={v}>{v}</span> },
+    { key: 'campaignName', label: 'Campaign',  width: 140, render: v => <span className="text-slate-400 text-xs" title={v}>{v}</span> },
+    { key: 'accountKey',   label: 'Account',   width: 80  },
     {
-      key: 'spend', label: 'Spend', align: 'right', width: 90,
+      key: 'spend', label: 'Spend', align: 'right', width: 85,
       render: v => <span className="font-semibold">{fmt.currency(v)}</span>,
     },
     {
@@ -73,31 +73,76 @@ export default function DecisionQueue() {
       ),
     },
     {
+      key: 'predictedRoas7d', label: 'Pred ROAS', align: 'right', width: 80,
+      render: (v, row) => {
+        if (!v) return <span className="text-slate-600">—</span>;
+        const delta = v - safeNum(row.metaRoas);
+        return (
+          <span className={delta > 0.1 ? 'text-emerald-400 font-semibold' : delta < -0.1 ? 'text-red-400' : 'text-slate-400'}>
+            {fmt.roas(v)}
+          </span>
+        );
+      },
+    },
+    {
       key: 'metaCpr', label: 'CPR', align: 'right', width: 80,
       render: v => <span className={safeNum(v) < 80 ? 'text-emerald-400' : safeNum(v) < 120 ? 'text-amber-400' : 'text-red-400'}>{fmt.currency(v)}</span>,
     },
     {
-      key: 'currentQuality', label: 'Quality', width: 90,
+      key: 'fatigueScore', label: 'Fatigue', align: 'right', width: 72,
+      render: v => {
+        const n = safeNum(v);
+        return (
+          <span className={n >= 70 ? 'text-red-400 font-bold' : n >= 50 ? 'text-amber-400' : 'text-emerald-400'}>
+            {n}/100
+          </span>
+        );
+      },
+    },
+    {
+      key: 'momentumScore', label: 'Momentum', align: 'right', width: 80,
+      render: v => {
+        const n = safeNum(v);
+        return (
+          <span className={n >= 30 ? 'text-emerald-400 font-semibold' : n >= -15 ? 'text-slate-400' : 'text-red-400'}>
+            {n > 0 ? '+' : ''}{n}
+          </span>
+        );
+      },
+    },
+    {
+      key: 'funnelLeak', label: 'Leak', width: 72,
+      render: v => {
+        if (!v || v.stage === 'None') return <span className="text-slate-600 text-xs">—</span>;
+        return (
+          <span className="text-[11px] font-semibold text-amber-400">
+            {v.stage} -{v.gap}%
+          </span>
+        );
+      },
+    },
+    {
+      key: 'currentQuality', label: 'Quality', width: 80,
       render: v => <Badge label={v} size="xs" />,
     },
     {
-      key: 'trendSignal', label: 'Trend', width: 150,
+      key: 'trendSignal', label: 'Trend', width: 140,
       render: v => <Badge label={v} size="xs" />,
     },
     {
-      key: 'ctrAll', label: 'CTR', align: 'right', width: 70,
+      key: 'ctrAll', label: 'CTR', align: 'right', width: 65,
       render: v => fmt.pct(v),
     },
     {
-      key: 'purchases', label: 'Purch', align: 'right', width: 70,
+      key: 'purchases', label: 'Purch', align: 'right', width: 65,
       render: v => fmt.number(v),
     },
     {
-      key: 'frequency', label: 'Freq', align: 'right', width: 60,
+      key: 'frequency', label: 'Freq', align: 'right', width: 55,
       render: v => fmt.decimal(v),
     },
     {
-      key: 'audienceFamily', label: 'Audience', width: 110,
+      key: 'audienceFamily', label: 'Audience', width: 100,
       render: v => v ? <Badge label={v} size="xs" /> : '—',
     },
     { key: 'collection', label: 'Collection', width: 100 },

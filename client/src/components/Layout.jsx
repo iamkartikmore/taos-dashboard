@@ -1,8 +1,11 @@
 import Sidebar from './Sidebar';
 import BrandSelector from './BrandSelector';
 import { Outlet } from 'react-router-dom';
+import { useAutoLoad } from '../hooks/useAutoLoad';
 
 export default function Layout() {
+  useAutoLoad(); // silently auto-pulls data on first open if not recently fetched
+
   return (
     <div className="flex min-h-screen bg-gray-950 text-gray-100">
       <Sidebar />
