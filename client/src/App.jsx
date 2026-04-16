@@ -14,6 +14,7 @@ import ShopifyOrders from './pages/ShopifyOrders';
 import ShopifyInsights from './pages/ShopifyInsights';
 import ShopifyOps from './pages/ShopifyOps';
 import GAInsights from './pages/GAInsights';
+import Procurement from './pages/Procurement';
 
 export default function App() {
   return (
@@ -36,7 +37,8 @@ export default function App() {
           <Route path="/shopify"          element={<ShopifyOrders />} />
           <Route path="/shopify-insights" element={<ShopifyInsights />} />
           <Route path="/shopify-ops"      element={<ShopifyOps />} />
-          <Route path="/ga" element={<GAInsights />} />
+          <Route path="/ga"               element={<GAInsights />} />
+          <Route path="/procurement"      element={<Procurement />} />
           <Route path="*"           element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

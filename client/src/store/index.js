@@ -4,12 +4,13 @@ import { normalizeBreakdownRow } from '../lib/breakdownAnalytics';
 import { mergeCustomerCache } from '../lib/shopifyAnalytics';
 
 /* ─── LOCALSTORAGE ──────────────────────────────────────────────── */
-const LS_BRANDS = 'taos_brands_v2';
-const LS_ACTIVE = 'taos_active_brands';
-const LS_MANUAL = 'taos_manual';
-const LS_LISTS  = 'taos_lists';
-const LS_INV    = 'taos_inventory_v2';   // { [brandId]: inventoryMap }
-const LS_CUST = 'taos_customers'; // { [brandId]: { [email]: CustomerRecord } }
+const LS_BRANDS  = 'taos_brands_v2';
+const LS_ACTIVE  = 'taos_active_brands';
+const LS_MANUAL  = 'taos_manual';
+const LS_LISTS   = 'taos_lists';
+const LS_INV     = 'taos_inventory_v2';      // { [brandId]: inventoryMap }
+const LS_CUST    = 'taos_customers';          // { [brandId]: { [email]: CustomerRecord } }
+const LS_PROCURE = 'taos_procurement';        // { suppliers: {[sku]:...}, purchaseOrders: [...] }
 
 function lsGet(key, fallback) {
   try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; } catch { return fallback; }
@@ -354,5 +355,44 @@ export const useStore = create((set, get) => {
     setInventoryMap: map => { set({ inventoryMap: map }); },
     inventoryStatus: 'idle',
     setInventoryStatus: s => set({ inventoryStatus: s }),
+
+    /* ── Procurement ─────────────────────────────────────────────── */
+    // { suppliers: { [sku]: { supplier, leadTimeDays, moq, costPrice, safetyDays } },
+    //   purchaseOrders: [{ id, sku, supplier, quantity, unitCost, orderDate, expectedDelivery, status, notes }] }
+    procurement: lsGet(LS_PROCURE, { suppliers: {}, purchaseOrders: [] }),
+
+    setProcurementSupplier: (sku, data) => {
+      const proc = get().procurement;
+      const updated = {
+        ...proc,
+        suppliers: { ...proc.suppliers, [sku]: { ...(proc.suppliers[sku] || {}), ...data } },
+      };
+      lsSet(LS_PROCURE, updated);
+      set({ procurement: updated });
+    },
+
+    addProcurementPO: po => {
+      const proc = get().procurement;
+      const updated = { ...proc, purchaseOrders: [...(proc.purchaseOrders || []), po] };
+      lsSet(LS_PROCURE, updated);
+      set({ procurement: updated });
+    },
+
+    updateProcurementPO: (id, patch) => {
+      const proc = get().procurement;
+      const updated = {
+        ...proc,
+        purchaseOrders: (proc.purchaseOrders || []).map(po => po.id === id ? { ...po, ...patch } : po),
+      };
+      lsSet(LS_PROCURE, updated);
+      set({ procurement: updated });
+    },
+
+    deleteProcurementPO: id => {
+      const proc = get().procurement;
+      const updated = { ...proc, purchaseOrders: (proc.purchaseOrders || []).filter(po => po.id !== id) };
+      lsSet(LS_PROCURE, updated);
+      set({ procurement: updated });
+    },
   };
 });

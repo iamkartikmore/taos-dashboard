@@ -1,29 +1,30 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
-  Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck,
+  Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck, ClipboardList,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
 
 const NAV = [
-  { to: '/setup',     icon: Settings,       label: 'Study Manual',    group: 'config' },
-  { to: '/',          icon: LayoutDashboard, label: 'Overview',        group: 'dash',  end: true },
-  { to: '/decisions', icon: ListChecks,      label: 'Decision Queue',  group: 'dash' },
-  { to: '/scale',     icon: TrendingUp,      label: 'Scale Board',     group: 'boards' },
-  { to: '/fix',       icon: Wrench,          label: 'Fix Board',       group: 'boards' },
-  { to: '/defend',    icon: Shield,          label: 'Defend Board',    group: 'boards' },
-  { to: '/kill',      icon: Skull,           label: 'Kill Board',      group: 'boards' },
-  { to: '/patterns',  icon: Layers,          label: 'Pattern Analysis',group: 'intel' },
-  { to: '/scorecard', icon: Trophy,          label: 'Scorecard',       group: 'intel' },
-  { to: '/video',     icon: Play,            label: 'Video Insights',  group: 'intel' },
-  { to: '/sku',       icon: Package,         label: 'SKU Intelligence', group: 'intel' },
-  { to: '/flat',       icon: Database,   label: 'Raw Flat Data',        group: 'intel' },
-  { to: '/breakdowns', icon: BarChart2,    label: 'Breakdown Analytics',  group: 'intel' },
-  { to: '/shopify',          icon: ShoppingBag, label: 'Shopify Orders',       group: 'intel' },
-  { to: '/shopify-insights', icon: BarChart3,   label: 'Shopify Analytics',    group: 'intel' },
-  { to: '/shopify-ops',      icon: Truck,       label: 'Shopify Ops',          group: 'intel' },
-  { to: '/ga',               icon: Activity,    label: 'GA Analytics',          group: 'intel' },
+  { to: '/setup',       icon: Settings,       label: 'Study Manual',      group: 'config' },
+  { to: '/',            icon: LayoutDashboard, label: 'Overview',          group: 'dash',  end: true },
+  { to: '/decisions',   icon: ListChecks,      label: 'Decision Queue',    group: 'dash' },
+  { to: '/scale',       icon: TrendingUp,      label: 'Scale Board',       group: 'boards' },
+  { to: '/fix',         icon: Wrench,          label: 'Fix Board',         group: 'boards' },
+  { to: '/defend',      icon: Shield,          label: 'Defend Board',      group: 'boards' },
+  { to: '/kill',        icon: Skull,           label: 'Kill Board',        group: 'boards' },
+  { to: '/patterns',    icon: Layers,          label: 'Pattern Analysis',  group: 'intel' },
+  { to: '/scorecard',   icon: Trophy,          label: 'Scorecard',         group: 'intel' },
+  { to: '/video',       icon: Play,            label: 'Video Insights',    group: 'intel' },
+  { to: '/sku',         icon: Package,         label: 'SKU Intelligence',  group: 'intel' },
+  { to: '/flat',        icon: Database,        label: 'Raw Flat Data',     group: 'intel' },
+  { to: '/breakdowns',  icon: BarChart2,       label: 'Breakdown Analytics',group: 'intel' },
+  { to: '/shopify',          icon: ShoppingBag, label: 'Shopify Orders',   group: 'shopify' },
+  { to: '/shopify-insights', icon: BarChart3,   label: 'Shopify Analytics',group: 'shopify' },
+  { to: '/shopify-ops',      icon: Truck,       label: 'Shopify Ops',      group: 'shopify' },
+  { to: '/procurement',      icon: ClipboardList, label: 'Procurement',    group: 'shopify' },
+  { to: '/ga',               icon: Activity,    label: 'GA Analytics',     group: 'shopify' },
 ];
 
 const GROUP_LABELS = {
@@ -31,6 +32,7 @@ const GROUP_LABELS = {
   dash:    'Dashboard',
   boards:  'Action Boards',
   intel:   'Intelligence',
+  shopify: 'Commerce & Ops',
 };
 
 export default function Sidebar() {

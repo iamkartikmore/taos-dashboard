@@ -1,12 +1,12 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key,
   BookOpen, Upload, ShoppingBag, Zap, ChevronDown, ChevronRight,
-  Package, BarChart3,
+  Package, BarChart3, Calendar,
 } from 'lucide-react';
 import { useStore, BRAND_COLORS } from '../store';
-import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData } from '../lib/api';
+import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData, pullAccountWithCustomRange } from '../lib/api';
 import { BREAKDOWN_SPECS, pullAllBreakdowns } from '../lib/breakdownApi';
 import { parseCsv, csvRowsToManualMap, detectListsFromCsvRows } from '../lib/csvImport';
 import Spinner from '../components/ui/Spinner';
@@ -28,19 +28,24 @@ const ORDER_WINDOWS = [
   { value: 7,           label: 'Last 7d' },
   { value: 14,          label: 'Last 14d' },
   { value: 30,          label: 'Last 30d' },
+  { value: 60,          label: 'Last 60d' },
   { value: 90,          label: 'Last 90d' },
   { value: 180,         label: 'Last 180d' },
   { value: 365,         label: 'Last 365d' },
+  { value: 730,         label: 'Last 2 years' },
+  { value: 1095,        label: 'Last 3 years' },
   { value: 'all',       label: 'All time' },
 ];
 
 const GA_WINDOWS = [
-  { value: '7daysAgo',   label: 'Last 7d' },
-  { value: '14daysAgo',  label: 'Last 14d' },
-  { value: '30daysAgo',  label: 'Last 30d' },
-  { value: '90daysAgo',  label: 'Last 90d' },
-  { value: '180daysAgo', label: 'Last 180d' },
-  { value: '365daysAgo', label: 'Last 365d' },
+  { value: '7daysAgo',    label: 'Last 7d' },
+  { value: '14daysAgo',   label: 'Last 14d' },
+  { value: '30daysAgo',   label: 'Last 30d' },
+  { value: '60daysAgo',   label: 'Last 60d' },
+  { value: '90daysAgo',   label: 'Last 90d' },
+  { value: '180daysAgo',  label: 'Last 180d' },
+  { value: '365daysAgo',  label: 'Last 1 year' },
+  { value: '730daysAgo',  label: 'Last 2 years' },
 ];
 
 /* ─── STATUS DOT ─────────────────────────────────────────────────── */
@@ -518,7 +523,14 @@ export default function Setup() {
   const [globalGaDays, setGlobalGaDays]         = useState('7daysAgo');
   const [manualSearch, setManualSearch] = useState('');
   const [csvStatus, setCsvStatus]       = useState(null);
+  const [savedFlash, setSavedFlash]     = useState(false);
   const csvRef    = useRef(null);
+
+  // Flash "Saved" indicator when a manual label is updated
+  const flashSaved = useCallback(() => {
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 1500);
+  }, []);
 
   /* ── CSV import ────────────────────────────────────────────────── */
   const handleCsv = async e => {
@@ -533,119 +545,127 @@ export default function Setup() {
     e.target.value = '';
   };
 
-  /* ── Pull Everything (all brands) ──────────────────────────────── */
+  /* ── Pull Everything (all brands — parallel per-brand tasks) ──── */
   const handlePullEverything = async () => {
     setMegaFetching(true);
     clearLog();
     setActiveTab('log');
 
-    for (const brand of brands) {
+    // Pull all brands in parallel — each brand's tasks run in parallel too
+    await Promise.all(brands.map(async brand => {
       const accounts   = brand.meta.accounts.filter(a => a.key && a.id);
       const hasMeta    = !!brand.meta.token && accounts.length > 0;
       const hasShopify = !!(brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret);
       const hasGa      = !!(brand.ga?.propertyId && brand.ga?.serviceAccountJson);
 
       appendLog(`━━━ ${brand.name} ━━━`);
+      setMegaStep(`${brand.id}:meta`);
 
-      if (hasMeta) {
-        setMegaStep(`${brand.id}:meta`);
-        appendLog(`[${brand.name}] Fetching Meta ads...`);
-        setBrandMetaStatus(brand.id, 'loading');
-        try {
-          let combined = { campaigns:[], adsets:[], ads:[], insightsToday:[], insights7d:[], insights14d:[], insights30d:[] };
-          for (const acc of accounts) {
-            const r = await pullAccount(
-              { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
+      // Run Meta + Shopify + GA in parallel per brand
+      await Promise.all([
+        // ── Meta ────────────────────────────────────────────────
+        hasMeta ? (async () => {
+          appendLog(`[${brand.name}] Fetching Meta ads + insights (parallel)...`);
+          setBrandMetaStatus(brand.id, 'loading');
+          try {
+            // All accounts in parallel
+            const results = await Promise.all(accounts.map(acc =>
+              pullAccount(
+                { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
+                msg => appendLog(`[${brand.name}] ${msg}`),
+              )
+            ));
+            const combined = { campaigns:[], adsets:[], ads:[], insightsToday:[], insights7d:[], insights14d:[], insights30d:[] };
+            results.forEach(r => {
+              combined.campaigns.push(...r.campaigns);
+              combined.adsets.push(...r.adsets);
+              combined.ads.push(...r.ads);
+              combined.insightsToday.push(...r.insightsToday);
+              combined.insights7d.push(...r.insights7d);
+              combined.insights14d.push(...r.insights14d);
+              combined.insights30d.push(...r.insights30d);
+            });
+            setBrandMetaData(brand.id, combined);
+            appendLog(`[${brand.name}] ✅ Meta done — ${combined.insights7d.length} ads`);
+          } catch (e) {
+            setBrandMetaStatus(brand.id, 'error', e.message);
+            appendLog(`[${brand.name}] ❌ Meta: ${e.message}`);
+          }
+
+          // Breakdowns after Meta (needs token)
+          appendLog(`[${brand.name}] Fetching 7D breakdowns...`);
+          setBreakdownStatus('loading');
+          try {
+            const bdResult = await pullAllBreakdowns(
+              { ver: brand.meta.apiVersion, token: brand.meta.token, accounts, specs: BREAKDOWN_SPECS, window: '7D' },
               msg => appendLog(`[${brand.name}] ${msg}`),
             );
-            combined.campaigns.push(...r.campaigns);
-            combined.adsets.push(...r.adsets);
-            combined.ads.push(...r.ads);
-            combined.insightsToday.push(...r.insightsToday);
-            combined.insights7d.push(...r.insights7d);
-            combined.insights14d.push(...r.insights14d);
-            combined.insights30d.push(...r.insights30d);
+            setBreakdownData(bdResult);
+            appendLog(`[${brand.name}] ✅ Breakdowns done`);
+          } catch (e) {
+            setBreakdownStatus('error');
+            appendLog(`[${brand.name}] ❌ Breakdowns: ${e.message}`);
           }
-          setBrandMetaData(brand.id, combined);
-          appendLog(`[${brand.name}] ✅ Meta done`);
-        } catch (e) {
-          setBrandMetaStatus(brand.id, 'error', e.message);
-          appendLog(`[${brand.name}] ❌ Meta: ${e.message}`);
-        }
+        })() : Promise.resolve(appendLog(`[${brand.name}] ⚠️ Meta not configured — skipped`)),
 
-        setMegaStep(`${brand.id}:breakdowns`);
-        appendLog(`[${brand.name}] Fetching 7D breakdowns...`);
-        setBreakdownStatus('loading');
-        try {
-          const bdResult = await pullAllBreakdowns(
-            { ver: brand.meta.apiVersion, token: brand.meta.token, accounts, specs: BREAKDOWN_SPECS, window: '7D' },
-            msg => appendLog(`[${brand.name}] ${msg}`),
-          );
-          setBreakdownData(bdResult);
-          appendLog(`[${brand.name}] ✅ Breakdowns done`);
-        } catch (e) {
-          setBreakdownStatus('error');
-          appendLog(`[${brand.name}] ❌ Breakdowns: ${e.message}`);
-        }
-      } else {
-        appendLog(`[${brand.name}] ⚠️ Meta not configured — skipped`);
-      }
+        // ── Shopify inventory ─────────────────────────────────
+        hasShopify ? (async () => {
+          appendLog(`[${brand.name}] Fetching inventory...`);
+          setBrandInventoryStatus(brand.id, 'loading');
+          try {
+            const result = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
+            setBrandInventory(brand.id, result.map, result.locations, result.inventoryByLocation, result.skuToItemId);
+            appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(result.map).length} SKUs`);
+          } catch (e) {
+            setBrandInventoryStatus(brand.id, 'error');
+            appendLog(`[${brand.name}] ❌ Inventory: ${e.message}`);
+          }
+        })() : Promise.resolve(),
 
-      if (hasShopify) {
-        setMegaStep(`${brand.id}:inventory`);
-        appendLog(`[${brand.name}] Fetching Shopify inventory...`);
-        setBrandInventoryStatus(brand.id, 'loading');
-        try {
-          const result = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
-          setBrandInventory(brand.id, result.map, result.locations, result.inventoryByLocation, result.skuToItemId);
-          appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(result.map).length} SKUs · ${result.locations.length} locations`);
-        } catch (e) {
-          setBrandInventoryStatus(brand.id, 'error');
-          appendLog(`[${brand.name}] ❌ Inventory: ${e.message}`);
-        }
+        // ── Shopify orders ────────────────────────────────────
+        hasShopify ? (async () => {
+          const odLabel = globalOrdersDays === 'all' ? 'all time'
+            : globalOrdersDays === 'yesterday' ? 'yesterday'
+            : `last ${globalOrdersDays}d`;
+          appendLog(`[${brand.name}] Fetching orders (${odLabel})...`);
+          setBrandOrdersStatus(brand.id, 'loading');
+          try {
+            const { since, until } = daysToRange(globalOrdersDays);
+            const { orders: fetched, count } = await fetchShopifyOrders(
+              brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
+              since, until, msg => appendLog(`[${brand.name}] ${msg}`),
+            );
+            setBrandOrders(brand.id, fetched, globalOrdersDays);
+            appendLog(`[${brand.name}] ✅ Orders — ${count} orders`);
+          } catch (e) {
+            setBrandOrdersStatus(brand.id, 'error', e.message);
+            appendLog(`[${brand.name}] ❌ Orders: ${e.message}`);
+          }
+        })() : Promise.resolve(appendLog(`[${brand.name}] ⚠️ Shopify not configured — skipped`)),
 
-        setMegaStep(`${brand.id}:orders`);
-        const odLabel = globalOrdersDays === 'all' ? 'all time' : globalOrdersDays === 'yesterday' ? 'yesterday' : `last ${globalOrdersDays}d`;
-        appendLog(`[${brand.name}] Fetching Shopify orders (${odLabel})...`);
-        setBrandOrdersStatus(brand.id, 'loading');
-        try {
-          const { since, until } = daysToRange(globalOrdersDays);
-          const { orders: fetched, count } = await fetchShopifyOrders(
-            brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
-            since, until, msg => appendLog(`[${brand.name}] ${msg}`),
-          );
-          setBrandOrders(brand.id, fetched, globalOrdersDays);
-          appendLog(`[${brand.name}] ✅ Orders — ${count} orders`);
-        } catch (e) {
-          setBrandOrdersStatus(brand.id, 'error', e.message);
-          appendLog(`[${brand.name}] ❌ Orders: ${e.message}`);
-        }
-      } else {
-        appendLog(`[${brand.name}] ⚠️ Shopify not configured — skipped`);
-      }
+        // ── Google Analytics ──────────────────────────────────
+        hasGa ? (async () => {
+          appendLog(`[${brand.name}] Fetching GA4 (${globalGaDays})...`);
+          setBrandGaStatus(brand.id, 'loading');
+          try {
+            const gaResult = await fetchGaData(
+              brand.ga.serviceAccountJson, brand.ga.propertyId,
+              { since: globalGaDays, until: 'today' },
+              msg => appendLog(`[${brand.name}] ${msg}`),
+            );
+            setBrandGaData(brand.id, gaResult);
+            appendLog(`[${brand.name}] ✅ GA — ${gaResult.dailyTrend?.length || 0}d`);
+          } catch (e) {
+            setBrandGaStatus(brand.id, 'error', e.message);
+            appendLog(`[${brand.name}] ❌ GA: ${e.message}`);
+          }
+        })() : Promise.resolve(appendLog(`[${brand.name}] ⚠️ GA not configured — skipped`)),
+      ]);
 
-      if (hasGa) {
-        setMegaStep(`${brand.id}:ga`);
-        appendLog(`[${brand.name}] Fetching Google Analytics (${globalGaDays})...`);
-        setBrandGaStatus(brand.id, 'loading');
-        try {
-          const gaResult = await fetchGaData(
-            brand.ga.serviceAccountJson, brand.ga.propertyId,
-            { since: globalGaDays, until: 'today' },
-            msg => appendLog(`[${brand.name}] ${msg}`),
-          );
-          setBrandGaData(brand.id, gaResult);
-          appendLog(`[${brand.name}] ✅ GA — ${gaResult.dailyTrend?.length || 0}d`);
-        } catch (e) {
-          setBrandGaStatus(brand.id, 'error', e.message);
-          appendLog(`[${brand.name}] ❌ GA: ${e.message}`);
-        }
-      } else {
-        appendLog(`[${brand.name}] ⚠️ GA not configured — skipped`);
-      }
-    }
+      appendLog(`[${brand.name}] 🎉 All done`);
+    }));
 
-    appendLog('🎉 Pull Everything complete!');
+    appendLog('✅ Pull Everything complete — all brands!');
     setMegaStep('');
     setMegaFetching(false);
   };
@@ -780,6 +800,11 @@ export default function Setup() {
                   placeholder="Search ads / campaigns..."
                   className="w-80 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-brand-500" />
                 <span className="text-xs text-slate-500">{adsForManual.length} ads</span>
+                {savedFlash && (
+                  <span className="flex items-center gap-1 text-xs text-emerald-400 animate-pulse">
+                    <CheckCircle size={11} /> Saved
+                  </span>
+                )}
               </div>
               <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
                 <table className="w-full text-xs">
