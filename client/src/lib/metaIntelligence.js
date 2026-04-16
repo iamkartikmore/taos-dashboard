@@ -553,6 +553,284 @@ export function buildCustomerLtvBySegment(shopifyOrders, enrichedRows) {
   }).sort((a, b) => b.totalRevenue - a.totalRevenue);
 }
 
+/* ─── DAY-OVER-DAY ORDER ANALYSIS ───────────────────────────────── */
+// Compares yesterday vs day-before-yesterday across all Meta factors
+// ydRows / dbRows: normalizeInsight() arrays for each single day
+// shopifyOrders: raw Shopify orders array (optional)
+// dates: { yd: 'YYYY-MM-DD', db: 'YYYY-MM-DD' }
+
+export function buildDayOverDayAnalysis(ydRows, dbRows, shopifyOrders, dates) {
+  const agg = (rows) => {
+    if (!rows?.length) return null;
+    let spend = 0, impressions = 0, outboundClicks = 0;
+    let purchases = 0, revenue = 0, lpv = 0, atc = 0, ic = 0, reach = 0;
+    rows.forEach(r => {
+      spend          += safeNum(r.spend);
+      impressions    += safeNum(r.impressions);
+      outboundClicks += safeNum(r.outboundClicks);
+      purchases      += safeNum(r.purchases);
+      revenue        += safeNum(r.revenue);
+      lpv            += safeNum(r.lpv);
+      atc            += safeNum(r.atc);
+      ic             += safeNum(r.ic);
+      reach          += safeNum(r.reach);
+    });
+    const roas         = safeDivide(revenue, spend);
+    const cpr          = purchases > 0 ? spend / purchases : 0;
+    const cpm          = impressions > 0 ? (spend / impressions) * 1000 : 0;
+    const ctr          = impressions > 0 ? (outboundClicks / impressions) * 100 : 0;
+    const convRate     = outboundClicks > 0 ? (purchases / outboundClicks) * 100 : 0;
+    const lpvRate      = outboundClicks > 0 ? (lpv / outboundClicks) * 100 : 0;
+    const atcRate      = lpv > 0 ? (atc / lpv) * 100 : 0;
+    const checkoutRate = ic > 0 ? (purchases / ic) * 100 : 0;
+    const frequency    = reach > 0 ? impressions / reach : 0;
+    return {
+      spend, impressions, outboundClicks, purchases, revenue,
+      lpv, atc, ic, reach,
+      roas, cpr, cpm, ctr, convRate, lpvRate, atcRate, checkoutRate, frequency,
+    };
+  };
+
+  const yd = agg(ydRows);
+  const db = agg(dbRows);
+  if (!yd || !db) return { error: 'Insufficient data for comparison' };
+
+  const pctDelta = (now, prev) => prev && prev !== 0 ? ((now - prev) / Math.abs(prev)) * 100 : 0;
+
+  const orderDelta    = yd.purchases - db.purchases;
+  const orderDeltaPct = pctDelta(yd.purchases, db.purchases);
+  const direction     = orderDelta > 0.5 ? 'up' : orderDelta < -0.5 ? 'down' : 'flat';
+
+  // Mathematical decomposition: Δorders = spendContribution + efficiencyContribution
+  const spendContrib      = db.cpr > 0 ? (yd.spend - db.spend) / db.cpr : 0;
+  const efficiencyContrib = db.cpr > 0 && yd.cpr > 0 ? yd.spend * (1 / yd.cpr - 1 / db.cpr) : 0;
+  const totalContrib      = spendContrib + efficiencyContrib;
+
+  const spendDelta    = pctDelta(yd.spend, db.spend);
+  const cprDelta      = pctDelta(yd.cpr, db.cpr);
+  const cpmDelta      = pctDelta(yd.cpm, db.cpm);
+  const ctrDelta      = pctDelta(yd.ctr, db.ctr);
+  const convDelta     = pctDelta(yd.convRate, db.convRate);
+  const impDelta      = pctDelta(yd.impressions, db.impressions);
+  const freqDelta     = pctDelta(yd.frequency, db.frequency);
+  const roasDelta     = pctDelta(yd.roas, db.roas);
+
+  const factors = [
+    {
+      id: 'spend', label: 'Ad Spend',
+      delta: spendDelta,
+      impact: spendContrib,
+      yd: yd.spend, db: db.spend, format: 'currency',
+      direction: spendDelta > 5 ? 'up' : spendDelta < -5 ? 'down' : 'flat',
+      positive: spendDelta > 0 ? orderDelta >= 0 : orderDelta <= 0,
+      detail: Math.abs(spendDelta) > 5
+        ? `Budget ${spendDelta > 0 ? 'increased' : 'decreased'} by ${Math.abs(spendDelta).toFixed(1)}% → drove ~${spendContrib > 0 ? '+' : ''}${Math.round(spendContrib)} orders at previous efficiency`
+        : `Spend stable (${spendDelta > 0 ? '+' : ''}${spendDelta.toFixed(1)}%)`,
+    },
+    {
+      id: 'efficiency', label: 'Ad Efficiency (ROAS/CPR)',
+      delta: -cprDelta,
+      impact: efficiencyContrib,
+      yd: yd.cpr, db: db.cpr, roasYd: yd.roas, roasDb: db.roas, format: 'currency',
+      direction: cprDelta < -5 ? 'up' : cprDelta > 5 ? 'down' : 'flat',
+      positive: cprDelta < 0 ? orderDelta >= 0 : orderDelta <= 0,
+      detail: Math.abs(cprDelta) > 8
+        ? `CPR ${db.cpr.toFixed(0)} → ${yd.cpr.toFixed(0)} (${cprDelta > 0 ? 'worse' : 'better'} by ${Math.abs(cprDelta).toFixed(1)}%) · ROAS: ${db.roas.toFixed(2)}x → ${yd.roas.toFixed(2)}x`
+        : `Efficiency stable · ROAS ${yd.roas.toFixed(2)}x`,
+    },
+    {
+      id: 'impressions', label: 'Impressions & Reach',
+      delta: impDelta, impact: null,
+      yd: yd.impressions, db: db.impressions, format: 'number',
+      direction: impDelta > 5 ? 'up' : impDelta < -5 ? 'down' : 'flat',
+      positive: impDelta > 0 ? orderDelta >= 0 : orderDelta <= 0,
+      detail: Math.abs(impDelta) > 8
+        ? `Impressions ${impDelta > 0 ? 'increased' : 'dropped'} ${Math.abs(impDelta).toFixed(1)}% — ${impDelta > 0 ? 'scale-up or audience expansion' : 'budget cut or delivery issue'}`
+        : `Reach stable · ${yd.frequency.toFixed(2)}x frequency`,
+    },
+    {
+      id: 'ctr', label: 'Creative (CTR)',
+      delta: ctrDelta, impact: null,
+      yd: yd.ctr, db: db.ctr, format: 'pct2',
+      direction: ctrDelta > 5 ? 'up' : ctrDelta < -5 ? 'down' : 'flat',
+      positive: ctrDelta > 0 ? orderDelta >= 0 : orderDelta <= 0,
+      detail: Math.abs(ctrDelta) > 8
+        ? `CTR ${ctrDelta > 0 ? 'improved' : 'dropped'} ${Math.abs(ctrDelta).toFixed(1)}% → ${ctrDelta > 0 ? 'creative resonating better' : 'ad fatigue or audience mismatch'}`
+        : `CTR stable at ${yd.ctr.toFixed(2)}%`,
+    },
+    {
+      id: 'cpm', label: 'Auction Cost (CPM)',
+      delta: -cpmDelta, impact: null,
+      yd: yd.cpm, db: db.cpm, format: 'currency',
+      direction: cpmDelta < -5 ? 'up' : cpmDelta > 5 ? 'down' : 'flat',
+      positive: cpmDelta < 0 ? orderDelta >= 0 : orderDelta <= 0,
+      detail: Math.abs(cpmDelta) > 10
+        ? `CPM ${cpmDelta > 0 ? 'spiked' : 'dropped'} ${Math.abs(cpmDelta).toFixed(1)}% → ${cpmDelta > 0 ? 'more auction competition, delivery expensive' : 'delivery efficiency improved'}`
+        : `Auction pricing stable at ₹${yd.cpm.toFixed(0)} CPM`,
+    },
+    {
+      id: 'convRate', label: 'On-Site Conversion Rate',
+      delta: convDelta, impact: null,
+      yd: yd.convRate, db: db.convRate, format: 'pct2',
+      direction: convDelta > 5 ? 'up' : convDelta < -5 ? 'down' : 'flat',
+      positive: convDelta > 0 ? orderDelta >= 0 : orderDelta <= 0,
+      detail: Math.abs(convDelta) > 10
+        ? `Click→Purchase rate ${convDelta > 0 ? 'improved' : 'dropped'} ${Math.abs(convDelta).toFixed(1)}% → ${convDelta > 0 ? 'landing page / offer converting better' : 'check landing page, UX, or stock issues'}`
+        : `Conversion rate stable at ${yd.convRate.toFixed(2)}%`,
+    },
+    {
+      id: 'frequency', label: 'Audience Frequency',
+      delta: -freqDelta, impact: null,
+      yd: yd.frequency, db: db.frequency, format: 'decimal',
+      direction: freqDelta < -5 ? 'up' : freqDelta > 5 ? 'down' : 'flat',
+      positive: freqDelta < 0 ? orderDelta >= 0 : orderDelta <= 0,
+      detail: yd.frequency > 3.5
+        ? `High frequency (${yd.frequency.toFixed(2)}x) — audience saturated, likely hurting CTR and conversion`
+        : Math.abs(freqDelta) > 15
+        ? `Frequency ${freqDelta > 0 ? 'increased' : 'decreased'} ${Math.abs(freqDelta).toFixed(1)}%`
+        : `Frequency healthy at ${yd.frequency.toFixed(2)}x`,
+    },
+  ].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+
+  const primaryFactor = factors[0];
+  const pf = primaryFactor.id;
+
+  const primaryReason = direction === 'up'
+    ? pf === 'spend'      ? `Orders up because spend increased ${Math.abs(spendDelta).toFixed(1)}% — more budget drove more reach`
+    : pf === 'efficiency' ? `Orders up because ROAS improved ${db.roas.toFixed(2)}x → ${yd.roas.toFixed(2)}x — same budget, better results`
+    : pf === 'convRate'   ? `Orders up because on-site conversion rate improved — landing page or offer performing better`
+    : pf === 'ctr'        ? `Orders up because creative CTR improved — ads resonating more`
+    : pf === 'cpm'        ? `Orders up because delivery costs dropped — more impressions for same budget`
+    : `Orders up — ${primaryFactor.label} shifted most`
+    : direction === 'down'
+    ? pf === 'spend'      ? `Orders down because spend dropped ${Math.abs(spendDelta).toFixed(1)}% — less budget = less reach`
+    : pf === 'efficiency' ? `Orders down because ROAS dropped ${db.roas.toFixed(2)}x → ${yd.roas.toFixed(2)}x — same budget, worse results`
+    : pf === 'convRate'   ? `Orders down because on-site conversion rate fell — check landing pages, inventory, or checkout`
+    : pf === 'ctr'        ? `Orders down because creative CTR fell — ad fatigue or wrong audience`
+    : pf === 'cpm'        ? `Orders down because CPM spiked — delivery is more expensive, fewer impressions`
+    : `Orders down — ${primaryFactor.label} shifted most`
+    : 'Orders flat — no significant change in any single factor';
+
+  // Ad-level drivers
+  const adDrivers = [];
+  const dbAdIndex = {};
+  (dbRows || []).forEach(r => { dbAdIndex[r.adId] = r; });
+  const ydAdIndex = {};
+  (ydRows || []).forEach(r => { ydAdIndex[r.adId] = r; });
+
+  (ydRows || []).forEach(r => {
+    const prev   = dbAdIndex[r.adId];
+    const spYd   = safeNum(r.spend);
+    const puYd   = safeNum(r.purchases);
+    const roasYd = safeNum(r.metaRoas);
+
+    if (!prev) {
+      if (spYd > 50 || puYd > 0) {
+        adDrivers.push({
+          adId: r.adId, adName: r.adName, type: 'new', label: 'New / Reactivated',
+          spendYd: spYd, spendDb: 0, purchYd: puYd, purchDb: 0, roasYd, roasDb: 0,
+          impact: puYd, cprYd: safeNum(r.metaCpr), cprDb: 0,
+        });
+      }
+      return;
+    }
+
+    const spDb  = safeNum(prev.spend);
+    const puDb  = safeNum(prev.purchases);
+    const roasDb = safeNum(prev.metaRoas);
+    const puDelta = puYd - puDb;
+    const roasDeltaAbs = Math.abs(roasYd - roasDb);
+    const spDeltaAbs = Math.abs(spYd - spDb);
+
+    if (Math.abs(puDelta) >= 0.5 || roasDeltaAbs >= 0.5 || spDeltaAbs >= 100) {
+      const type = spYd < 20 && spDb > 150 ? 'stopped'
+        : spYd > 150 && spDb < 20 ? 'started'
+        : roasDeltaAbs > roasDb * 0.25 ? 'efficiency'
+        : 'changed';
+      adDrivers.push({
+        adId: r.adId, adName: r.adName, type, label: type === 'stopped' ? 'Paused/Stopped' : type === 'started' ? 'Ramped Up' : type === 'efficiency' ? 'Efficiency Shift' : 'Changed',
+        spendYd: spYd, spendDb: spDb, purchYd: puYd, purchDb: puDb, roasYd, roasDb,
+        impact: puDelta, cprYd: safeNum(r.metaCpr), cprDb: safeNum(prev.metaCpr),
+      });
+    }
+  });
+
+  // Ads that were in db but disappeared in yd
+  (dbRows || []).forEach(r => {
+    if (!ydAdIndex[r.adId] && safeNum(r.spend) > 150) {
+      adDrivers.push({
+        adId: r.adId, adName: r.adName, type: 'stopped', label: 'Paused/Stopped',
+        spendYd: 0, spendDb: safeNum(r.spend), purchYd: 0, purchDb: safeNum(r.purchases),
+        roasYd: 0, roasDb: safeNum(r.metaRoas), impact: -safeNum(r.purchases),
+        cprYd: 0, cprDb: safeNum(r.metaCpr),
+      });
+    }
+  });
+
+  adDrivers.sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact));
+
+  // Shopify confirmation
+  let shopify = null;
+  if (shopifyOrders?.length && dates) {
+    const pick = (dateStr) => {
+      const orders = shopifyOrders.filter(o => (o.created_at || o.createdAt || '').slice(0, 10) === dateStr);
+      return { orders: orders.length, revenue: orders.reduce((s, o) => s + safeNum(o.total_price || o.totalPrice || 0), 0) };
+    };
+    shopify = { yd: pick(dates.yd), db: pick(dates.db) };
+  }
+
+  // Funnel breakdown
+  const funnelDeltas = [
+    { stage: 'Impressions',         yd: yd.impressions,    db: db.impressions,    format: 'number' },
+    { stage: 'Outbound Clicks',     yd: yd.outboundClicks, db: db.outboundClicks, format: 'number' },
+    { stage: 'Landing Page Views',  yd: yd.lpv,            db: db.lpv,            format: 'number' },
+    { stage: 'Add to Carts',        yd: yd.atc,            db: db.atc,            format: 'number' },
+    { stage: 'Initiated Checkouts', yd: yd.ic,             db: db.ic,             format: 'number' },
+    { stage: 'Purchases (Meta)',     yd: yd.purchases,      db: db.purchases,      format: 'number' },
+  ].map(s => ({ ...s, delta: pctDelta(s.yd, s.db), change: s.yd - s.db }));
+
+  // Day context
+  const ydDate = dates?.yd ? new Date(dates.yd + 'T12:00:00') : new Date();
+  const dayOfWeek = ydDate.getDay();
+  const dayName = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][dayOfWeek];
+  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+
+  // Recommendations
+  const recs = [];
+  if (direction === 'down') {
+    if (pf === 'convRate' && convDelta < -15) recs.push({ priority: 'critical', action: 'Check site / checkout immediately', detail: 'On-site conversion rate dropped sharply — look for broken pages, payment failures, out-of-stock items, or checkout bugs' });
+    if (pf === 'cpm' && cpmDelta > 20)        recs.push({ priority: 'high', action: 'Adjust bidding strategy', detail: 'CPM spiked — try cost caps, reduce budget temporarily, or switch to less competitive audiences' });
+    if (pf === 'ctr' && ctrDelta < -20)       recs.push({ priority: 'high', action: 'Refresh creatives now', detail: 'CTR dropped sharply — launch 2-3 new creative variants immediately' });
+    if (yd.frequency > 3.5)                    recs.push({ priority: 'medium', action: 'Expand audiences', detail: `Frequency at ${yd.frequency.toFixed(1)}x — add lookalikes, broad targeting, or new interest groups` });
+    if (pf === 'spend' && spendDelta < -20)    recs.push({ priority: 'medium', action: 'Review budget pacing', detail: 'Spend dropped significantly — check for budget caps, campaign end dates, or policy holds' });
+  } else if (direction === 'up') {
+    if (pf === 'efficiency' && roasDelta > 20) recs.push({ priority: 'high', action: 'Scale top performers', detail: `ROAS jumped to ${yd.roas.toFixed(2)}x — identify which ads are driving this and increase their budgets 20-30%` });
+    if (pf === 'spend' && spendDelta > 30 && yd.roas >= 3) recs.push({ priority: 'medium', action: 'Monitor efficiency as you scale', detail: `Good ROAS (${yd.roas.toFixed(2)}x) with increased spend. Watch for CPM creep and frequency build over next 3-5 days` });
+    if (yd.cpr < db.cpr * 0.85)               recs.push({ priority: 'medium', action: 'Document what changed', detail: 'CPR improved significantly — identify the creative, audience, or structure shift and replicate it' });
+  }
+  if (isWeekend) recs.push({ priority: 'info', action: `${dayName} context`, detail: "Weekend purchase patterns differ — don't make large budget changes based on a single weekend day's data" });
+
+  return {
+    dates: { yd: dates?.yd, db: dates?.db },
+    dayName, isWeekend,
+    yd, db,
+    meta: { ydAds: ydRows?.length || 0, dbAds: dbRows?.length || 0 },
+    orderDelta, orderDeltaPct, direction,
+    primaryReason, primaryFactor: pf,
+    factors,
+    decomposition: {
+      spendContrib:      Math.round(spendContrib * 10) / 10,
+      efficiencyContrib: Math.round(efficiencyContrib * 10) / 10,
+      total:             Math.round(totalContrib * 10) / 10,
+      unexplained:       Math.round((orderDelta - totalContrib) * 10) / 10,
+    },
+    funnelDeltas,
+    adDrivers: adDrivers.slice(0, 25),
+    shopify,
+    recommendations: recs,
+  };
+}
+
 /* ─── ALERT GENERATION ──────────────────────────────────────────── */
 // Generates prioritized alerts for the Overview dashboard
 
