@@ -202,17 +202,47 @@ function BrandCard({ brand, brandInfo }) {
   const handlePullAll = async () => {
     setPullingAll(true);
     appendLog(`━━━ ${brand.name} — Pull All ━━━`);
+    appendLog(`[${brand.name}] Meta: ${hasToken && hasAccts ? `✓ ${brand.meta.accounts.filter(a=>a.key&&a.id).length} account(s)` : '✗ not configured'}`);
+    appendLog(`[${brand.name}] Shopify: ${hasShopify ? `✓ ${brand.shopify.shop}` : '✗ not configured'}`);
+    appendLog(`[${brand.name}] GA4: ${hasGa ? `✓ property ${brand.ga?.propertyId}` : '✗ not configured'}`);
+
+    let metaOk = false;
     if (hasToken && hasAccts) {
-      try { await doPullMeta(); } catch (e) { setBrandMetaStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Meta: ${e.message}`); }
+      try {
+        await doPullMeta();
+        metaOk = true;
+      } catch (e) {
+        const msg = e.message || e.toString() || 'Unknown error';
+        setBrandMetaStatus(brand.id, 'error', msg);
+        appendLog(`[${brand.name}] ❌ Meta: ${msg}`);
+      }
+    } else {
+      appendLog(`[${brand.name}] Meta: skipped`);
     }
+
     if (hasShopify) {
-      try { await doPullInventory(); } catch (e) { setBrandInventoryStatus(brand.id, 'error'); appendLog(`[${brand.name}] ❌ Inventory: ${e.message}`); }
-      try { await doPullOrders(); } catch (e) { setBrandOrdersStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Orders: ${e.message}`); }
+      await Promise.all([
+        doPullInventory().catch(e => {
+          setBrandInventoryStatus(brand.id, 'error');
+          appendLog(`[${brand.name}] ❌ Inventory: ${e.message || e.toString()}`);
+        }),
+        doPullOrders().catch(e => {
+          setBrandOrdersStatus(brand.id, 'error', e.message);
+          appendLog(`[${brand.name}] ❌ Orders: ${e.message || e.toString()}`);
+        }),
+      ]);
+    } else {
+      appendLog(`[${brand.name}] Shopify: skipped`);
     }
+
     if (hasGa) {
-      try { await doPullGa(); } catch (e) { setBrandGaStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ GA: ${e.message}`); }
+      try { await doPullGa(); }
+      catch (e) { setBrandGaStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ GA4: ${e.message || e.toString()}`); }
+    } else {
+      appendLog(`[${brand.name}] GA4: skipped`);
     }
-    appendLog(`[${brand.name}] 🎉 Pull All complete`);
+
+    appendLog(`[${brand.name}] ✅ Pull All complete`);
     setPullingAll(false);
   };
 
@@ -545,127 +575,180 @@ export default function Setup() {
     e.target.value = '';
   };
 
-  /* ── Pull Everything (all brands — parallel per-brand tasks) ──── */
+  /* ── Pull Everything — pre-flight check then sequential brands ── */
   const handlePullEverything = async () => {
     setMegaFetching(true);
     clearLog();
     setActiveTab('log');
 
-    // Pull all brands in parallel — each brand's tasks run in parallel too
-    await Promise.all(brands.map(async brand => {
+    // ── 1. Pre-flight: inspect config for every brand ──────────────
+    appendLog('PRE-FLIGHT CHECK');
+    appendLog('─────────────────────────────────────────');
+
+    const plans = brands.map(brand => {
       const accounts   = brand.meta.accounts.filter(a => a.key && a.id);
       const hasMeta    = !!brand.meta.token && accounts.length > 0;
       const hasShopify = !!(brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret);
       const hasGa      = !!(brand.ga?.propertyId && brand.ga?.serviceAccountJson);
+      const anything   = hasMeta || hasShopify || hasGa;
 
+      appendLog(`[${brand.name}]`);
+      if (!brand.meta.token)       appendLog(`  Meta     : ✗ no token`);
+      else if (!accounts.length)   appendLog(`  Meta     : ✗ token present but no accounts added`);
+      else                         appendLog(`  Meta     : ✓ ${accounts.length} account(s) — ${accounts.map(a => a.key).join(', ')}`);
+
+      if (!hasShopify)             appendLog(`  Shopify  : ✗ not configured`);
+      else                         appendLog(`  Shopify  : ✓ ${brand.shopify.shop}`);
+
+      if (!hasGa)                  appendLog(`  GA4      : ✗ not configured`);
+      else                         appendLog(`  GA4      : ✓ property ${brand.ga.propertyId}`);
+
+      if (!anything)               appendLog(`  → SKIPPING — nothing configured`);
+
+      return { brand, accounts, hasMeta, hasShopify, hasGa, anything };
+    });
+
+    const active = plans.filter(p => p.anything);
+    if (!active.length) {
+      appendLog('─────────────────────────────────────────');
+      appendLog('Nothing to fetch. Add credentials in Brands & Connections.');
+      setMegaFetching(false);
+      return;
+    }
+
+    appendLog('─────────────────────────────────────────');
+    appendLog(`Starting fetch for ${active.length} brand(s) — sequential order`);
+
+    // ── 2. Fetch brands ONE BY ONE so logs stay clean ─────────────
+    for (const { brand, accounts, hasMeta, hasShopify, hasGa } of active) {
+      appendLog('');
       appendLog(`━━━ ${brand.name} ━━━`);
       setMegaStep(`${brand.id}:meta`);
 
-      // Run Meta + Shopify + GA in parallel per brand
-      await Promise.all([
-        // ── Meta ────────────────────────────────────────────────
-        hasMeta ? (async () => {
-          appendLog(`[${brand.name}] Fetching Meta ads + insights (parallel)...`);
-          setBrandMetaStatus(brand.id, 'loading');
-          try {
-            // All accounts in parallel
-            const results = await Promise.all(accounts.map(acc =>
+      // ── Meta ─────────────────────────────────────────────────────
+      let metaOk = false;
+      if (hasMeta) {
+        appendLog(`[${brand.name}] Meta: pulling ${accounts.length} account(s) in parallel...`);
+        setBrandMetaStatus(brand.id, 'loading');
+        try {
+          const results = await Promise.all(
+            accounts.map(acc =>
               pullAccount(
                 { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
-                msg => appendLog(`[${brand.name}] ${msg}`),
+                msg => appendLog(`[${brand.name}]   ${msg}`),
               )
-            ));
-            const combined = { campaigns:[], adsets:[], ads:[], insightsToday:[], insights7d:[], insights14d:[], insights30d:[] };
-            results.forEach(r => {
-              combined.campaigns.push(...r.campaigns);
-              combined.adsets.push(...r.adsets);
-              combined.ads.push(...r.ads);
-              combined.insightsToday.push(...r.insightsToday);
-              combined.insights7d.push(...r.insights7d);
-              combined.insights14d.push(...r.insights14d);
-              combined.insights30d.push(...r.insights30d);
-            });
-            setBrandMetaData(brand.id, combined);
-            appendLog(`[${brand.name}] ✅ Meta done — ${combined.insights7d.length} ads`);
-          } catch (e) {
-            setBrandMetaStatus(brand.id, 'error', e.message);
-            appendLog(`[${brand.name}] ❌ Meta: ${e.message}`);
-          }
+            )
+          );
+          const combined = { campaigns:[], adsets:[], ads:[], insightsToday:[], insights7d:[], insights14d:[], insights30d:[] };
+          results.forEach(r => {
+            combined.campaigns.push(...r.campaigns);
+            combined.adsets.push(...r.adsets);
+            combined.ads.push(...r.ads);
+            combined.insightsToday.push(...r.insightsToday);
+            combined.insights7d.push(...r.insights7d);
+            combined.insights14d.push(...r.insights14d);
+            combined.insights30d.push(...r.insights30d);
+          });
+          setBrandMetaData(brand.id, combined);
+          appendLog(`[${brand.name}] ✅ Meta done — ${combined.insights7d.length} ads (7D)`);
+          metaOk = true;
+        } catch (e) {
+          const msg = e.message || e.toString() || 'Unknown error';
+          setBrandMetaStatus(brand.id, 'error', msg);
+          appendLog(`[${brand.name}] ❌ Meta failed: ${msg}`);
+        }
 
-          // Breakdowns after Meta (needs token)
-          appendLog(`[${brand.name}] Fetching 7D breakdowns...`);
+        // Breakdowns only if Meta succeeded
+        if (metaOk) {
+          appendLog(`[${brand.name}] Meta: fetching 7D breakdowns...`);
           setBreakdownStatus('loading');
           try {
             const bdResult = await pullAllBreakdowns(
               { ver: brand.meta.apiVersion, token: brand.meta.token, accounts, specs: BREAKDOWN_SPECS, window: '7D' },
-              msg => appendLog(`[${brand.name}] ${msg}`),
+              msg => appendLog(`[${brand.name}]   ${msg}`),
             );
             setBreakdownData(bdResult);
             appendLog(`[${brand.name}] ✅ Breakdowns done`);
           } catch (e) {
             setBreakdownStatus('error');
-            appendLog(`[${brand.name}] ❌ Breakdowns: ${e.message}`);
+            appendLog(`[${brand.name}] ⚠ Breakdowns: ${e.message || e.toString()}`);
           }
-        })() : Promise.resolve(appendLog(`[${brand.name}] ⚠️ Meta not configured — skipped`)),
+        }
+      } else {
+        appendLog(`[${brand.name}] Meta: skipped — ${!brand.meta.token ? 'no token' : 'no accounts configured'}`);
+      }
 
-        // ── Shopify inventory ─────────────────────────────────
-        hasShopify ? (async () => {
-          appendLog(`[${brand.name}] Fetching inventory...`);
-          setBrandInventoryStatus(brand.id, 'loading');
-          try {
-            const result = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
-            setBrandInventory(brand.id, result.map, result.locations, result.inventoryByLocation, result.skuToItemId);
-            appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(result.map).length} SKUs`);
-          } catch (e) {
-            setBrandInventoryStatus(brand.id, 'error');
-            appendLog(`[${brand.name}] ❌ Inventory: ${e.message}`);
-          }
-        })() : Promise.resolve(),
+      // ── Shopify: inventory + orders in parallel ───────────────────
+      if (hasShopify) {
+        const odLabel = globalOrdersDays === 'all' ? 'all time'
+          : globalOrdersDays === 'yesterday' ? 'yesterday'
+          : `last ${globalOrdersDays}d`;
+        appendLog(`[${brand.name}] Shopify: pulling inventory + orders (${odLabel}) in parallel...`);
 
-        // ── Shopify orders ────────────────────────────────────
-        hasShopify ? (async () => {
-          const odLabel = globalOrdersDays === 'all' ? 'all time'
-            : globalOrdersDays === 'yesterday' ? 'yesterday'
-            : `last ${globalOrdersDays}d`;
-          appendLog(`[${brand.name}] Fetching orders (${odLabel})...`);
-          setBrandOrdersStatus(brand.id, 'loading');
-          try {
-            const { since, until } = daysToRange(globalOrdersDays);
-            const { orders: fetched, count } = await fetchShopifyOrders(
-              brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
-              since, until, msg => appendLog(`[${brand.name}] ${msg}`),
-            );
-            setBrandOrders(brand.id, fetched, globalOrdersDays);
-            appendLog(`[${brand.name}] ✅ Orders — ${count} orders`);
-          } catch (e) {
-            setBrandOrdersStatus(brand.id, 'error', e.message);
-            appendLog(`[${brand.name}] ❌ Orders: ${e.message}`);
-          }
-        })() : Promise.resolve(appendLog(`[${brand.name}] ⚠️ Shopify not configured — skipped`)),
+        await Promise.all([
+          // Inventory
+          (async () => {
+            setBrandInventoryStatus(brand.id, 'loading');
+            try {
+              const result = await fetchShopifyInventory(
+                brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret
+              );
+              const invMap = result.inventoryMap || result.map || result;
+              setBrandInventory(brand.id, invMap, result.locations, result.inventoryByLocation, result.skuToItemId);
+              appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(invMap).length} SKUs`);
+            } catch (e) {
+              setBrandInventoryStatus(brand.id, 'error');
+              appendLog(`[${brand.name}] ❌ Inventory: ${e.message || e.toString()}`);
+            }
+          })(),
 
-        // ── Google Analytics ──────────────────────────────────
-        hasGa ? (async () => {
-          appendLog(`[${brand.name}] Fetching GA4 (${globalGaDays})...`);
-          setBrandGaStatus(brand.id, 'loading');
-          try {
-            const gaResult = await fetchGaData(
-              brand.ga.serviceAccountJson, brand.ga.propertyId,
-              { since: globalGaDays, until: 'today' },
-              msg => appendLog(`[${brand.name}] ${msg}`),
-            );
-            setBrandGaData(brand.id, gaResult);
-            appendLog(`[${brand.name}] ✅ GA — ${gaResult.dailyTrend?.length || 0}d`);
-          } catch (e) {
-            setBrandGaStatus(brand.id, 'error', e.message);
-            appendLog(`[${brand.name}] ❌ GA: ${e.message}`);
-          }
-        })() : Promise.resolve(appendLog(`[${brand.name}] ⚠️ GA not configured — skipped`)),
-      ]);
+          // Orders
+          (async () => {
+            setBrandOrdersStatus(brand.id, 'loading');
+            try {
+              const { since, until } = daysToRange(globalOrdersDays);
+              const { orders: fetched, count } = await fetchShopifyOrders(
+                brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
+                since, until, msg => appendLog(`[${brand.name}]   ${msg}`),
+              );
+              setBrandOrders(brand.id, fetched, globalOrdersDays);
+              appendLog(`[${brand.name}] ✅ Orders — ${count} fetched`);
+            } catch (e) {
+              setBrandOrdersStatus(brand.id, 'error', e.message);
+              appendLog(`[${brand.name}] ❌ Orders: ${e.message || e.toString()}`);
+            }
+          })(),
+        ]);
+      } else {
+        appendLog(`[${brand.name}] Shopify: skipped — not configured`);
+      }
 
-      appendLog(`[${brand.name}] 🎉 All done`);
-    }));
+      // ── GA4 ───────────────────────────────────────────────────────
+      if (hasGa) {
+        appendLog(`[${brand.name}] GA4: pulling ${globalGaDays}...`);
+        setBrandGaStatus(brand.id, 'loading');
+        try {
+          const gaResult = await fetchGaData(
+            brand.ga.serviceAccountJson, brand.ga.propertyId,
+            { since: globalGaDays, until: 'today' },
+            msg => appendLog(`[${brand.name}]   ${msg}`),
+          );
+          setBrandGaData(brand.id, gaResult);
+          appendLog(`[${brand.name}] ✅ GA4 — ${gaResult.dailyTrend?.length || 0} days`);
+        } catch (e) {
+          setBrandGaStatus(brand.id, 'error', e.message);
+          appendLog(`[${brand.name}] ❌ GA4: ${e.message || e.toString()}`);
+        }
+      } else {
+        appendLog(`[${brand.name}] GA4: skipped — not configured`);
+      }
 
-    appendLog('✅ Pull Everything complete — all brands!');
+      appendLog(`[${brand.name}] ✅ Done`);
+    }
+
+    appendLog('');
+    appendLog('─────────────────────────────────────────');
+    appendLog(`✅ All ${active.length} brand(s) fetched`);
     setMegaStep('');
     setMegaFetching(false);
   };
