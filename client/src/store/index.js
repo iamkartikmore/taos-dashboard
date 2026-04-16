@@ -294,6 +294,17 @@ export const useStore = create((set, get) => {
     shopifyOrders: [],
     customerCache: customerCache,
 
+    // Inactive ads: separate 90-day insights pulled on demand from InactiveAds page
+    // Structure: { [brandId]: normalizedInsightRow[] }
+    inactiveInsights: {},
+    inactiveInsightsStatus: 'idle',  // 'idle' | 'loading' | 'success' | 'error'
+    inactiveInsightsLastAt: null,
+    setInactiveInsights: (brandId, rows) => {
+      const inactiveInsights = { ...get().inactiveInsights, [brandId]: rows };
+      set({ inactiveInsights, inactiveInsightsStatus: 'success', inactiveInsightsLastAt: Date.now() });
+    },
+    setInactiveInsightsStatus: status => set({ inactiveInsightsStatus: status }),
+
     rebuildEnriched: () => _rebuild(),
 
     /* ── Fetch log (shared across all pulls) ─────────────────────── */
