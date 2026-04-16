@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import { safeNum, fmt, normalizeInsight } from '../lib/analytics';
-import { fetchInsights } from '../lib/api';
+import { fetchInsightsCustom } from '../lib/api';
 
 /* ─── STATUS META ────────────────────────────────────────────────── */
 
@@ -198,9 +198,9 @@ function ReactivationCard({ r }) {
                 <div className="mt-3 p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
                   <div className="text-[11px] text-emerald-400 font-medium">Est. monthly revenue if relaunched at same ROAS</div>
                   <div className="text-[14px] font-bold text-emerald-400 mt-0.5">
-                    {fmt.currency((safeNum(r.spend) / 90 * 30) * safeNum(r.metaRoas))}
+                    {fmt.currency((safeNum(r.spend) / 365 * 30) * safeNum(r.metaRoas))}
                   </div>
-                  <div className="text-[10px] text-slate-500">Based on {fmt.currency(safeNum(r.spend) / 90 * 30)}/mo spend at {fmt.roas(r.metaRoas)}</div>
+                  <div className="text-[10px] text-slate-500">Based on {fmt.currency(safeNum(r.spend) / 365 * 30)}/mo spend at {fmt.roas(r.metaRoas)}</div>
                 </div>
               )}
             </div>
@@ -247,6 +247,9 @@ export default function InactiveAds() {
 
     try {
       const activeBrands = brands.filter(b => activeBrandIds.includes(b.id));
+      const until = new Date().toISOString().slice(0, 10);
+      const since = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
+
       for (const brand of activeBrands) {
         if (!brand.meta?.token || !brand.meta?.accounts?.length) {
           log(`[${brand.name}] skip — no Meta config`);
@@ -258,12 +261,12 @@ export default function InactiveAds() {
 
         for (const acc of brand.meta.accounts) {
           if (!acc.id || !acc.key) continue;
-          log(`[${brand.name}] ${acc.key} → fetching last 90 days...`);
+          log(`[${brand.name}] ${acc.key} → fetching 365 days (${since} → ${until}), chunked into 90-day windows...`);
           try {
-            const raw = await fetchInsights(ver, token, acc.id, 'last_90d', msg => log(`  ${msg}`));
-            const normalized = raw.map(r => normalizeInsight(r, acc.key, '90D'));
+            const raw = await fetchInsightsCustom(ver, token, acc.id, since, until, msg => log(`  ${msg}`));
+            const normalized = raw.map(r => normalizeInsight(r, acc.key, '365D'));
             rows.push(...normalized);
-            log(`[${brand.name}] ${acc.key} ✓ ${normalized.length} rows (includes paused ads)`);
+            log(`[${brand.name}] ${acc.key} ✓ ${normalized.length} rows`);
           } catch (e) {
             log(`[${brand.name}] ${acc.key} ✗ ${e.message || String(e)}`);
           }
@@ -370,7 +373,7 @@ export default function InactiveAds() {
   const avgFormerRoas     = withInsights.length
     ? withInsights.reduce((s, r) => s + safeNum(r.metaRoas), 0) / withInsights.length : 0;
   const revivalRevPotential = highPotential.reduce(
-    (s, r) => s + (safeNum(r.spend) / 90 * 30) * safeNum(r.metaRoas), 0
+    (s, r) => s + (safeNum(r.spend) / 365 * 30) * safeNum(r.metaRoas), 0
   );
 
   /* ── No Meta config guard ────────────────────────────────────────── */
@@ -429,7 +432,7 @@ export default function InactiveAds() {
             className="flex items-center gap-2 px-4 py-2 bg-brand-600 hover:bg-brand-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition-colors"
           >
             <RefreshCw size={14} className={pulling ? 'animate-spin' : ''} />
-            {pulling ? 'Pulling 90D data…' : has90d ? 'Re-pull 90D data' : 'Pull Full Account (90D)'}
+            {pulling ? 'Pulling 365D data…' : has90d ? 'Re-pull 365D data' : 'Pull Full Account (365D)'}
           </button>
           {has90d && (
             <div className="text-[10px] text-slate-500">
@@ -458,8 +461,8 @@ export default function InactiveAds() {
             <div className="text-sm font-semibold text-amber-400">Performance data not loaded yet</div>
             <div className="text-[12px] text-slate-400 mt-1">
               The ad list shows {inactiveRows.length} inactive ads from your account, but performance metrics
-              (ROAS, spend, purchases) require the <strong>Pull Full Account (90D)</strong> fetch above.
-              This fetches the last 90 days of insights including data from paused ads.
+              (ROAS, spend, purchases) require the <strong>Pull Full Account (365D)</strong> fetch above.
+              This fetches the last 365 days of insights (in 90-day chunks) including data from paused ads.
             </div>
           </div>
         </div>
@@ -595,7 +598,7 @@ export default function InactiveAds() {
                 <RefreshCw size={28} className="text-amber-400 mx-auto mb-3" />
                 <div className="text-sm font-semibold text-amber-400 mb-2">Pull 90D data to see revival candidates</div>
                 <div className="text-[12px] text-slate-500">
-                  Click "Pull Full Account (90D)" above to load performance data for all paused ads.
+                  Click "Pull Full Account (365D)" above to load performance data for all paused ads.
                   Revival candidates are paused ads with ROAS ≥3x and significant spend.
                 </div>
               </div>
@@ -675,7 +678,7 @@ export default function InactiveAds() {
             <div style={{ display: activeTab === 'nodata' ? undefined : 'none' }}>
               <div className="mb-3 flex items-center gap-2 text-[11px] text-slate-500">
                 <AlertTriangle size={12} className="text-slate-500" />
-                <span>{noData.length} inactive ads with no impressions in the last 90 days — these ran before the 90-day window.</span>
+                <span>{noData.length} inactive ads with no impressions in the last 365 days — these ran before the 1-year window or never had data.</span>
               </div>
               <div className="bg-gray-900 border border-gray-800/60 rounded-xl overflow-hidden">
                 <div className="overflow-x-auto">
