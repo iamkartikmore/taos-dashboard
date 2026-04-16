@@ -154,7 +154,75 @@ app.post('/api/shopify/inventory', async (req, res) => {
       if (sku && v.inventory_item_id) skuToItemId[sku] = String(v.inventory_item_id);
     }));
 
-    res.json({ products: allProducts, locations, inventoryByLocation, skuToItemId });
+    // Step 5: Fetch all collections (custom + smart) and their product memberships
+    let allCollections = [];
+    const productCollections = {}; // productId → [collectionTitle, ...]
+
+    try {
+      // Fetch custom collections
+      const customColls = [];
+      let ccUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/custom_collections.json?limit=250&fields=id,title,handle`;
+      while (ccUrl) {
+        const r = await withRetry(() => axios.get(ccUrl, { headers, timeout: 20000 }));
+        customColls.push(...(r.data.custom_collections || []));
+        const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
+        ccUrl = m ? m[1] : null;
+      }
+
+      // Fetch smart collections
+      const smartColls = [];
+      let scUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/smart_collections.json?limit=250&fields=id,title,handle`;
+      while (scUrl) {
+        const r = await withRetry(() => axios.get(scUrl, { headers, timeout: 20000 }));
+        smartColls.push(...(r.data.smart_collections || []));
+        const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
+        scUrl = m ? m[1] : null;
+      }
+
+      allCollections = [
+        ...customColls.map(c => ({ id: String(c.id), title: c.title, handle: c.handle, type: 'custom' })),
+        ...smartColls.map(c => ({ id: String(c.id), title: c.title, handle: c.handle, type: 'smart'  })),
+      ];
+
+      const collById = Object.fromEntries(allCollections.map(c => [c.id, c.title]));
+
+      // Fetch collects (custom collection → product memberships)
+      let collectsUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/collects.json?limit=250&fields=collection_id,product_id`;
+      while (collectsUrl) {
+        const r = await withRetry(() => axios.get(collectsUrl, { headers, timeout: 20000 }));
+        for (const c of (r.data.collects || [])) {
+          const pid   = String(c.product_id);
+          const title = collById[String(c.collection_id)];
+          if (!title) continue;
+          if (!productCollections[pid]) productCollections[pid] = [];
+          if (!productCollections[pid].includes(title)) productCollections[pid].push(title);
+        }
+        const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
+        collectsUrl = m ? m[1] : null;
+      }
+
+      // For smart collections: fetch products per smart collection (up to 50 collections max to stay fast)
+      const smartToCheck = smartColls.slice(0, 50);
+      await Promise.all(smartToCheck.map(async sc => {
+        try {
+          let spUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/collections/${sc.id}/products.json?limit=250&fields=id`;
+          while (spUrl) {
+            const r = await withRetry(() => axios.get(spUrl, { headers, timeout: 20000 }));
+            for (const p of (r.data.products || [])) {
+              const pid = String(p.id);
+              if (!productCollections[pid]) productCollections[pid] = [];
+              if (!productCollections[pid].includes(sc.title)) productCollections[pid].push(sc.title);
+            }
+            const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
+            spUrl = m ? m[1] : null;
+          }
+        } catch (_) {} // non-fatal — skip if individual smart collection fails
+      }));
+    } catch (collErr) {
+      console.warn('[inventory] collections fetch failed (non-fatal):', collErr.message);
+    }
+
+    res.json({ products: allProducts, locations, inventoryByLocation, skuToItemId, collections: allCollections, productCollections });
   } catch (err) {
     const status = err.response?.status || 500;
     res.status(status).json({ error: err.response?.data?.errors || err.message });

@@ -238,13 +238,14 @@ export const useStore = create((set, get) => {
       if (status !== 'loading') _rebuild({ brandData });
     },
 
-    setBrandInventory: (brandId, inventoryMap, locations, inventoryByLocation, skuToItemId) => {
+    setBrandInventory: (brandId, inventoryMap, locations, inventoryByLocation, skuToItemId, collections) => {
       const brandData = { ...get().brandData, [brandId]: {
         ...(get().brandData[brandId] || {}),
         inventoryMap, inventoryStatus: 'success',
-        locations: locations || [],
+        locations:           locations           || [],
         inventoryByLocation: inventoryByLocation || {},
-        skuToItemId: skuToItemId || {},
+        skuToItemId:         skuToItemId         || {},
+        collections:         collections         || [],
       }};
       const inv = lsGet(LS_INV, {}); inv[brandId] = inventoryMap; lsSet(LS_INV, inv);
       set({ brandData });

@@ -777,7 +777,7 @@ export function buildCollectionBreakdown(curOrders, priorOrders, inventoryMap = 
     for (const o of (orders || [])) {
       for (const li of (o.line_items || [])) {
         const sku = (li.sku || '').trim().toUpperCase();
-        const col = (sku && inventoryMap[sku]?.productType) || li.vendor || 'Uncategorized';
+        const col = (sku && (inventoryMap[sku]?.collectionLabel || inventoryMap[sku]?.productType)) || li.vendor || 'Uncategorized';
         const qty = parseInt(li.quantity) || 1;
         const rev = p(li.price) * qty;
         if (!m[col]) m[col] = { collection: col, units: 0, revenue: 0, orders: new Set(), oosSkus: new Set() };
@@ -803,10 +803,10 @@ export function buildCollectionBreakdown(curOrders, priorOrders, inventoryMap = 
     const unitDelta = pv.units > 0   ? (c.units - pv.units)     / pv.units * 100   : (c.units > 0   ? 100 : -100);
     // compute OOS skus for this collection right now
     const oosSkusNow = Object.entries(inventoryMap)
-      .filter(([, inv]) => (inv.productType || '') === col && inv.stock === 0)
+      .filter(([, inv]) => (inv.collectionLabel || inv.productType || '') === col && inv.stock === 0)
       .map(([sku]) => sku);
     const lowSkusNow = Object.entries(inventoryMap)
-      .filter(([, inv]) => (inv.productType || '') === col && inv.stock > 0 && inv.stock <= 5)
+      .filter(([, inv]) => (inv.collectionLabel || inv.productType || '') === col && inv.stock > 0 && inv.stock <= 5)
       .map(([sku]) => sku);
     return {
       collection: col,
@@ -911,7 +911,7 @@ export function buildAdStockoutImpact(adComp, manualMap = {}, inventoryMap = {})
   // Build collection → OOS/low SKUs map
   const colToOos = {};
   for (const [sku, inv] of Object.entries(inventoryMap)) {
-    const col = (inv.productType || '').toUpperCase();
+    const col = (inv.collectionLabel || inv.productType || '').toUpperCase();
     if (!col) continue;
     if (!colToOos[col]) colToOos[col] = { oos: [], low: [] };
     if (inv.stock === 0)                   colToOos[col].oos.push({ sku, title: inv.title });
@@ -931,7 +931,7 @@ export function buildAdStockoutImpact(adComp, manualMap = {}, inventoryMap = {})
 
     const oosCount = colData.oos.length;
     const lowCount = colData.low.length;
-    const totalInCol = Object.values(inventoryMap).filter(inv => (inv.productType||'').toUpperCase() === adCol).length;
+    const totalInCol = Object.values(inventoryMap).filter(inv => (inv.collectionLabel || inv.productType || '').toUpperCase() === adCol).length;
     const oosPct = totalInCol > 0 ? oosCount / totalInCol : 0;
     const wastedEst = safeNum(ad.cur.spend) * Math.min(oosPct * 1.5, 1);
 

@@ -146,7 +146,7 @@ function BrandCard({ brand, brandInfo }) {
   const doPullInventory = async () => {
     setBrandInventoryStatus(brand.id, 'loading');
     const result = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
-    setBrandInventory(brand.id, result.map, result.locations, result.inventoryByLocation, result.skuToItemId);
+    setBrandInventory(brand.id, result.map, result.locations, result.inventoryByLocation, result.skuToItemId, result.collections);
     appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(result.map).length} SKUs · ${result.locations.length} locations`);
   };
 
@@ -694,7 +694,7 @@ export default function Setup() {
                 brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret
               );
               const invMap = result.inventoryMap || result.map || result;
-              setBrandInventory(brand.id, invMap, result.locations, result.inventoryByLocation, result.skuToItemId);
+              setBrandInventory(brand.id, invMap, result.locations, result.inventoryByLocation, result.skuToItemId, result.collections);
               appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(invMap).length} SKUs`);
             } catch (e) {
               setBrandInventoryStatus(brand.id, 'error');

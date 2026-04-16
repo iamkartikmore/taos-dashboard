@@ -218,8 +218,16 @@ export async function fetchShopifyInventory(shop, clientId, clientSecret) {
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'Shopify inventory API error');
 
+  const productCollections = json.productCollections || {};  // { productId: [collectionTitle, ...] }
+
   const map = {};
   for (const p of json.products || []) {
+    const pid = String(p.id || '');
+    // Real Shopify collection names for this product (custom + smart)
+    const collections = productCollections[pid] || [];
+    // Primary collection label: first real collection, else product_type, else ''
+    const collectionLabel = collections[0] || p.product_type || '';
+
     for (const v of p.variants || []) {
       const sku = (v.sku || '').trim().toUpperCase();
       if (!sku) continue;
@@ -235,7 +243,10 @@ export async function fetchShopifyInventory(shop, clientId, clientSecret) {
           stock,
           price:           parseFloat(v.price) || 0,
           productType:     p.product_type || '',
+          collectionLabel,                              // primary collection name
+          collections,                                  // all collection names
           tags:            p.tags || '',
+          productId:       pid,
           inventoryItemId: String(v.inventory_item_id || ''),
         };
       }
@@ -247,6 +258,7 @@ export async function fetchShopifyInventory(shop, clientId, clientSecret) {
     locations:           json.locations           || [],
     inventoryByLocation: json.inventoryByLocation || {},
     skuToItemId:         json.skuToItemId         || {},
+    collections:         json.collections         || [],
   };
 }
 
