@@ -227,11 +227,36 @@ export default function OrderAnalysis() {
   const payData     = useMemo(() => buildPaymentComparison(curOrders, priorOrders), [curOrders, priorOrders]);
   const valueDist   = useMemo(() => buildOrderValueDistribution(curOrders, priorOrders), [curOrders, priorOrders]);
 
-  /* Meta data (7D) */
-  const rows7d  = useMemo(() => rawAccounts.flatMap(a => a.insights7d  || []), [rawAccounts]);
-  const rows14d = useMemo(() => rawAccounts.flatMap(a => a.insights14d || []), [rawAccounts]);
-  const metaCur = useMemo(() => aggregateInsightRows(rows7d), [rows7d]);
-  const adComp  = useMemo(() => buildAdComparison(rows7d, rows14d), [rows7d, rows14d]);
+  /* Meta data — all windows */
+  const rowsToday = useMemo(() => rawAccounts.flatMap(a => a.insightsToday || []), [rawAccounts]);
+  const rows7d    = useMemo(() => rawAccounts.flatMap(a => a.insights7d    || []), [rawAccounts]);
+  const rows14d   = useMemo(() => rawAccounts.flatMap(a => a.insights14d   || []), [rawAccounts]);
+  const rows30d   = useMemo(() => rawAccounts.flatMap(a => a.insights30d   || []), [rawAccounts]);
+
+  /* Pick Meta window that best matches the selected period */
+  const { metaCurRows, metaTotalRows, metaWindowLabel } = useMemo(() => {
+    if (period === 'today' || period === 'yesterday') {
+      return { metaCurRows: rowsToday, metaTotalRows: rows7d, metaWindowLabel: 'Today vs Prior 7D' };
+    } else if (period === '7d') {
+      return { metaCurRows: rows7d, metaTotalRows: rows14d, metaWindowLabel: '7D vs Prior 7D' };
+    } else if (period === '14d') {
+      return { metaCurRows: rows14d, metaTotalRows: rows30d, metaWindowLabel: '14D vs Prior 16D' };
+    } else if (period === '30d') {
+      return { metaCurRows: rows30d, metaTotalRows: [], metaWindowLabel: '30D (no prior available)' };
+    } else {
+      // custom — pick window closest to range length
+      const dayCount = dates.curSince && dates.curUntil
+        ? Math.round((new Date(dates.curUntil) - new Date(dates.curSince)) / 86400000) + 1
+        : 7;
+      if (dayCount <= 1)  return { metaCurRows: rowsToday, metaTotalRows: rows7d,  metaWindowLabel: 'Today vs Prior 7D' };
+      if (dayCount <= 7)  return { metaCurRows: rows7d,    metaTotalRows: rows14d, metaWindowLabel: '7D vs Prior 7D' };
+      if (dayCount <= 14) return { metaCurRows: rows14d,   metaTotalRows: rows30d, metaWindowLabel: '14D vs Prior 16D' };
+      return              { metaCurRows: rows30d, metaTotalRows: [],      metaWindowLabel: '30D (no prior available)' };
+    }
+  }, [period, rowsToday, rows7d, rows14d, rows30d, dates]);
+
+  const metaCur   = useMemo(() => aggregateInsightRows(metaCurRows),   [metaCurRows]);
+  const adComp    = useMemo(() => buildAdComparison(metaCurRows, metaTotalRows), [metaCurRows, metaTotalRows]);
   const priorRows = useMemo(() => adComp.filter(a => a.prior?.spend > 0).map(a => a.prior), [adComp]);
   const metaPrior = useMemo(() => aggregateInsightRows(priorRows), [priorRows]);
 
@@ -400,7 +425,7 @@ export default function OrderAnalysis() {
       {/* Quick metrics vs Meta */}
       {rows7d.length > 0 && (
         <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
-          <div className="text-xs font-semibold text-slate-400 mb-3">Meta 7D vs Prior 7D</div>
+          <div className="text-xs font-semibold text-slate-400 mb-3">Meta {metaWindowLabel}</div>
           <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
             {[
               { label:'ROAS',     cur:metaCur.roas,     prior:metaPrior.roas,     fmt:fmtRoas },
