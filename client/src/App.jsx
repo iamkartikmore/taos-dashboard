@@ -1,4 +1,4 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
 
@@ -35,9 +35,42 @@ function PageFallback() {
   );
 }
 
+function PrefetchAllPages() {
+  useEffect(() => {
+    const t = setTimeout(() => {
+      import('./pages/Setup');
+      import('./pages/Overview');
+      import('./pages/DecisionQueue');
+      import('./pages/Boards');
+      import('./pages/Patterns');
+      import('./pages/Scorecard');
+      import('./pages/FlatData');
+      import('./pages/VideoInsights');
+      import('./pages/SkuInsights');
+      import('./pages/Breakdowns');
+      import('./pages/ShopifyOrders');
+      import('./pages/ShopifyInsights');
+      import('./pages/ShopifyOps');
+      import('./pages/GAInsights');
+      import('./pages/Procurement');
+      import('./pages/CreativeIntel');
+      import('./pages/Attribution');
+      import('./pages/Momentum');
+      import('./pages/InactiveAds');
+      import('./pages/DailyBriefing');
+      import('./pages/OrderAnalysis');
+      import('./pages/CollectionSpend');
+      import('./pages/AOVAnalysis');
+    }, 800);
+    return () => clearTimeout(t);
+  }, []);
+  return null;
+}
+
 export default function App() {
   return (
     <BrowserRouter>
+      <PrefetchAllPages />
       <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route element={<Layout />}>
