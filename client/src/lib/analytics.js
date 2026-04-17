@@ -56,6 +56,21 @@ const mapFromArray = arr => {
 const sumTypes = (map, types) =>
   (types || []).reduce((s, t) => s + safeNum(map[t]), 0);
 
+// For purchase count and revenue we take the FIRST non-zero match from the
+// priority list — summing all types causes 3-4× inflation when Meta returns
+// offsite_conversion.fb_pixel_purchase + purchase + omni_purchase for the
+// same event.
+const PURCHASE_TYPES = [
+  'onsite_web_purchase',
+  'offsite_conversion.fb_pixel_purchase',
+  'purchase',
+  'omni_purchase',
+];
+const bestType = map => {
+  for (const t of PURCHASE_TYPES) { const v = safeNum(map[t]); if (v > 0) return v; }
+  return 0;
+};
+
 const pickMetric = v => {
   if (!v) return 0;
   if (Array.isArray(v) && v.length)
@@ -85,14 +100,8 @@ export function normalizeInsight(o, accountKey, windowKey) {
   const impressions  = safeNum(o.impressions);
   const outboundClicks = pickMetric(o.outbound_clicks);
 
-  const purchases = sumTypes(actions, [
-    'offsite_conversion.fb_pixel_purchase', 'purchase',
-    'onsite_web_purchase', 'omni_purchase'
-  ]);
-  const revenue = sumTypes(actionValues, [
-    'offsite_conversion.fb_pixel_purchase', 'purchase',
-    'onsite_web_purchase', 'omni_purchase'
-  ]);
+  const purchases = bestType(actions);
+  const revenue   = bestType(actionValues);
   const cpr = [
     cpaMap['offsite_conversion.fb_pixel_purchase'],
     cpaMap['purchase'],

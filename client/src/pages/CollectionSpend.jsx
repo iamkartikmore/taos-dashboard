@@ -10,7 +10,7 @@
  *                     If not: shows a "not loaded" chip instead of 0.
  */
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   ChevronDown, ChevronRight, TrendingUp, Loader2, RefreshCw,
   AlertTriangle, Zap, Target, BarChart3, Flame, Info,
@@ -327,7 +327,7 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
       ...g, ctr, cpm, avgMetaRoas, avgMetaCpr, expectedSpend, pacing,
       campaigns, adsets, ads, highFatigueAds, activeAds, decisionDist,
     };
-  }).sort((a, b) => b.spend - a.spend);
+  }).filter(g => g.spend > 0).sort((a, b) => b.spend - a.spend);
 }
 
 /* ─── ATOMS ───────────────────────────────────────────────────────── */
@@ -791,7 +791,7 @@ export default function CollectionSpend() {
           if (!acc.id || !acc.key) continue;
           setLazyMsg(s => ({ ...s, [pid]: `Fetching ${acc.key}…` }));
           const raw = await fetchInsights(apiVersion, token, acc.id, meta.preset);
-          collected.push(...raw.map(r => normalizeInsight(r, acc.key, pid)));
+          collected.push(...raw.map(r => ({ ...normalizeInsight(r, acc.key, pid), _brandId: brand.id })));
         }
       }
       setLazyData(d => ({ ...d, [pid]: collected }));
@@ -803,11 +803,21 @@ export default function CollectionSpend() {
     }
   }, [brands, activeBrandIds]);
 
+  /* ── Clear lazy cache whenever the active brand set changes ── */
+  useEffect(() => {
+    setLazyData({});
+    setLazyStatus({});
+    setLazyMsg({});
+  }, [activeBrandIds]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* ── Period rows — use brandData directly (no rawAccounts, avoids ×N bug) ── */
   const periodMeta = PERIODS.find(p => p.id === period) || PERIODS[2];
   const periodRows = useMemo(() => {
     const active = (brands || []).filter(b => (activeBrandIds || []).includes(b.id));
-    if (periodMeta.lazy) return lazyData[period] || [];
+    if (periodMeta.lazy) {
+      const ids = new Set(activeBrandIds || []);
+      return (lazyData[period] || []).filter(r => !r._brandId || ids.has(r._brandId));
+    }
     if (period === '7d')  return active.flatMap(b => brandData[b.id]?.insights7d   || []);
     if (period === '14d') return active.flatMap(b => brandData[b.id]?.insights14d  || []);
     if (period === '30d') return active.flatMap(b => brandData[b.id]?.insights30d  || []);
