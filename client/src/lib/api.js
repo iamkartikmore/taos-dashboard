@@ -218,13 +218,11 @@ export async function fetchShopifyInventory(shop, clientId, clientSecret) {
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'Shopify inventory API error');
 
-  // Server now returns pre-built map — no client-side product processing needed
   return {
-    map:                 json.map                 || {},
-    locations:           json.locations           || [],
-    inventoryByLocation: json.inventoryByLocation || {},
-    skuToItemId:         json.skuToItemId         || {},
-    collections:         json.collections         || [],
+    map:         json.map         || {},
+    locations:   json.locations   || [],
+    skuToItemId: json.skuToItemId || {},
+    collections: json.collections || [],
   };
 }
 

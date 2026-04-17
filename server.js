@@ -133,9 +133,8 @@ app.post('/api/shopify/inventory', async (req, res) => {
       locations = (locResp.data.locations || []).filter(l => l.active);
     } catch (_) {}
 
-    // Step 3: Fetch inventory levels in batches of 50
+    // Step 3: Fetch inventory levels in batches of 50 — accumulate totals only
     const itemIds = Object.keys(variantMap);
-    const inventoryByLocation = {};
     if (itemIds.length > 0) {
       const batches = [];
       for (let i = 0; i < itemIds.length; i += 50) batches.push(itemIds.slice(i, i + 50));
@@ -149,12 +148,7 @@ app.post('/api/shopify/inventory', async (req, res) => {
             ));
             (lvlResp.data.inventory_levels || []).forEach(lvl => {
               const rec = variantMap[lvl.inventory_item_id];
-              if (rec) {
-                rec._totalStock += (lvl.available || 0);
-                const locId = String(lvl.location_id);
-                if (!inventoryByLocation[locId]) inventoryByLocation[locId] = {};
-                inventoryByLocation[locId][String(lvl.inventory_item_id)] = lvl.available || 0;
-              }
+              if (rec) rec._totalStock += (lvl.available || 0);
             });
           } catch (_) {}
         }));
@@ -204,22 +198,26 @@ app.post('/api/shopify/inventory', async (req, res) => {
         collectsUrl = m ? m[1] : null;
       }
 
+      // Batch smart-collection product lookups — 5 at a time to avoid memory spikes
       const smartToCheck = smartColls.slice(0, 50);
-      await Promise.all(smartToCheck.map(async sc => {
-        try {
-          let spUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/collections/${sc.id}/products.json?limit=250&fields=id`;
-          while (spUrl) {
-            const r = await withRetry(() => axios.get(spUrl, { headers, timeout: 20000 }));
-            for (const p of (r.data.products || [])) {
-              const pid = String(p.id);
-              if (!productCollections[pid]) productCollections[pid] = [];
-              if (!productCollections[pid].includes(sc.title)) productCollections[pid].push(sc.title);
+      const SC_BATCH = 5;
+      for (let i = 0; i < smartToCheck.length; i += SC_BATCH) {
+        await Promise.all(smartToCheck.slice(i, i + SC_BATCH).map(async sc => {
+          try {
+            let spUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/collections/${sc.id}/products.json?limit=250&fields=id`;
+            while (spUrl) {
+              const r = await withRetry(() => axios.get(spUrl, { headers, timeout: 20000 }));
+              for (const p of (r.data.products || [])) {
+                const pid = String(p.id);
+                if (!productCollections[pid]) productCollections[pid] = [];
+                if (!productCollections[pid].includes(sc.title)) productCollections[pid].push(sc.title);
+              }
+              const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
+              spUrl = m ? m[1] : null;
             }
-            const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
-            spUrl = m ? m[1] : null;
-          }
-        } catch (_) {}
-      }));
+          } catch (_) {}
+        }));
+      }
     } catch (collErr) {
       console.warn('[inventory] collections fetch failed (non-fatal):', collErr.message);
     }
@@ -249,7 +247,7 @@ app.post('/api/shopify/inventory', async (req, res) => {
       }
     }
 
-    res.json({ map, locations, inventoryByLocation, skuToItemId, collections: allCollections });
+    res.json({ map, locations, skuToItemId, collections: allCollections });
   } catch (err) {
     const status = err.response?.status || 500;
     res.status(status).json({ error: err.response?.data?.errors || err.message });
@@ -290,7 +288,7 @@ app.post('/api/shopify/orders', async (req, res) => {
       pageCount++;
       const m = (resp.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
       url = m ? m[1] : null;
-      if (url) await new Promise(r => setTimeout(r, 100)); // reduced from 350ms
+      if (url) await new Promise(r => setTimeout(r, 300));
     }
 
     res.json({ orders: allOrders, count: allOrders.length, pages: pageCount, fetchMs: Date.now() - startMs });
@@ -371,7 +369,7 @@ app.post('/api/shopify/orders/stream', async (req, res) => {
 
       const m = (resp.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
       url = m ? m[1] : null;
-      if (url) await new Promise(r => setTimeout(r, 100)); // reduced from 350ms
+      if (url) await new Promise(r => setTimeout(r, 300));
     }
 
     emit({ type: 'done', count: totalOrders, pages: page, fetchMs: Date.now() - startMs });

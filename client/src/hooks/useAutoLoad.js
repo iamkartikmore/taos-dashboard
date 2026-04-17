@@ -71,9 +71,9 @@ export function useAutoLoad() {
       const { shop, clientId, clientSecret } = brand.shopify || {};
       if (shop && clientId && clientSecret) {
         try {
-          const { map: inventoryMap, locations, inventoryByLocation, skuToItemId, collections } =
+          const { map: inventoryMap, locations, skuToItemId, collections } =
             await fetchShopifyInventory(shop, clientId, clientSecret);
-          setBrandInventory(brand.id, inventoryMap, locations, inventoryByLocation, skuToItemId, collections);
+          setBrandInventory(brand.id, inventoryMap, locations, null, skuToItemId, collections);
         } catch (e) {
           console.warn('[AutoLoad] Shopify inventory failed:', e.message);
         }

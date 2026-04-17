@@ -237,9 +237,8 @@ export default function ShopifyOrders() {
   const activeBrandData = viewBrandId === 'all'
     ? {}
     : (brandData?.[viewBrandId] || {});
-  const locations           = activeBrandData.locations           || [];
-  const inventoryByLocation = activeBrandData.inventoryByLocation || {};
-  const skuToItemId         = activeBrandData.skuToItemId         || {};
+  const locations   = activeBrandData.locations   || [];
+  const skuToItemId = activeBrandData.skuToItemId || {};
 
   const [win, setWin]             = useState(shopifyOrdersWindow || '7d');
   const [customSince, setCSince]  = useState('');
