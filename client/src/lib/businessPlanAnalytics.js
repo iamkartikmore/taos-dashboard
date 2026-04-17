@@ -141,18 +141,25 @@ export function detectGrowthStage(avgOrdersPerDay) {
   return STAGES.find(s => v >= s.min && v < s.max) || STAGES[0];
 }
 
-/* ─── DEFAULT PLAN (seeded from Dawbu Business Plan Excel) ─────────── */
+/* ─── DEFAULT PLAN ───────────────────────────────────────────────────── */
 export const DEFAULT_PLAN = {
   brandName: 'Dawbu',
-  aov: 350,
-  cpr: 70,
-  avgBudgetPerCampaign: 620,
+
+  /* ── 5 core inputs — everything else derives from these ── */
+  baseOrdersPerDay:  350,
+  monthlyGrowthRate: 0.20,
+  targetCpr:   70,
+  targetRoas:  4.5,
+  aov:         350,
+
+  /* ── unit economics ── */
+  avgBudgetPerCampaign:    620,
   avgCreativesPerCampaign: 1.0,
   inventoryCostPct: 0.30,
   grossMarginPct:   0.60,
   opsCostPct:       0.05,
 
-  /* collections array — generic, editable, drives marketing + revenue calcs */
+  /* ── collections: drives budget split, ROAS targets, procurement ── */
   collections: [
     { key: 'buildingBlock',   label: 'Building Block',   alloc: 0.49, roas: 4.20,  cpr: 124, color: '#818cf8' },
     { key: 'miniature',       label: 'Miniature',        alloc: 0.31, roas: 4.07,  cpr: 82,  color: '#22c55e' },
@@ -160,34 +167,30 @@ export const DEFAULT_PLAN = {
     { key: 'other',           label: 'Other',            alloc: 0.13, roas: 6.18,  cpr: 89,  color: '#64748b' },
   ],
 
-  months: [
-    { key: '2026-04', label: 'Apr 2026', ordersPerDay:  350, aov: 350, adBudgetPerDay:  24500 },
-    { key: '2026-05', label: 'May 2026', ordersPerDay:  420, aov: 350, adBudgetPerDay:  29400 },
-    { key: '2026-06', label: 'Jun 2026', ordersPerDay:  504, aov: 350, adBudgetPerDay:  35280 },
-    { key: '2026-07', label: 'Jul 2026', ordersPerDay:  605, aov: 350, adBudgetPerDay:  42336 },
-    { key: '2026-08', label: 'Aug 2026', ordersPerDay:  726, aov: 350, adBudgetPerDay:  50803 },
-    { key: '2026-09', label: 'Sep 2026', ordersPerDay:  871, aov: 350, adBudgetPerDay:  60964 },
-    { key: '2026-10', label: 'Oct 2026', ordersPerDay: 1045, aov: 350, adBudgetPerDay:  73157 },
-    { key: '2026-11', label: 'Nov 2026', ordersPerDay: 1254, aov: 350, adBudgetPerDay:  87788 },
-    { key: '2026-12', label: 'Dec 2026', ordersPerDay: 1505, aov: 350, adBudgetPerDay: 105346 },
-    { key: '2027-01', label: 'Jan 2027', ordersPerDay: 1806, aov: 350, adBudgetPerDay: 126415 },
+  /* ── SKU dimensions: drives warehouse space calculation ── */
+  skuDimensions: [
+    { key: 'buildingBlock',   label: 'Building Block',   lengthCm: 30, widthCm: 20, heightCm: 15, unitsPerOrder: 1.2, bufferDays: 75 },
+    { key: 'miniature',       label: 'Miniature',        lengthCm: 20, widthCm: 15, heightCm: 10, unitsPerOrder: 1.0, bufferDays: 75 },
+    { key: 'diamondPainting', label: 'Diamond Painting', lengthCm: 25, widthCm: 20, heightCm:  5, unitsPerOrder: 1.0, bufferDays: 45 },
+    { key: 'other',           label: 'Other',            lengthCm: 15, widthCm: 10, heightCm:  5, unitsPerOrder: 1.5, bufferDays: 30 },
   ],
 
+  /* ── warehouses: sqMeters × height × utilization = usable m³ ── */
   warehouses: [
-    { id: 'wh1', name: 'Pune WH1',  location: 'Pune',   capacity: 50000, active: true,  notes: 'Primary — Building Block + Miniature', skuCategories: 'Building Block, Miniature' },
-    { id: 'wh2', name: 'Pune WH2',  location: 'Pune',   capacity: 20000, active: false, notes: 'Expansion — activate at Growth stage',   skuCategories: 'All Categories' },
-    { id: 'wh3', name: 'Mumbai WH', location: 'Mumbai', capacity: 15000, active: false, notes: 'West hub — activate at Accelerate stage', skuCategories: 'All Categories' },
+    { id: 'wh1', name: 'Pune WH1',  location: 'Pune',   sqMeters: 500, heightMeters: 3.5, utilizationPct: 0.70, active: true,  notes: 'Primary — BB + Mini' },
+    { id: 'wh2', name: 'Pune WH2',  location: 'Pune',   sqMeters: 300, heightMeters: 3.5, utilizationPct: 0.70, active: false, notes: 'Activate at Growth stage' },
+    { id: 'wh3', name: 'Mumbai WH', location: 'Mumbai', sqMeters: 400, heightMeters: 4.0, utilizationPct: 0.70, active: false, notes: 'West hub — Accelerate stage' },
   ],
 
+  /* ── suppliers: collectionKey links to collections array ── */
   suppliers: [
-    { id: 'sup1', name: 'China Import BB',   category: 'Building Block',   leadTimeDays: 45, paymentTerms: 'Advance', moqUnits: 500, notes: 'Sea freight 40–45 days' },
-    { id: 'sup2', name: 'China Import Mini', category: 'Miniature',        leadTimeDays: 45, paymentTerms: 'Advance', moqUnits: 300, notes: 'Sea freight 40–45 days' },
-    { id: 'sup3', name: 'China Import DP',   category: 'Diamond Painting', leadTimeDays: 30, paymentTerms: 'Advance', moqUnits: 200, notes: 'Air freight when needed' },
-    { id: 'sup4', name: 'Local Accessories', category: 'Other',            leadTimeDays: 7,  paymentTerms: 'Net-7',   moqUnits: 50,  notes: 'Local add-ons & accessories' },
+    { id: 'sup1', name: 'China Import BB',   category: 'Building Block',   collectionKey: 'buildingBlock',   leadTimeDays: 45, paymentTerms: 'Advance', moqUnits: 500, notes: 'Sea freight 40–45 days' },
+    { id: 'sup2', name: 'China Import Mini', category: 'Miniature',        collectionKey: 'miniature',       leadTimeDays: 45, paymentTerms: 'Advance', moqUnits: 300, notes: 'Sea freight 40–45 days' },
+    { id: 'sup3', name: 'China Import DP',   category: 'Diamond Painting', collectionKey: 'diamondPainting', leadTimeDays: 30, paymentTerms: 'Advance', moqUnits: 200, notes: 'Air freight when urgent' },
+    { id: 'sup4', name: 'Local Accessories', category: 'Other',            collectionKey: 'other',           leadTimeDays: 7,  paymentTerms: 'Net-7',   moqUnits: 50,  notes: 'Local add-ons' },
   ],
 
   notes: '',
-  manualOverrides: {},
 };
 
 /* Helper: get collectionAlloc-style object from plan.collections array */
@@ -854,9 +857,10 @@ export function buildStageRoadmap(avgOrdersPerDay, plan, pva, enrichedRows) {
   const blendedRoas     = validRoas.length ? validRoas.reduce((s, r) => s + r.roas7d, 0) / validRoas.length : 0;
   const validCpr        = (enrichedRows || []).filter(r => (r.cpr7d || 0) > 0);
   const avgCpr          = validCpr.length ? validCpr.reduce((s, r) => s + r.cpr7d, 0) / validCpr.length : 0;
-  const currentBudget   = plan.months.find(m => {
-    const n = new Date(); return m.key === MONTH_KEY(n);
-  })?.adBudgetPerDay || 0;
+  const currentMonthKey = MONTH_KEY(new Date());
+  const planMonths      = plan._months || plan.months || [];
+  const currentBudget   = planMonths.find(m => m.key === currentMonthKey)?.adBudgetPerDay
+    || Math.round((plan.baseOrdersPerDay || 0) * (plan.targetCpr || plan.cpr || 70));
 
   const gaps = [
     { metric: 'Orders / Day',     target: req.ordersPerDay,   current: Math.round(avgOrdersPerDay), unit: '/day',   met: avgOrdersPerDay >= req.ordersPerDay,  higher: true },
@@ -892,4 +896,218 @@ export function buildStageRoadmap(avgOrdersPerDay, plan, pva, enrichedRows) {
     creativePlaybook: stage.creativePlaybook,
     milestones:      stage.milestones,
   };
+}
+
+/* ─── AUTO-GENERATE 12-MONTH PLAN FROM 5 INPUTS ─────────────────────── */
+export function buildMonthlyPlan(plan) {
+  const months = [];
+  let opd  = parseFloat(plan.baseOrdersPerDay) || 350;
+  const rate = parseFloat(plan.monthlyGrowthRate) || 0.20;
+  const cpr  = parseFloat(plan.targetCpr) || 70;
+  const aov  = parseFloat(plan.aov) || 350;
+  const now  = new Date();
+  let yr = now.getFullYear(), mo = now.getMonth() + 1;
+  for (let i = 0; i < 12; i++) {
+    const key   = `${yr}-${String(mo).padStart(2, '0')}`;
+    const label = new Date(yr, mo - 1, 1).toLocaleString('en-IN', { month: 'short', year: 'numeric' });
+    months.push({ key, label, ordersPerDay: Math.round(opd), aov, adBudgetPerDay: Math.round(opd * cpr) });
+    opd *= (1 + rate);
+    if (++mo > 12) { mo = 1; yr++; }
+  }
+  return months;
+}
+
+/* ─── FULL FINANCE PLAN (P&L + capital per month) ───────────────────── */
+export function buildFinancePlan(plan, months) {
+  const importLockMonths = 2.5;
+  return months.map(m => {
+    const [yr, mo] = m.key.split('-').map(Number);
+    const days       = DAYS_IN(yr, mo);
+    const revenue    = m.ordersPerDay * days * m.aov;
+    const adSpend    = m.adBudgetPerDay * days;
+    const cogs       = revenue * (plan.inventoryCostPct || 0.30);
+    const grossP     = revenue * (plan.grossMarginPct   || 0.60);
+    const opsCost    = revenue * (plan.opsCostPct       || 0.05);
+    const netProfit  = grossP - adSpend - opsCost;
+    const capLocked  = (cogs / days) * (importLockMonths * 30);
+    const capNeeded  = capLocked + adSpend * 0.30;
+    return {
+      ...m, days, revenue, adSpend, cogs, grossProfit: grossP, opsCost, netProfit,
+      netMarginPct: revenue > 0 ? parseFloat(((netProfit / revenue) * 100).toFixed(1)) : 0,
+      capitalLocked: Math.round(capLocked),
+      capitalNeeded: Math.round(capNeeded),
+      roas: adSpend > 0 ? parseFloat((revenue / adSpend).toFixed(2)) : 0,
+    };
+  });
+}
+
+/* ─── WAREHOUSE SPACE NEEDS (m³ per month) ───────────────────────────── */
+export function buildWarehouseNeeds(plan, months) {
+  const activeWH   = (plan.warehouses || []).filter(w => w.active);
+  const totalCapM3 = activeWH.reduce((s, w) =>
+    s + (w.sqMeters || 0) * (w.heightMeters || 3.5) * (w.utilizationPct || 0.70), 0);
+  const dims = plan.skuDimensions || [];
+
+  return months.map(m => {
+    let totalVol = 0;
+    const byCategory = dims.map(sku => {
+      const coll     = (plan.collections || []).find(c => c.key === sku.key);
+      const alloc    = coll?.alloc ?? (1 / Math.max(dims.length, 1));
+      const daily    = m.ordersPerDay * alloc * (sku.unitsPerOrder || 1);
+      const buffer   = daily * (sku.bufferDays || 60);
+      const volUnit  = ((sku.lengthCm||20)*(sku.widthCm||15)*(sku.heightCm||10)) / 1_000_000;
+      const vol      = buffer * volUnit * 1.30;
+      totalVol      += vol;
+      return { key: sku.key, label: sku.label || sku.key, units: Math.round(buffer), volM3: parseFloat(vol.toFixed(1)) };
+    });
+    const util   = totalCapM3 > 0 ? (totalVol / totalCapM3) * 100 : 999;
+    return {
+      ...m,
+      totalVolumeM3:  parseFloat(totalVol.toFixed(1)),
+      totalCapM3:     parseFloat(totalCapM3.toFixed(1)),
+      utilization:    parseFloat(util.toFixed(1)),
+      overfill:       util >= 85,
+      danger:         util >= 100,
+      palletsNeeded:  Math.ceil(totalVol / 1.44),
+      sqFtNeeded:     Math.ceil((totalVol / (activeWH[0]?.heightMeters || 3.5)) * 10.764),
+      byCategory,
+    };
+  });
+}
+
+/* ─── OPS PLAN (staff + shifts per month) ────────────────────────────── */
+export function buildOpsNeeds(months) {
+  return months.map(m => {
+    const opd     = m.ordersPerDay;
+    const packers = Math.ceil(opd / 50);
+    const qc      = Math.ceil(packers / 5);
+    const shifts  = opd <= 250 ? 1 : opd <= 500 ? 2 : 3;
+    const ops     = opd < 400 ? 1 : opd < 1200 ? 2 : 3;
+    const cs      = Math.max(1, Math.ceil(opd / 400));
+    const logistics = opd < 800 ? 1 : 2;
+    const total   = packers + qc + ops + cs + logistics + 1;
+    return {
+      ...m, packers, qc, shifts, ops, cs, logistics, totalHeadcount: total,
+      packingCapacity:  packers * 50 * shifts,
+      capacityBuffer:   parseFloat(((packers * 50 * shifts / opd - 1) * 100).toFixed(1)),
+    };
+  });
+}
+
+/* ─── PROCUREMENT SCHEDULE (PO calendar) ────────────────────────────── */
+export function buildProcurementSchedule(plan, months) {
+  const now = new Date();
+  const schedule = [];
+  months.forEach(m => {
+    const [yr, mo] = m.key.split('-').map(Number);
+    const days       = DAYS_IN(yr, mo);
+    const monthStart = new Date(yr, mo - 1, 1);
+    (plan.suppliers || []).forEach(sup => {
+      const coll  = (plan.collections || []).find(c =>
+        c.key === sup.collectionKey ||
+        c.label?.toLowerCase().includes((sup.category||'').toLowerCase()));
+      const alloc = coll?.alloc || 0.25;
+      const monthlyUnits = m.ordersPerDay * days * alloc;
+      const orderQty     = Math.round(monthlyUnits * (1 + (sup.leadTimeDays||45)/30));
+      const unitCost     = m.aov * alloc * (1 - (plan.grossMarginPct||0.60));
+      const poValue      = Math.round(orderQty * Math.max(unitCost, 100));
+      const poDate       = new Date(monthStart);
+      poDate.setDate(poDate.getDate() - (sup.leadTimeDays||45));
+      const daysUntil    = Math.round((poDate - now) / 86400000);
+      schedule.push({
+        month: m.key, monthLabel: m.label,
+        supplier: sup.name, category: sup.category, collectionKey: coll?.key,
+        orderQty, poValue, leadTimeDays: sup.leadTimeDays||45,
+        poDate:       poDate.toISOString().slice(0, 10),
+        deliveryDate: monthStart.toISOString().slice(0, 10),
+        daysUntil,
+        urgency: daysUntil < 0 ? 'OVERDUE' : daysUntil < 14 ? 'DUE_SOON' : 'UPCOMING',
+      });
+    });
+  });
+  return schedule.sort((a, b) => a.poDate.localeCompare(b.poDate));
+}
+
+/* ─── DECISION SIGNALS (what to do right now) ───────────────────────── */
+export function buildDecisionSignals({ plan, months, finPlan, whPlan, opsPlan, procSchedule, creative, predictions, inventoryNeeds }) {
+  const signals = [];
+  const targetRoas = parseFloat(plan.targetRoas) || 4.5;
+  const targetCpr  = parseFloat(plan.targetCpr)  || plan.cpr || 70;
+
+  /* ROAS / CPR signal from live Meta */
+  const liveRoas = (plan.collections||[]).reduce((s,c) => s + c.alloc*(c.roas||0), 0);
+  if (liveRoas > targetRoas * 1.1) {
+    signals.push({ id:'scale_ads', priority:'HIGH', icon:'📈',
+      title:'Scale Ad Spend Now',
+      detail:`Blended ROAS ${liveRoas.toFixed(2)}x vs target ${targetRoas}x — headroom to push budget +20–30%`,
+      action:'Increase daily budget on all green collections' });
+  } else if (liveRoas > 0 && liveRoas < targetRoas * 0.8) {
+    signals.push({ id:'fix_roas', priority:'HIGH', icon:'⚠️',
+      title:'ROAS Below Target',
+      detail:`${liveRoas.toFixed(2)}x vs ${targetRoas}x — pause bottom 30% of ads, refresh creatives`,
+      action:'Kill low-performers, launch 5 new creatives this week' });
+  }
+
+  /* Overdue / due-soon POs */
+  const overdue  = procSchedule.filter(p => p.urgency==='OVERDUE').slice(0,3);
+  const dueSoon  = procSchedule.filter(p => p.urgency==='DUE_SOON').slice(0,2);
+  if (overdue.length) {
+    signals.push({ id:'po_overdue', priority:'URGENT', icon:'🚨',
+      title:`${overdue.length} PO${overdue.length>1?'s':''} Overdue`,
+      detail: overdue.map(p=>`${p.supplier} (${p.monthLabel}): ${fmtRs(p.poValue)}`).join(' · '),
+      action:'Place purchase orders immediately — every day late pushes stockout closer' });
+  } else if (dueSoon.length) {
+    signals.push({ id:'po_soon', priority:'MEDIUM', icon:'📦',
+      title:`${dueSoon.length} PO${dueSoon.length>1?'s':''} due within 14 days`,
+      detail: dueSoon.map(p=>`${p.supplier}: ${fmtRs(p.poValue)} by ${p.poDate}`).join(' · '),
+      action:'Confirm stock availability and place orders this week' });
+  }
+
+  /* Warehouse overflow */
+  const firstOver = whPlan?.find(m => m.overfill);
+  if (firstOver) {
+    signals.push({ id:'wh_overflow', priority: firstOver.danger?'URGENT':'MEDIUM', icon:'🏭',
+      title: firstOver.danger ? 'Warehouse at Capacity' : `WH Overflow in ${firstOver.label}`,
+      detail:`${firstOver.utilization.toFixed(0)}% used in ${firstOver.label} — need ${firstOver.totalVolumeM3}m³, have ${firstOver.totalCapM3}m³`,
+      action: firstOver.danger ? 'Activate next warehouse immediately' : `Activate WH2 before ${firstOver.label}` });
+  }
+
+  /* Capital gap */
+  const capGap = finPlan?.find(m => m.capitalNeeded > m.grossProfit);
+  if (capGap) {
+    signals.push({ id:'capital_gap', priority:'MEDIUM', icon:'💰',
+      title:`Capital Gap in ${capGap.label}`,
+      detail:`Need ${fmtRs(capGap.capitalNeeded)} upfront (inventory + ad advance), gross profit only ${fmtRs(capGap.grossProfit)}`,
+      action:'Arrange credit line or supplier credit terms before this month' });
+  }
+
+  /* Creative fatigue */
+  const fatigued = (creative?.fatigueAlerts||[]).slice(0,2);
+  if (fatigued.length) {
+    signals.push({ id:'fatigue', priority:'MEDIUM', icon:'🎨',
+      title:`${fatigued.length} Fatigued Creative${fatigued.length>1?'s':''}`,
+      detail: fatigued.map(f=>`${f.name}: ${f.roas7d?.toFixed(1)}x ROAS`).join(' · '),
+      action:'Same hook, new format — replace within 48 hours' });
+  }
+
+  /* Ops headcount shift */
+  const nextShiftMonth = opsPlan?.find((m,i) => i>0 && m.shifts > opsPlan[i-1].shifts);
+  if (nextShiftMonth) {
+    signals.push({ id:'add_shift', priority:'LOW', icon:'👥',
+      title:`Add ${nextShiftMonth.shifts}nd Shift by ${nextShiftMonth.label}`,
+      detail:`Orders hit ${nextShiftMonth.ordersPerDay}/day — single shift packing capacity (${opsPlan[0]?.packingCapacity}) won't cover`,
+      action:'Hire and train packing staff before orders exceed current capacity' });
+  }
+
+  /* OOS risk from inventory */
+  const oosRisk = (inventoryNeeds||[]).filter(i => i.status==='critical'||i.status==='oos').slice(0,3);
+  if (oosRisk.length) {
+    signals.push({ id:'oos_risk', priority:'HIGH', icon:'🔴',
+      title:`${oosRisk.length} SKU${oosRisk.length>1?'s':''} OOS / Critical`,
+      detail: oosRisk.map(i=>`${i.name}: ${i.daysOfStock}d stock`).join(' · '),
+      action:'Emergency reorder — check local supplier for bridge stock' });
+  }
+
+  const rank = {URGENT:0,HIGH:1,MEDIUM:2,LOW:3};
+  return signals.sort((a,b)=>(rank[a.priority]||2)-(rank[b.priority]||2));
 }
