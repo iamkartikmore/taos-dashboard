@@ -25,6 +25,7 @@ const InactiveAds    = lazy(() => import('./pages/InactiveAds'));
 const DailyBriefing  = lazy(() => import('./pages/DailyBriefing'));
 const OrderAnalysis      = lazy(() => import('./pages/OrderAnalysis'));
 const CollectionSpend    = lazy(() => import('./pages/CollectionSpend'));
+const AOVAnalysis        = lazy(() => import('./pages/AOVAnalysis'));
 
 function PageFallback() {
   return (
@@ -65,6 +66,7 @@ export default function App() {
             <Route path="/daily"            element={<DailyBriefing />} />
             <Route path="/analysis"           element={<OrderAnalysis />} />
             <Route path="/collection-spend" element={<CollectionSpend />} />
+            <Route path="/aov"              element={<AOVAnalysis />} />
             <Route path="*"                 element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

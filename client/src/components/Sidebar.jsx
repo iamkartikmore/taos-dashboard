@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
   Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck, ClipboardList,
-  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart,
+  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -28,6 +28,7 @@ const NAV = [
   { to: '/daily',        icon: CalendarSearch,  label: 'Daily Briefing',     group: 'advanced' },
   { to: '/analysis',          icon: LineChart,       label: 'Order Analysis',     group: 'advanced' },
   { to: '/collection-spend',  icon: BarChart3,       label: 'Collection Spend',   group: 'advanced' },
+  { to: '/aov',               icon: TrendingDown,    label: 'AOV Analysis',       group: 'advanced' },
   { to: '/shopify',          icon: ShoppingBag, label: 'Shopify Orders',   group: 'shopify' },
   { to: '/shopify-insights', icon: BarChart3,   label: 'Shopify Analytics',group: 'shopify' },
   { to: '/shopify-ops',      icon: Truck,       label: 'Shopify Ops',      group: 'shopify' },
