@@ -23,7 +23,7 @@ import {
   downloadCsv, fmtRs, fmtK,
 } from '../lib/businessPlanAnalytics';
 
-const LS_KEY = 'taos_bplan_v2';
+const LS_KEY = 'taos_bplan_v3';
 const ls = {
   get:  fb  => { try { const r = localStorage.getItem(LS_KEY); return r ? JSON.parse(r) : fb; } catch { return fb; } },
   set:  v   => { try { localStorage.setItem(LS_KEY, JSON.stringify(v)); } catch {} },
@@ -101,7 +101,9 @@ const INV_STATUS = {
   ok:       { pill: 'bg-emerald-500/10 text-emerald-400 border-emerald-800/30', label: 'OK',     color: '#22c55e' },
 };
 
-const COLL_COLORS = { plants: '#22c55e', seeds: '#f59e0b', allMix: '#818cf8' };
+function getCollColor(collections, key) {
+  return (collections || []).find(c => c.key === key)?.color || '#818cf8';
+}
 const PRIORITY_STYLE = {
   URGENT: 'bg-red-900/30 text-red-300 border-red-800/40',
   HIGH:   'bg-amber-500/15 text-amber-400 border-amber-800/30',
@@ -727,33 +729,30 @@ function TabRevenue({ plan, pva, savePlan, shopifyOrders }) {
 /* ─── TAB: CREATIVE INTEL ─────────────────────────────────────────────── */
 function TabMarketing({ plan, pva, savePlan, creative, metaCollections }) {
   const [editAlloc, setEditAlloc]     = useState(false);
-  const [allocDraft, setAllocDraft]   = useState({ ...plan.collectionAlloc });
+  const [allocDraft, setAllocDraft]   = useState((plan.collections || []).map(c => ({ ...c })));
   const [editGlobals, setEditGlobals] = useState(false);
   const [globalsDraft, setGlobalsDraft] = useState({ cpr: plan.cpr, avgBudgetPerCampaign: plan.avgBudgetPerCampaign, avgCreativesPerCampaign: plan.avgCreativesPerCampaign });
   const [activeView, setActiveView]   = useState('publish');
 
   const mktData = useMemo(() => pva.map(m => buildMarketingNeeds(m, plan)), [pva, plan]);
 
-  // Apply Meta collection spends as allocation suggestion
   const applyMetaAlloc = () => {
     if (!metaCollections?.length) return;
-    const keys = Object.keys(plan.collectionAlloc);
-    const matched = {};
-    let matchedTotal = 0;
-    metaCollections.forEach(mc => {
-      const key = keys.find(k => mc.name.toLowerCase().includes(k.toLowerCase()) || k.toLowerCase().includes(mc.name.toLowerCase()));
-      if (key) { matched[key] = (matched[key] || 0) + mc.spendShare / 100; matchedTotal += mc.spendShare / 100; }
+    const cols = plan.collections || [];
+    const updated = cols.map(c => {
+      const mc = metaCollections.find(m => m.name.toLowerCase().includes(c.key.toLowerCase()) || c.label.toLowerCase().includes(m.name.toLowerCase()));
+      return mc ? { ...c, alloc: mc.spendShare / 100, roas: mc.avgRoas || c.roas } : c;
     });
-    if (matchedTotal < 0.1) { alert('Could not match Meta collections to plan collections. Check collection names.'); return; }
-    const norm = Object.fromEntries(Object.entries(matched).map(([k, v]) => [k, v / matchedTotal]));
-    savePlan({ collectionAlloc: norm });
-    setAllocDraft(norm);
+    const totalAlloc = updated.reduce((s, c) => s + c.alloc, 0);
+    const norm = totalAlloc > 0 ? updated.map(c => ({ ...c, alloc: c.alloc / totalAlloc })) : updated;
+    savePlan({ collections: norm });
+    setAllocDraft(norm.map(c => ({ ...c })));
   };
 
   const saveAlloc = () => {
-    const total = Object.values(allocDraft).reduce((s, v) => s + parseFloat(v), 0);
+    const total = allocDraft.reduce((s, c) => s + parseFloat(c.alloc || 0), 0);
     if (Math.abs(total - 1) > 0.01) { alert('Allocations must sum to 100%'); return; }
-    savePlan({ collectionAlloc: Object.fromEntries(Object.entries(allocDraft).map(([k, v]) => [k, parseFloat(v)])) });
+    savePlan({ collections: allocDraft.map(c => ({ ...c, alloc: parseFloat(c.alloc), roas: parseFloat(c.roas), cpr: parseFloat(c.cpr || 0) })) });
     setEditAlloc(false);
   };
   const saveGlobals = () => {
@@ -783,7 +782,7 @@ function TabMarketing({ plan, pva, savePlan, creative, metaCollections }) {
             <div key={w.key} className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-4">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-full" style={{ background: COLL_COLORS[w.key] }}/>
+                  <span className="w-3 h-3 rounded-full" style={{ background: getCollColor(plan.collections, w.key) }}/>
                   <span className="text-sm font-bold text-white">{w.collection}</span>
                   <span className="text-[10px] text-slate-500">{w.budgetShare}% of budget</span>
                 </div>
@@ -937,28 +936,30 @@ function TabMarketing({ plan, pva, savePlan, creative, metaCollections }) {
             </div>
             {editAlloc ? (
               <div className="space-y-3">
-                {Object.entries(allocDraft).map(([key, val]) => (
-                  <div key={key} className="flex items-center gap-3">
-                    <div className="w-20 text-xs text-slate-300">{key === 'allMix' ? 'All Mix' : key.charAt(0).toUpperCase() + key.slice(1)}</div>
-                    <input type="range" min="0" max="1" step="0.01" value={val} onChange={e => setAllocDraft(p => ({ ...p, [key]: parseFloat(e.target.value) }))} className="flex-1 accent-brand-500"/>
-                    <input className="w-14 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-white text-xs text-center" value={(val*100).toFixed(0)} onChange={e => setAllocDraft(p => ({ ...p, [key]: (parseFloat(e.target.value)||0)/100 }))}/>
+                {allocDraft.map((col, i) => (
+                  <div key={col.key} className="flex items-center gap-3">
+                    <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: col.color }}/>
+                    <div className="w-28 text-xs text-slate-300 truncate">{col.label}</div>
+                    <input type="range" min="0" max="1" step="0.01" value={col.alloc} onChange={e => setAllocDraft(p => p.map((c, j) => j === i ? { ...c, alloc: parseFloat(e.target.value) } : c))} className="flex-1 accent-brand-500"/>
+                    <input className="w-14 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-white text-xs text-center" value={Math.round(col.alloc*100)} onChange={e => setAllocDraft(p => p.map((c, j) => j === i ? { ...c, alloc: (parseFloat(e.target.value)||0)/100 } : c))}/>
                     <span className="text-[10px] text-slate-500">%</span>
-                    <div className="w-20 text-xs text-slate-400">ROAS: <span className="text-white">{plan.collectionRoas[key]?.toFixed(2)}</span></div>
+                    <span className="text-[10px] text-slate-400 w-20">ROAS: <input className="w-12 bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-white text-[10px] text-center" value={col.roas} onChange={e => setAllocDraft(p => p.map((c, j) => j === i ? { ...c, roas: e.target.value } : c))}/></span>
                   </div>
                 ))}
                 <div className="flex items-center gap-3 pt-1 border-t border-gray-800/40">
-                  <div className="text-[10px] text-slate-500">Total: {(Object.values(allocDraft).reduce((s,v) => s+parseFloat(v),0)*100).toFixed(0)}%</div>
+                  <div className="text-[10px] text-slate-500">Total: {(allocDraft.reduce((s,c) => s+parseFloat(c.alloc||0),0)*100).toFixed(0)}%</div>
                   <button onClick={saveAlloc} className="px-3 py-1.5 bg-brand-600 text-white rounded text-xs">Save</button>
+                  <button onClick={() => setEditAlloc(false)} className="px-3 py-1.5 bg-gray-700 text-white rounded text-xs">Cancel</button>
                 </div>
               </div>
             ) : (
-              <div className="flex gap-3">
-                {Object.entries(plan.collectionAlloc).map(([key, pct]) => (
-                  <div key={key} className="flex-1 bg-gray-800/50 rounded-lg p-3">
-                    <div className="flex items-center gap-2 mb-2"><span className="w-2.5 h-2.5 rounded-full" style={{background:COLL_COLORS[key]}}/><span className="text-xs font-semibold text-white">{key==='allMix'?'All Mix':key.charAt(0).toUpperCase()+key.slice(1)}</span></div>
-                    <div className="text-lg font-bold text-white">{Math.round(pct*100)}%</div>
-                    <div className="text-[10px] text-slate-500">ROAS: {plan.collectionRoas[key]?.toFixed(2)}</div>
-                    <div className="h-1 bg-gray-700 rounded-full mt-2 overflow-hidden"><div className="h-full rounded-full" style={{width:`${pct*100}%`,background:COLL_COLORS[key]}}/></div>
+              <div className="flex flex-wrap gap-3">
+                {(plan.collections || []).map(col => (
+                  <div key={col.key} className="flex-1 min-w-[100px] bg-gray-800/50 rounded-lg p-3">
+                    <div className="flex items-center gap-2 mb-2"><span className="w-2.5 h-2.5 rounded-full" style={{ background: col.color }}/><span className="text-xs font-semibold text-white">{col.label}</span></div>
+                    <div className="text-lg font-bold text-white">{Math.round(col.alloc*100)}%</div>
+                    <div className="text-[10px] text-slate-500">ROAS: {parseFloat(col.roas).toFixed(2)}x · CPR: ₹{col.cpr}</div>
+                    <div className="h-1 bg-gray-700 rounded-full mt-2 overflow-hidden"><div className="h-full rounded-full" style={{ width: `${col.alloc*100}%`, background: col.color }}/></div>
                   </div>
                 ))}
               </div>
@@ -1661,11 +1662,10 @@ export default function BusinessPlan() {
     if (!stored) return DEFAULT_PLAN;
     return {
       ...DEFAULT_PLAN, ...stored,
-      months:    DEFAULT_PLAN.months.map((dm, i) => ({ ...dm, ...(stored.months?.[i] || {}) })),
-      warehouses: stored.warehouses?.length ? stored.warehouses : DEFAULT_PLAN.warehouses,
-      suppliers:  stored.suppliers?.length  ? stored.suppliers  : DEFAULT_PLAN.suppliers,
-      collectionAlloc: stored.collectionAlloc || DEFAULT_PLAN.collectionAlloc,
-      collectionRoas:  stored.collectionRoas  || DEFAULT_PLAN.collectionRoas,
+      months:     DEFAULT_PLAN.months.map((dm, i) => ({ ...dm, ...(stored.months?.[i] || {}) })),
+      warehouses: stored.warehouses?.length  ? stored.warehouses  : DEFAULT_PLAN.warehouses,
+      suppliers:  stored.suppliers?.length   ? stored.suppliers   : DEFAULT_PLAN.suppliers,
+      collections: stored.collections?.length ? stored.collections : DEFAULT_PLAN.collections,
       manualOverrides: stored.manualOverrides || {},
       notes: stored.notes || '',
     };

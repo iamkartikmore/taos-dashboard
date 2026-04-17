@@ -141,47 +141,68 @@ export function detectGrowthStage(avgOrdersPerDay) {
   return STAGES.find(s => v >= s.min && v < s.max) || STAGES[0];
 }
 
-/* ─── DEFAULT PLAN (seeded from Excel) ─────────────────────────────── */
+/* ─── DEFAULT PLAN (seeded from Dawbu Business Plan Excel) ─────────── */
 export const DEFAULT_PLAN = {
-  aov: 340,
-  cpr: 55,
-  avgBudgetPerCampaign: 1136,
-  avgCreativesPerCampaign: 1.75,
-  inventoryCostPct: 0.20,
-  grossMarginPct:   0.50,
-  opsCostPct:       0.12,
+  brandName: 'Dawbu',
+  aov: 350,
+  cpr: 70,
+  avgBudgetPerCampaign: 620,
+  avgCreativesPerCampaign: 1.0,
+  inventoryCostPct: 0.30,
+  grossMarginPct:   0.60,
+  opsCostPct:       0.05,
 
-  collectionAlloc: { plants: 0.35, seeds: 0.20, allMix: 0.45 },
-  collectionRoas:  { plants: 4.53, seeds: 3.58, allMix: 4.83 },
+  /* collections array — generic, editable, drives marketing + revenue calcs */
+  collections: [
+    { key: 'buildingBlock',   label: 'Building Block',   alloc: 0.49, roas: 4.20,  cpr: 124, color: '#818cf8' },
+    { key: 'miniature',       label: 'Miniature',        alloc: 0.31, roas: 4.07,  cpr: 82,  color: '#22c55e' },
+    { key: 'diamondPainting', label: 'Diamond Painting', alloc: 0.07, roas: 11.47, cpr: 86,  color: '#f59e0b' },
+    { key: 'other',           label: 'Other',            alloc: 0.13, roas: 6.18,  cpr: 89,  color: '#64748b' },
+  ],
 
   months: [
-    { key: '2026-03', label: 'Mar 2026', ordersPerDay:  800, aov: 340, adBudgetPerDay:  44000 },
-    { key: '2026-04', label: 'Apr 2026', ordersPerDay:  960, aov: 345, adBudgetPerDay:  52800 },
-    { key: '2026-05', label: 'May 2026', ordersPerDay: 1152, aov: 350, adBudgetPerDay:  63360 },
-    { key: '2026-06', label: 'Jun 2026', ordersPerDay: 1382, aov: 355, adBudgetPerDay:  76032 },
-    { key: '2026-07', label: 'Jul 2026', ordersPerDay: 1658, aov: 360, adBudgetPerDay:  91238 },
-    { key: '2026-08', label: 'Aug 2026', ordersPerDay: 1990, aov: 365, adBudgetPerDay: 109486 },
-    { key: '2026-09', label: 'Sep 2026', ordersPerDay: 2388, aov: 370, adBudgetPerDay: 131383 },
-    { key: '2026-10', label: 'Oct 2026', ordersPerDay: 2866, aov: 375, adBudgetPerDay: 157660 },
-    { key: '2026-11', label: 'Nov 2026', ordersPerDay: 3439, aov: 380, adBudgetPerDay: 189192 },
-    { key: '2026-12', label: 'Dec 2026', ordersPerDay: 4128, aov: 385, adBudgetPerDay: 227030 },
+    { key: '2026-04', label: 'Apr 2026', ordersPerDay:  350, aov: 350, adBudgetPerDay:  24500 },
+    { key: '2026-05', label: 'May 2026', ordersPerDay:  420, aov: 350, adBudgetPerDay:  29400 },
+    { key: '2026-06', label: 'Jun 2026', ordersPerDay:  504, aov: 350, adBudgetPerDay:  35280 },
+    { key: '2026-07', label: 'Jul 2026', ordersPerDay:  605, aov: 350, adBudgetPerDay:  42336 },
+    { key: '2026-08', label: 'Aug 2026', ordersPerDay:  726, aov: 350, adBudgetPerDay:  50803 },
+    { key: '2026-09', label: 'Sep 2026', ordersPerDay:  871, aov: 350, adBudgetPerDay:  60964 },
+    { key: '2026-10', label: 'Oct 2026', ordersPerDay: 1045, aov: 350, adBudgetPerDay:  73157 },
+    { key: '2026-11', label: 'Nov 2026', ordersPerDay: 1254, aov: 350, adBudgetPerDay:  87788 },
+    { key: '2026-12', label: 'Dec 2026', ordersPerDay: 1505, aov: 350, adBudgetPerDay: 105346 },
+    { key: '2027-01', label: 'Jan 2027', ordersPerDay: 1806, aov: 350, adBudgetPerDay: 126415 },
   ],
 
   warehouses: [
-    { id: 'wh1', name: 'Pune WH1',  location: 'Pune',      capacity: 5000, active: true, notes: 'Primary — all categories',     skuCategories: 'Plants, All Mix' },
-    { id: 'wh2', name: 'Pune WH2',  location: 'Pune',      capacity: 3000, active: true, notes: 'Expanding capacity',            skuCategories: 'Plants, All Mix' },
-    { id: 'wh3', name: 'Hyderabad', location: 'Hyderabad', capacity: 2000, active: true, notes: 'Seeds & Dawbu — transitioning', skuCategories: 'Seeds, Dawbu' },
+    { id: 'wh1', name: 'Pune WH1',  location: 'Pune',   capacity: 50000, active: true,  notes: 'Primary — Building Block + Miniature', skuCategories: 'Building Block, Miniature' },
+    { id: 'wh2', name: 'Pune WH2',  location: 'Pune',   capacity: 20000, active: false, notes: 'Expansion — activate at Growth stage',   skuCategories: 'All Categories' },
+    { id: 'wh3', name: 'Mumbai WH', location: 'Mumbai', capacity: 15000, active: false, notes: 'West hub — activate at Accelerate stage', skuCategories: 'All Categories' },
   ],
 
   suppliers: [
-    { id: 'sup1', name: 'Pune Nursery Collective', category: 'Plants', leadTimeDays: 3,  paymentTerms: 'Advance', moqUnits: 50,  notes: 'Primary plant supplier' },
-    { id: 'sup2', name: 'Maharashtra Seeds Co.',   category: 'Seeds',  leadTimeDays: 5,  paymentTerms: 'Advance', moqUnits: 200, notes: 'Seeds & seed kits' },
-    { id: 'sup3', name: 'All Mix Vendor',           category: 'Mix',    leadTimeDays: 4,  paymentTerms: 'Net-7',   moqUnits: 100, notes: 'All Mix collection' },
+    { id: 'sup1', name: 'China Import BB',   category: 'Building Block',   leadTimeDays: 45, paymentTerms: 'Advance', moqUnits: 500, notes: 'Sea freight 40–45 days' },
+    { id: 'sup2', name: 'China Import Mini', category: 'Miniature',        leadTimeDays: 45, paymentTerms: 'Advance', moqUnits: 300, notes: 'Sea freight 40–45 days' },
+    { id: 'sup3', name: 'China Import DP',   category: 'Diamond Painting', leadTimeDays: 30, paymentTerms: 'Advance', moqUnits: 200, notes: 'Air freight when needed' },
+    { id: 'sup4', name: 'Local Accessories', category: 'Other',            leadTimeDays: 7,  paymentTerms: 'Net-7',   moqUnits: 50,  notes: 'Local add-ons & accessories' },
   ],
 
   notes: '',
   manualOverrides: {},
 };
+
+/* Helper: get collectionAlloc-style object from plan.collections array */
+export function collectionAllocObj(plan) {
+  const cols = plan.collections || [];
+  const obj = {};
+  cols.forEach(c => { obj[c.key] = c.alloc; });
+  return obj;
+}
+export function collectionRoasObj(plan) {
+  const cols = plan.collections || [];
+  const obj = {};
+  cols.forEach(c => { obj[c.key] = c.roas; });
+  return obj;
+}
 
 /* ─── FORMATTERS ─────────────────────────────────────────────────────── */
 export function fmtRs(n) {
@@ -313,19 +334,26 @@ export function buildWeeklyBreakdown(monthPlan, shopifyOrders) {
 /* ─── MARKETING NEEDS ────────────────────────────────────────────────── */
 export function buildMarketingNeeds(monthPlan, plan) {
   const { adBudgetPerDay } = monthPlan;
-  const { cpr, avgBudgetPerCampaign, avgCreativesPerCampaign, collectionAlloc, collectionRoas } = plan;
+  const { cpr, avgBudgetPerCampaign, avgCreativesPerCampaign } = plan;
   const [yr, mo] = monthPlan.key.split('-').map(Number);
   const days = DAYS_IN(yr, mo);
   const campaigns      = Math.ceil(adBudgetPerDay / avgBudgetPerCampaign);
   const creatives      = Math.ceil(campaigns * avgCreativesPerCampaign);
   const expectedResults = Math.round(adBudgetPerDay / cpr);
-  const collections = Object.entries(collectionAlloc).map(([key, pct]) => ({
-    key,
-    label: key === 'allMix' ? 'All Mix' : key.charAt(0).toUpperCase() + key.slice(1),
-    pct, pctDisplay: Math.round(pct * 100),
-    budgetPerDay: adBudgetPerDay * pct,
-    roas: collectionRoas[key] || 0,
-    revenuePerDay: adBudgetPerDay * pct * (collectionRoas[key] || 0),
+
+  /* support both new collections array and legacy collectionAlloc/collectionRoas objects */
+  const rawCols = plan.collections?.length
+    ? plan.collections.map(c => ({ key: c.key, label: c.label, pct: c.alloc, roas: c.roas, color: c.color }))
+    : Object.entries(plan.collectionAlloc || {}).map(([key, pct]) => ({
+        key, pct, roas: (plan.collectionRoas || {})[key] || 0,
+        label: key === 'allMix' ? 'All Mix' : key.charAt(0).toUpperCase() + key.slice(1),
+      }));
+
+  const collections = rawCols.map(c => ({
+    ...c,
+    pctDisplay: Math.round(c.pct * 100),
+    budgetPerDay: adBudgetPerDay * c.pct,
+    revenuePerDay: adBudgetPerDay * c.pct * c.roas,
   }));
   const blendedRoas = collections.reduce((s, c) => s + c.pct * c.roas, 0);
   return {
@@ -661,15 +689,20 @@ export function buildCreativeStrategy(plan, enrichedRows) {
       action: 'Refresh creative — ROAS dropped 30%+ from 30-day avg',
     }));
 
-  const whatToPublish = Object.entries(plan.collectionAlloc).map(([key, pct]) => {
-    const label = key === 'allMix' ? 'All Mix' : key.charAt(0).toUpperCase() + key.slice(1);
+  const planCols = plan.collections?.length
+    ? plan.collections
+    : Object.entries(plan.collectionAlloc || {}).map(([key, pct]) => ({
+        key, label: key === 'allMix' ? 'All Mix' : key.charAt(0).toUpperCase() + key.slice(1),
+        alloc: pct, roas: (plan.collectionRoas || {})[key] || 0,
+      }));
+
+  const whatToPublish = planCols.map(({ key, label, alloc, roas: targetRoas }) => {
     const colData = collections.find(c => c.name.toLowerCase().includes(key.toLowerCase()));
     const currentRoas = colData?.avgRoas || 0;
-    const targetRoas  = plan.collectionRoas[key] || 0;
     const gap = targetRoas > 0 ? ((currentRoas - targetRoas) / targetRoas) * 100 : 0;
     return {
       collection: label, key,
-      budgetShare: Math.round(pct * 100),
+      budgetShare: Math.round((alloc || 0) * 100),
       currentRoas, targetRoas, gap: parseFloat(gap.toFixed(1)),
       activeAds: colData?.adCount || 0,
       recommendation: currentRoas >= targetRoas
