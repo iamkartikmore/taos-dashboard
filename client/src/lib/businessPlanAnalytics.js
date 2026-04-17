@@ -269,7 +269,7 @@ export function buildPlanVsActual(plan, shopifyOrders) {
   const now = new Date();
   const currentKey = MONTH_KEY(now);
 
-  return plan.months.map(m => {
+  return (plan.months || []).map(m => {
     const [yr, mo] = m.key.split('-').map(Number);
     const days = DAYS_IN(yr, mo);
     const planRevenue = m.ordersPerDay * days * m.aov;
@@ -445,7 +445,8 @@ export function buildPredictions(plan, shopifyOrders) {
   const trend  = avg14 > 0 ? (avg7 - avg14) / avg14 : 0;
   const trendLabel = trend > 0.05 ? 'Accelerating ↑' : trend < -0.05 ? 'Decelerating ↓' : 'Stable →';
   const trendColor = trend > 0.05 ? '#22c55e' : trend < -0.05 ? '#ef4444' : '#94a3b8';
-  const currentPlan = plan.months.find(m => m.key === currentKey);
+  const planMonths_ = plan.months || [];
+  const currentPlan = planMonths_.find(m => m.key === currentKey);
   const [yr, mo] = currentKey.split('-').map(Number);
   const daysInMonth  = DAYS_IN(yr, mo);
   const daysElapsed  = now.getDate();
@@ -457,7 +458,7 @@ export function buildPredictions(plan, shopifyOrders) {
   const eomRevenue = monthActual.revenue + avg7 * daysRemaining * (currentPlan?.aov || plan.aov);
   const planTarget = currentPlan ? currentPlan.ordersPerDay * daysInMonth : 0;
   const gapPct = planTarget > 0 ? ((eomOrders - planTarget) / planTarget) * 100 : 0;
-  const forecast = plan.months.filter(m => m.key >= currentKey).slice(0, 4).map((m, i) => {
+  const forecast = planMonths_.filter(m => m.key >= currentKey).slice(0, 4).map((m, i) => {
     const [myr, mmo] = m.key.split('-').map(Number);
     const mdays = DAYS_IN(myr, mmo);
     const factor = Math.pow(1 + trend * 0.5, i);
@@ -612,7 +613,7 @@ export function buildAdvancedPredictions(plan, shopifyOrders) {
 
   const now = new Date();
   const currentKey = MONTH_KEY(now);
-  const scenarios = plan.months.filter(m => m.key >= currentKey).slice(0, 6).map(m => {
+  const scenarios = (plan.months || []).filter(m => m.key >= currentKey).slice(0, 6).map(m => {
     const [yr, mo] = m.key.split('-').map(Number);
     const mdays = DAYS_IN(yr, mo);
     const proj  = base.avg7 * mdays;

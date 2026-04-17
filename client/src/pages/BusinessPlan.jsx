@@ -1092,7 +1092,7 @@ export default function BusinessPlan() {
   const whPlan        = useMemo(()=>buildWarehouseNeeds(plan,months),[plan,months]);
   const opsPlan       = useMemo(()=>buildOpsNeeds(months),[months]);
   const procSchedule  = useMemo(()=>buildProcurementSchedule(plan,months),[plan,months]);
-  const predictions   = useMemo(()=>buildPredictions(plan,allOrders),[plan,allOrders]);
+  const predictions   = useMemo(()=>buildPredictions({...plan,months},allOrders),[plan,months,allOrders]);
   const stage         = useMemo(()=>detectGrowthStage(predictions.avg7||0),[predictions.avg7]);
   const pva           = useMemo(()=>buildPlanVsActual({...plan,months},allOrders),[plan,months,allOrders]);
   const creative      = useMemo(()=>buildCreativeStrategy(plan,enrichedRows),[plan,enrichedRows]);
