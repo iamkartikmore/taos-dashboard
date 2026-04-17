@@ -85,168 +85,194 @@ function fmtBudget(db, lb) {
 
 /* ─── BUILD COLLECTION GROUPS ────────────────────────────────────── */
 function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap, adMap, periodDays) {
-  /* ── 1. Period metrics per entity ── */
+
+  /* ── 1. Period metrics per entity (one pass) ── */
   const byAd  = {};
   const byAs  = {};
   const byCam = {};
 
   for (const r of periodRows) {
-    const addTo = (map, id) => {
+    const acc = (map, id) => {
       if (!id) return;
       if (!map[id]) map[id] = {
-        spend: 0, impressions: 0, clicks: 0, purchases: 0, revenue: 0,
-        freqSum: 0, roasSum: 0, n: 0,
-        _names: {},
+        spend:0, impressions:0, clicks:0, purchases:0, revenue:0,
+        freqSum:0, n:0,
+        // store last non-zero Meta values (preset windows → 1 row per ad)
+        metaRoas:0, metaCpr:0,
+        _n: {},  // names from insight row
       };
       const m = map[id];
-      m.spend       += parseFloat(r.spend)        || 0;
-      m.impressions += parseFloat(r.impressions)   || 0;
-      m.clicks      += parseFloat(r.outboundClicks || r.clicksAll) || 0;
-      m.purchases   += parseFloat(r.purchases)     || 0;
-      m.revenue     += parseFloat(r.revenue)       || 0;
-      m.freqSum     += parseFloat(r.frequency)     || 0;
-      m.roasSum     += parseFloat(r.metaRoas)      || 0; // for ad-level: take last non-zero
+      m.spend       += parseFloat(r.spend)                          || 0;
+      m.impressions += parseFloat(r.impressions)                     || 0;
+      m.clicks      += parseFloat(r.outboundClicks || r.clicksAll)  || 0;
+      m.purchases   += parseFloat(r.purchases)                       || 0;
+      m.revenue     += parseFloat(r.revenue)                         || 0;
+      m.freqSum     += parseFloat(r.frequency)                       || 0;
       m.n++;
+      // keep last non-zero (preset windows have 1 row/ad; for multi-row take last)
+      if (parseFloat(r.metaRoas) > 0) m.metaRoas = parseFloat(r.metaRoas);
+      if (parseFloat(r.metaCpr)  > 0) m.metaCpr  = parseFloat(r.metaCpr);
     };
-    addTo(byAd,  r.adId);
-    addTo(byAs,  r.adSetId);
-    addTo(byCam, r.campaignId);
-
-    // Store name lookups from insight rows (fallback if not in maps)
-    if (byAd[r.adId]) {
-      byAd[r.adId]._names = {
-        ad: r.adName, adSet: r.adSetName, adSetId: r.adSetId,
-        campaign: r.campaignName, campaignId: r.campaignId,
-      };
-    }
+    acc(byAd,  r.adId);
+    acc(byAs,  r.adSetId);
+    acc(byCam, r.campaignId);
+    // name fallbacks from insight rows
+    if (r.adId && byAd[r.adId]) byAd[r.adId]._n = {
+      ad: r.adName, adSet: r.adSetName, adSetId: r.adSetId,
+      campaign: r.campaignName, campaignId: r.campaignId,
+    };
   }
 
-  /* ── 2. Last metaRoas per ad (there's typically 1 row per ad per preset) ── */
-  const metaRoasByAdId = {};
-  for (const r of periodRows) {
-    if (r.adId && parseFloat(r.metaRoas) > 0) metaRoasByAdId[r.adId] = parseFloat(r.metaRoas);
-  }
-
-  /* ── 3. Enriched map for quality / fatigue signals ── */
+  /* ── 2. Enriched map ── */
   const enrichedByAdId = {};
   for (const r of enrichedRows) enrichedByAdId[r.adId] = r;
 
-  /* ── 4. Candidate ad IDs: ads with spend OR ads in adMap that have a collection ── */
+  /* ── 3. All ad IDs ── */
   const allAdIds = new Set([
     ...Object.keys(byAd),
     ...Object.keys(adMap).filter(id => manualMap[id]),
   ]);
 
-  const hasBudgetData = Object.keys(campaignMap).length > 0 || Object.keys(adsetMap).length > 0;
+  /* ── 4. Pre-compute PRIMARY collection per campaign and adset
+          = collection where the most ad-spend for that entity comes from.
+          This ensures each campaign/adset appears in exactly ONE collection. ── */
+  const camSpend = {};   // { [camId]: { [col]: totalSpend } }
+  const asSpend  = {};   // { [asId]:  { [col]: totalSpend } }
 
-  /* ── 5. Build groups ── */
+  for (const adId of allAdIds) {
+    const col   = manualMap[adId]?.Collection || 'Unmapped';
+    const adRec = adMap[adId] || {};
+    const n     = byAd[adId]?._n || {};
+    const camId = adRec.campaign_id  || n.campaignId || '';
+    const asId  = adRec.adset_id    || n.adSetId    || '';
+    const spend = byAd[adId]?.spend || 0;
+
+    if (camId) {
+      if (!camSpend[camId]) camSpend[camId] = {};
+      camSpend[camId][col] = (camSpend[camId][col] || 0) + spend;
+    }
+    if (asId) {
+      if (!asSpend[asId]) asSpend[asId] = {};
+      asSpend[asId][col] = (asSpend[asId][col] || 0) + spend;
+    }
+  }
+
+  // Resolve primary col for each campaign / adset
+  const camPrimary = {};
+  for (const [id, m] of Object.entries(camSpend))
+    camPrimary[id] = Object.entries(m).sort((a, b) => b[1] - a[1])[0]?.[0] || 'Unmapped';
+
+  const asPrimary = {};
+  for (const [id, m] of Object.entries(asSpend))
+    asPrimary[id] = Object.entries(m).sort((a, b) => b[1] - a[1])[0]?.[0] || 'Unmapped';
+
+  /* ── 5. Global budget dedup sets (prevent same campaign budget in 2 groups) ── */
+  const budgetCampSeen = new Set();
+  const budgetAsSeen   = new Set();
+  const hasBudgetData  = Object.keys(campaignMap).length > 0 || Object.keys(adsetMap).length > 0;
+
+  /* ── 6. Build groups ── */
   const groups = {};
 
   for (const adId of allAdIds) {
     const manual   = manualMap[adId] || {};
     const col      = manual.Collection || 'Unmapped';
-    const adRec    = adMap[adId]         || {};
-    const names    = byAd[adId]?._names  || {};
-    const asId     = adRec.adset_id     || names.adSetId   || '';
-    const camId    = adRec.campaign_id  || names.campaignId || '';
-    const asRec    = adsetMap[asId]      || {};
-    const camRec   = campaignMap[camId]  || {};
-    const adName   = adRec.name         || names.ad        || adId;
-    const asName   = asRec.name         || names.adSet     || asId;
-    const camName  = camRec.name        || names.campaign  || camId;
+    const adRec    = adMap[adId]        || {};
+    const n        = byAd[adId]?._n     || {};
+    const asId     = adRec.adset_id    || n.adSetId    || '';
+    const camId    = adRec.campaign_id  || n.campaignId || '';
+    const asRec    = adsetMap[asId]     || {};
+    const camRec   = campaignMap[camId] || {};
+    const adName   = adRec.name        || n.ad         || adId;
+    const asName   = asRec.name        || n.adSet      || asId;
+    const camName  = camRec.name       || n.campaign   || camId;
     const adStatus = adRec.effective_status || adRec.status || '';
 
     if (!groups[col]) {
       groups[col] = {
-        collection: col,
-        spend: 0, impressions: 0, clicks: 0, purchases: 0, revenue: 0,
-        dailyBudget: 0, lifetimeBudget: 0,
-        hasBudgetData,
-        campaigns: {}, adsets: {}, ads: [],
-        _campSeen: new Set(), _asSeen: new Set(),
+        collection: col, hasBudgetData,
+        spend:0, impressions:0, clicks:0, purchases:0, revenue:0,
+        dailyBudget:0, lifetimeBudget:0,
+        campaigns:{}, adsets:{}, ads:[],
       };
     }
     const g = groups[col];
 
-    /* Spend metrics */
-    const pm = byAd[adId] || { spend: 0, impressions: 0, clicks: 0, purchases: 0, revenue: 0, n: 1 };
+    /* Ad-level spend → collection totals */
+    const pm = byAd[adId] || { spend:0, impressions:0, clicks:0, purchases:0, revenue:0, n:1 };
     g.spend       += pm.spend;
     g.impressions += pm.impressions;
     g.clicks      += pm.clicks;
     g.purchases   += pm.purchases;
     g.revenue     += pm.revenue;
 
-    /* Budget — divide by 100 (Meta: minor currency units) */
+    /* Budget (Meta minor units → /100). Only count in primary collection, only once globally. */
     const campDB = parseInt(camRec.daily_budget    || 0);
     const campLB = parseInt(camRec.lifetime_budget || 0);
     const asDB   = parseInt(asRec.daily_budget     || 0);
     const asLB   = parseInt(asRec.lifetime_budget  || 0);
 
-    if (camId && !g._campSeen.has(camId)) {
-      g._campSeen.add(camId);
+    if (camId && camPrimary[camId] === col && !budgetCampSeen.has(camId)) {
+      budgetCampSeen.add(camId);
       if (campDB > 0) g.dailyBudget    += campDB / 100;
       if (campLB > 0) g.lifetimeBudget += campLB / 100;
     }
-    if (asId && !g._asSeen.has(asId)) {
-      g._asSeen.add(asId);
-      // ABO: only count adset budget when campaign has none
-      if (!campDB && !campLB) {
+    if (asId && asPrimary[asId] === col && !budgetAsSeen.has(asId)) {
+      budgetAsSeen.add(asId);
+      if (!campDB && !campLB) {   // ABO: adset carries budget, campaign doesn't
         if (asDB > 0) g.dailyBudget    += asDB / 100;
         if (asLB > 0) g.lifetimeBudget += asLB / 100;
       }
     }
 
-    /* Campaign row (deduped) */
-    if (camId && !g.campaigns[camId]) {
+    /* Campaign row — ONLY in its primary collection */
+    if (camId && camPrimary[camId] === col && !g.campaigns[camId]) {
       const cm = byCam[camId] || {};
       g.campaigns[camId] = {
         id: camId, name: camName,
         status: camRec.effective_status || camRec.status || '',
         objective: (camRec.objective || '').replace(/_/g, ' '),
         dailyBudget: campDB / 100, lifetimeBudget: campLB / 100,
-        spend: cm.spend || 0, impressions: cm.impressions || 0,
-        clicks: cm.clicks || 0, purchases: cm.purchases || 0, revenue: cm.revenue || 0,
+        spend: cm.spend||0, impressions: cm.impressions||0,
+        clicks: cm.clicks||0, purchases: cm.purchases||0, revenue: cm.revenue||0,
+        metaCpr: cm.metaCpr||0,
       };
     }
 
-    /* Adset row (deduped) */
-    if (asId && !g.adsets[asId]) {
+    /* Adset row — ONLY in its primary collection */
+    if (asId && asPrimary[asId] === col && !g.adsets[asId]) {
       const am = byAs[asId] || {};
       g.adsets[asId] = {
         id: asId, name: asName,
         campaignId: camId, campaignName: camName,
         status: asRec.effective_status || asRec.status || '',
         dailyBudget: asDB / 100, lifetimeBudget: asLB / 100,
-        spend: am.spend || 0, impressions: am.impressions || 0,
-        clicks: am.clicks || 0, purchases: am.purchases || 0, revenue: am.revenue || 0,
+        spend: am.spend||0, impressions: am.impressions||0,
+        clicks: am.clicks||0, purchases: am.purchases||0, revenue: am.revenue||0,
+        metaCpr: am.metaCpr||0,
       };
     }
 
-    /* Fatigue / quality from enriched (7D based — best quality data available) */
-    const en    = enrichedByAdId[adId] || {};
-    const freq  = pm.n > 0 ? (pm.freqSum / pm.n) : parseFloat(en.frequency || 0);
-    const qr    = en.qualityRanking    || '';
-    const er    = en.engagementRanking || '';
-    const cr    = en.conversionRanking || '';
-    const trend = en.trendSignal       || '';
+    /* Fatigue from enriched */
+    const en   = enrichedByAdId[adId] || {};
+    const freq = pm.n > 0 ? (pm.freqSum / pm.n) : parseFloat(en.frequency || 0);
+    const qr   = en.qualityRanking    || '';
+    const er   = en.engagementRanking || '';
+    const cr   = en.conversionRanking || '';
+    const trend= en.trendSignal       || '';
 
     let fatigueScore = 0;
     const signals = [];
     if      (freq > 5) { fatigueScore += 3; signals.push(`Freq ${freq.toFixed(1)}x — critical`); }
     else if (freq > 3) { fatigueScore += 2; signals.push(`Freq ${freq.toFixed(1)}x — high`); }
     else if (freq > 2) { fatigueScore += 1; signals.push(`Freq ${freq.toFixed(1)}x`); }
-
     if (qr.includes('BELOW')) { fatigueScore += qr.includes('10') || qr.includes('20') ? 2 : 1; signals.push('Below-avg quality'); }
     if (er.includes('BELOW')) { fatigueScore += 1; signals.push('Below-avg engagement'); }
     if (cr.includes('BELOW')) { fatigueScore += 1; signals.push('Below-avg conv rate'); }
     if (trend.includes('Fatigue / Worsening')) { fatigueScore += 3; signals.push('Fatigue + ROAS declining'); }
     else if (trend.includes('Fatigue'))         { fatigueScore += 2; signals.push('Fatigue risk'); }
     else if (trend.includes('Worsening'))       { fatigueScore += 1; signals.push('ROAS declining'); }
-
-    const fatigueLevel = fatigueScore >= 5 ? 'critical'
-                       : fatigueScore >= 3 ? 'high'
-                       : fatigueScore >= 1 ? 'medium'
-                       : 'none';
+    const fatigueLevel = fatigueScore >= 5 ? 'critical' : fatigueScore >= 3 ? 'high' : fatigueScore >= 1 ? 'medium' : 'none';
 
     g.ads.push({
       id: adId, name: adName,
@@ -255,36 +281,38 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
       status: adStatus, manual,
       spend: pm.spend, impressions: pm.impressions, clicks: pm.clicks,
       purchases: pm.purchases, revenue: pm.revenue,
-      // Use Meta's own ROAS — not computed
-      metaRoas:  metaRoasByAdId[adId] || 0,
+      metaRoas: pm.metaRoas || 0,   // Meta's purchase_roas — direct
+      metaCpr:  pm.metaCpr  || 0,   // Meta's cost_per_result — direct
       frequency: Math.round(freq * 10) / 10,
-      ctr:    pm.impressions > 0 ? (pm.clicks  / pm.impressions) * 100 : 0,
-      cpm:    pm.impressions > 0 ? (pm.spend   / pm.impressions) * 1000 : 0,
+      ctr: pm.impressions > 0 ? (pm.clicks / pm.impressions) * 100 : 0,
+      cpm: pm.impressions > 0 ? (pm.spend  / pm.impressions) * 1000 : 0,
       fatigueScore, fatigueLevel, signals,
-      trendSignal:    en.trendSignal      || '',
-      currentQuality: en.currentQuality  || '',
-      decision:       en.decision        || '',
-      audienceFamily: en.audienceFamily  || '',
+      trendSignal:    en.trendSignal     || '',
+      currentQuality: en.currentQuality || '',
+      decision:       en.decision       || '',
+      audienceFamily: en.audienceFamily || '',
       qualityRanking: qr, engagementRanking: er, conversionRanking: cr,
     });
   }
 
-  /* ── 6. Finalise ── */
+  /* ── 7. Finalise ── */
   return Object.values(groups).map(g => {
-    delete g._campSeen; delete g._asSeen;
     const ctr = g.impressions > 0 ? (g.clicks / g.impressions) * 100 : 0;
     const cpm = g.impressions > 0 ? (g.spend  / g.impressions) * 1000 : 0;
-    const expectedSpend = g.dailyBudget * periodDays;
-    const pacing = expectedSpend > 0 ? (g.spend / expectedSpend) * 100 : null;
-    const campaigns = Object.values(g.campaigns).sort((a, b) => b.spend - a.spend);
-    const adsets    = Object.values(g.adsets).sort((a, b) => b.spend - a.spend);
-    const ads       = g.ads.sort((a, b) => b.spend - a.spend);
+    // Aggregated ROAS and CPR from Meta data (revenue/spend, spend/purchases)
+    const aggRoas = g.spend > 0 && g.revenue > 0 ? g.revenue / g.spend : 0;
+    const aggCpr  = g.purchases > 0 ? g.spend / g.purchases : 0;
+    const expectedSpend  = g.dailyBudget * periodDays;
+    const pacing         = expectedSpend > 0 ? (g.spend / expectedSpend) * 100 : null;
+    const campaigns      = Object.values(g.campaigns).sort((a, b) => b.spend - a.spend);
+    const adsets         = Object.values(g.adsets).sort((a, b) => b.spend - a.spend);
+    const ads            = g.ads.sort((a, b) => b.spend - a.spend);
     const highFatigueAds = ads.filter(a => a.fatigueLevel === 'critical' || a.fatigueLevel === 'high');
     const activeAds      = ads.filter(a => a.status === 'ACTIVE').length;
     const decisionDist   = {};
     for (const a of ads) if (a.decision) decisionDist[a.decision] = (decisionDist[a.decision] || 0) + 1;
     return {
-      ...g, ctr, cpm, expectedSpend, pacing,
+      ...g, ctr, cpm, aggRoas, aggCpr, expectedSpend, pacing,
       campaigns, adsets, ads, highFatigueAds, activeAds, decisionDist,
     };
   }).sort((a, b) => b.spend - a.spend);
@@ -333,6 +361,7 @@ function EntityTable({ rows, type }) {
       { h: 'Purchases',   r: row => fmtN(row.purchases),                          num: true },
       { h: 'Revenue',     r: row => <span className="text-emerald-400 font-mono text-xs">{fmt(row.revenue)}</span>, num: true },
       { h: 'ROAS',        r: row => <span className={aggRoasCls(row.revenue, row.spend) + ' font-bold font-mono text-xs'}>{fmtAggRoas(row.revenue, row.spend)}</span>, num: true },
+      { h: 'CPR',         r: row => { const v = row.metaCpr > 0 ? row.metaCpr : (row.purchases > 0 ? row.spend / row.purchases : 0); return v > 0 ? <span className="font-mono text-xs text-gray-300">{fmt(v)}</span> : null; }, num: true },
     ],
     adsets: [
       { h: 'Ad Set',      r: row => <div><div className="font-medium text-white text-xs">{row.name}</div><div className="text-[10px] text-slate-500">{row.campaignName}</div></div>, w: 'min-w-[160px]' },
@@ -344,6 +373,7 @@ function EntityTable({ rows, type }) {
       { h: 'Purchases',   r: row => fmtN(row.purchases),                          num: true },
       { h: 'Revenue',     r: row => <span className="text-emerald-400 font-mono text-xs">{fmt(row.revenue)}</span>, num: true },
       { h: 'ROAS',        r: row => <span className={aggRoasCls(row.revenue, row.spend) + ' font-bold font-mono text-xs'}>{fmtAggRoas(row.revenue, row.spend)}</span>, num: true },
+      { h: 'CPR',         r: row => { const v = row.metaCpr > 0 ? row.metaCpr : (row.purchases > 0 ? row.spend / row.purchases : 0); return v > 0 ? <span className="font-mono text-xs text-gray-300">{fmt(v)}</span> : null; }, num: true },
     ],
     ads: [
       { h: 'Ad',          r: row => <div><div className="font-medium text-white text-xs">{row.name}</div><div className="text-[10px] text-slate-500 truncate max-w-[160px]">{row.adSetName}</div></div>, w: 'min-w-[160px]' },
@@ -356,8 +386,9 @@ function EntityTable({ rows, type }) {
       { h: 'CPM',         r: row => row.cpm > 0 ? fmt(row.cpm) : '—',             num: true },
       { h: 'Purchases',   r: row => fmtN(row.purchases),    num: true },
       { h: 'Revenue',     r: row => <span className="text-emerald-400">{fmt(row.revenue)}</span>, num: true },
-      // Meta's own ROAS — not computed
+      // Meta's own ROAS and CPR — not computed
       { h: 'ROAS (Meta)', r: row => <span className={roasCls(row.metaRoas) + ' font-bold'}>{fmtRoas(row.metaRoas)}</span>, num: true },
+      { h: 'CPR (Meta)',  r: row => row.metaCpr > 0 ? <span className="font-mono text-gray-300">{fmt(row.metaCpr)}</span> : null, num: true },
     ],
   }[type] || [];
 
@@ -483,7 +514,7 @@ function OverviewTab({ g, periodDays }) {
         <Chip label="ROAS"       value={fmtAggRoas(g.revenue, g.spend)} cls={aggRoasCls(g.revenue, g.spend)} />
         <Chip label="Impressions"value={fmtN(g.impressions)} cls="text-gray-300" />
         <Chip label="Purchases"  value={fmtN(g.purchases)} cls="text-gray-300" />
-        <Chip label="CPA"        value={fmt(cpa)} cls={cpa > 0 && cpa < 300 ? 'text-emerald-400' : 'text-amber-400'} />
+        <Chip label="CPR"        value={fmt(cpa)} cls={cpa > 0 && cpa < 300 ? 'text-emerald-400' : 'text-amber-400'} />
       </div>
       <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
         <Chip label="CTR%" value={g.ctr > 0 ? g.ctr.toFixed(2) + '%' : '—'} cls="text-gray-300" />
@@ -634,6 +665,7 @@ function CollectionCard({ g, totalSpend, periodDays }) {
               c: g.pacing == null ? 'text-slate-500' : g.pacing > 110 ? 'text-red-400' : g.pacing > 85 ? 'text-emerald-400' : 'text-amber-400' },
             { l: 'Revenue',   v: fmt(g.revenue),                        c: 'text-emerald-400' },
             { l: 'ROAS',      v: fmtAggRoas(g.revenue, g.spend),        c: aggRoasCls(g.revenue, g.spend) + ' font-bold' },
+            { l: 'CPR',       v: g.aggCpr > 0 ? fmt(g.aggCpr) : '—',   c: 'text-gray-300' },
             { l: 'Ads',       v: `${g.activeAds}A / ${g.ads.length}`,   c: 'text-gray-300' },
           ].map(m => (
             <div key={m.l} className="text-right min-w-[56px]">
