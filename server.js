@@ -93,23 +93,37 @@ app.post('/api/shopify/inventory', async (req, res) => {
     const accessToken = await shopifyToken(shopDomain, clientId, clientSecret);
     const headers = { 'X-Shopify-Access-Token': accessToken };
 
-    // Step 1: Pull all active products (with pagination)
-    const allProducts = [];
-    let url = `https://${shopDomain}.myshopify.com/admin/api/2024-01/products.json?limit=250&status=active`;
+    // Step 1: Pull products page-by-page — extract ONLY needed fields, never buffer all products.
+    // Request minimal fields from Shopify to reduce inbound payload too (images/options/body_html excluded).
+    const variantMap  = {};  // inventory_item_id → slim variant record
+    const skuToItemId = {};
+    let url = `https://${shopDomain}.myshopify.com/admin/api/2024-01/products.json?limit=250&status=active&fields=id,title,product_type,tags,variants`;
     while (url) {
       const resp = await withRetry(() => axios.get(url, { headers, timeout: 45000 }));
-      allProducts.push(...(resp.data.products || []));
+      for (const p of (resp.data.products || [])) {
+        const pid = String(p.id);
+        for (const v of (p.variants || [])) {
+          const sku = (v.sku || '').trim().toUpperCase();
+          if (!v.inventory_item_id) continue;
+          const itemId = String(v.inventory_item_id);
+          variantMap[itemId] = {
+            sku,
+            variantTitle: v.title   || '',
+            price:        parseFloat(v.price) || 0,
+            productId:    pid,
+            productTitle: p.title        || '',
+            productType:  p.product_type || '',
+            tags:         p.tags         || '',
+            _totalStock:  0,
+          };
+          if (sku) skuToItemId[sku] = itemId;
+        }
+      }
       const m = (resp.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
       url = m ? m[1] : null;
     }
 
-    // Step 2: Build variant → inventory_item_id map
-    const variantMap = {};
-    allProducts.forEach(p => (p.variants || []).forEach(v => {
-      if (v.inventory_item_id) variantMap[v.inventory_item_id] = v;
-    }));
-
-    // Step 3: Fetch active locations
+    // Step 2: Fetch active locations
     let locations = [];
     try {
       const locResp = await withRetry(() => axios.get(
@@ -119,11 +133,10 @@ app.post('/api/shopify/inventory', async (req, res) => {
       locations = (locResp.data.locations || []).filter(l => l.active);
     } catch (_) {}
 
-    // Step 4: Fetch inventory levels in batches of 50 — collect per-location stock
+    // Step 3: Fetch inventory levels in batches of 50
     const itemIds = Object.keys(variantMap);
     const inventoryByLocation = {};
     if (itemIds.length > 0) {
-      // Parallel batches (4 at a time) for speed
       const batches = [];
       for (let i = 0; i < itemIds.length; i += 50) batches.push(itemIds.slice(i, i + 50));
       const CONCURRENCY = 4;
@@ -135,9 +148,9 @@ app.post('/api/shopify/inventory', async (req, res) => {
               { headers, timeout: 45000 },
             ));
             (lvlResp.data.inventory_levels || []).forEach(lvl => {
-              const v = variantMap[lvl.inventory_item_id];
-              if (v) {
-                v._totalStock = (v._totalStock || 0) + (lvl.available || 0);
+              const rec = variantMap[lvl.inventory_item_id];
+              if (rec) {
+                rec._totalStock += (lvl.available || 0);
                 const locId = String(lvl.location_id);
                 if (!inventoryByLocation[locId]) inventoryByLocation[locId] = {};
                 inventoryByLocation[locId][String(lvl.inventory_item_id)] = lvl.available || 0;
@@ -148,18 +161,10 @@ app.post('/api/shopify/inventory', async (req, res) => {
       }
     }
 
-    const skuToItemId = {};
-    allProducts.forEach(p => (p.variants || []).forEach(v => {
-      const sku = (v.sku || '').trim().toUpperCase();
-      if (sku && v.inventory_item_id) skuToItemId[sku] = String(v.inventory_item_id);
-    }));
-
-    // Step 5: Fetch all collections (custom + smart) and their product memberships
+    // Step 4: Fetch collections + product memberships
     let allCollections = [];
     const productCollections = {}; // productId → [collectionTitle, ...]
-
     try {
-      // Fetch custom collections
       const customColls = [];
       let ccUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/custom_collections.json?limit=250&fields=id,title,handle`;
       while (ccUrl) {
@@ -169,7 +174,6 @@ app.post('/api/shopify/inventory', async (req, res) => {
         ccUrl = m ? m[1] : null;
       }
 
-      // Fetch smart collections
       const smartColls = [];
       let scUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/smart_collections.json?limit=250&fields=id,title,handle`;
       while (scUrl) {
@@ -186,7 +190,6 @@ app.post('/api/shopify/inventory', async (req, res) => {
 
       const collById = Object.fromEntries(allCollections.map(c => [c.id, c.title]));
 
-      // Fetch collects (custom collection → product memberships)
       let collectsUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/collects.json?limit=250&fields=collection_id,product_id`;
       while (collectsUrl) {
         const r = await withRetry(() => axios.get(collectsUrl, { headers, timeout: 20000 }));
@@ -201,7 +204,6 @@ app.post('/api/shopify/inventory', async (req, res) => {
         collectsUrl = m ? m[1] : null;
       }
 
-      // For smart collections: fetch products per smart collection (up to 50 collections max to stay fast)
       const smartToCheck = smartColls.slice(0, 50);
       await Promise.all(smartToCheck.map(async sc => {
         try {
@@ -216,13 +218,38 @@ app.post('/api/shopify/inventory', async (req, res) => {
             const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
             spUrl = m ? m[1] : null;
           }
-        } catch (_) {} // non-fatal — skip if individual smart collection fails
+        } catch (_) {}
       }));
     } catch (collErr) {
       console.warn('[inventory] collections fetch failed (non-fatal):', collErr.message);
     }
 
-    res.json({ products: allProducts, locations, inventoryByLocation, skuToItemId, collections: allCollections, productCollections });
+    // Step 5: Build inventory map server-side — send pre-computed map, NOT raw products.
+    // This keeps the response payload small (a few KB/MB vs. potentially 100MB+ of raw products).
+    const map = {};
+    for (const [itemId, rec] of Object.entries(variantMap)) {
+      if (!rec.sku) continue;
+      const collections   = productCollections[rec.productId] || [];
+      const collectionLabel = collections[0] || rec.productType || '';
+      if (map[rec.sku]) {
+        map[rec.sku].stock += rec._totalStock;
+      } else {
+        map[rec.sku] = {
+          title:           rec.productTitle,
+          variantTitle:    rec.variantTitle,
+          stock:           rec._totalStock,
+          price:           rec.price,
+          productType:     rec.productType,
+          collectionLabel,
+          collections,
+          tags:            rec.tags,
+          productId:       rec.productId,
+          inventoryItemId: itemId,
+        };
+      }
+    }
+
+    res.json({ map, locations, inventoryByLocation, skuToItemId, collections: allCollections });
   } catch (err) {
     const status = err.response?.status || 500;
     res.status(status).json({ error: err.response?.data?.errors || err.message });
