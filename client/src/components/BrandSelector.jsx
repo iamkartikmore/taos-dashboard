@@ -1,11 +1,11 @@
 import { useStore } from '../store';
 
 export default function BrandSelector() {
-  const { brands, activeBrandIds, toggleBrandActive, setAllBrandsActive, setNoBrandsActive } = useStore();
+  const { brands, activeBrandIds, brandData, toggleBrandActive, setAllBrandsActive, setNoBrandsActive } = useStore();
 
   if (!brands || brands.length <= 1) return null;
 
-  const allActive = brands.every(b => activeBrandIds.includes(b.id));
+  const allActive  = brands.every(b => activeBrandIds.includes(b.id));
   const noneActive = brands.every(b => !activeBrandIds.includes(b.id));
 
   return (
@@ -13,7 +13,10 @@ export default function BrandSelector() {
       <span className="text-[10px] font-bold uppercase tracking-widest text-slate-600 shrink-0">Brands</span>
 
       {brands.map(brand => {
-        const active = activeBrandIds.includes(brand.id);
+        const active   = activeBrandIds.includes(brand.id);
+        const status   = brandData?.[brand.id]?.metaStatus;
+        const loading  = active && status === 'loading';
+        const noData   = active && !loading && !brandData?.[brand.id]?.insights7d?.length;
         return (
           <button
             key={brand.id}
@@ -29,8 +32,14 @@ export default function BrandSelector() {
               color: '#64748b',
             }}
           >
-            <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: active ? brand.color : '#374151' }} />
+            {/* Dot: pulse when loading, dim when active but no data */}
+            <span
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${loading ? 'animate-pulse' : ''}`}
+              style={{ background: active ? (noData ? '#6b7280' : brand.color) : '#374151' }}
+            />
             {brand.name}
+            {loading && <span className="text-[9px] opacity-60 ml-0.5">…</span>}
+            {noData   && <span className="text-[9px] opacity-50 ml-0.5">no data</span>}
           </button>
         );
       })}
