@@ -26,6 +26,7 @@ const DailyBriefing  = lazy(() => import('./pages/DailyBriefing'));
 const OrderAnalysis      = lazy(() => import('./pages/OrderAnalysis'));
 const CollectionSpend    = lazy(() => import('./pages/CollectionSpend'));
 const AOVAnalysis        = lazy(() => import('./pages/AOVAnalysis'));
+const BusinessPlan       = lazy(() => import('./pages/BusinessPlan'));
 
 function PageFallback() {
   return (
@@ -61,6 +62,7 @@ function PrefetchAllPages() {
       import('./pages/OrderAnalysis');
       import('./pages/CollectionSpend');
       import('./pages/AOVAnalysis');
+      import('./pages/BusinessPlan');
     }, 800);
     return () => clearTimeout(t);
   }, []);
@@ -100,6 +102,7 @@ export default function App() {
             <Route path="/analysis"           element={<OrderAnalysis />} />
             <Route path="/collection-spend" element={<CollectionSpend />} />
             <Route path="/aov"              element={<AOVAnalysis />} />
+            <Route path="/business-plan"    element={<BusinessPlan />} />
             <Route path="*"                 element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
