@@ -85,13 +85,17 @@ function fmtBudget(db, lb) {
 
 /* ─── BUILD COLLECTION GROUPS ────────────────────────────────────── */
 function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap, adMap, periodDays) {
+  const hasAdMap = Object.keys(adMap).length > 0;
+  const isActive = id => !hasAdMap || !adMap[id] || adMap[id].effective_status === 'ACTIVE';
 
-  /* ── 1. Period metrics per entity (one pass) ── */
+  /* ── 1. Period metrics per entity — ACTIVE ads only ── */
   const byAd  = {};
   const byAs  = {};
   const byCam = {};
 
   for (const r of periodRows) {
+    // Skip paused/deleted/inactive ads when we have adMap data
+    if (hasAdMap && adMap[r.adId] && adMap[r.adId].effective_status !== 'ACTIVE') continue;
     const acc = (map, id) => {
       if (!id) return;
       if (!map[id]) map[id] = {
@@ -136,10 +140,10 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
   const enrichedByAdId = {};
   for (const r of enrichedRows) enrichedByAdId[r.adId] = r;
 
-  /* ── 3. All ad IDs ── */
+  /* ── 3. All ad IDs — active only ── */
   const allAdIds = new Set([
     ...Object.keys(byAd),
-    ...Object.keys(adMap).filter(id => manualMap[id]),
+    ...Object.keys(adMap).filter(id => manualMap[id] && isActive(id)),
   ]);
 
   /* ── 4. Pre-compute PRIMARY collection per campaign and adset
@@ -237,8 +241,10 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
       }
     }
 
-    /* Campaign row — ONLY in its primary collection */
-    if (camId && camPrimary[camId] === col && !g.campaigns[camId]) {
+    /* Campaign row — ONLY in its primary collection, ACTIVE only */
+    const camStatus = camRec.effective_status || camRec.status || '';
+    if (camId && camPrimary[camId] === col && !g.campaigns[camId] &&
+        (!hasAdMap || !camStatus || camStatus === 'ACTIVE')) {
       const cm = byCam[camId] || {};
       g.campaigns[camId] = {
         id: camId, name: camName,
@@ -251,8 +257,10 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
       };
     }
 
-    /* Adset row — ONLY in its primary collection */
-    if (asId && asPrimary[asId] === col && !g.adsets[asId]) {
+    /* Adset row — ONLY in its primary collection, ACTIVE only */
+    const asStatus = asRec.effective_status || asRec.status || '';
+    if (asId && asPrimary[asId] === col && !g.adsets[asId] &&
+        (!hasAdMap || !asStatus || asStatus === 'ACTIVE')) {
       const am = byAs[asId] || {};
       g.adsets[asId] = {
         id: asId, name: asName,
