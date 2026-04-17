@@ -1,7 +1,19 @@
+/**
+ * Collection Spend — data source rules:
+ *
+ * ✓ 7D / 14D / 30D  : brandData[b.id].insights* directly (no rawAccounts —
+ *                     rawAccounts multiplies by account-count per brand → wrong)
+ * ✓ Yesterday / 3D  : lazy-fetched from Meta on demand (not in standard pull)
+ * ✓ ROAS            : metaRoas from insight row (Meta's own purchase_roas).
+ *                     Collection / campaign / adset: computed from summed revenue / spend.
+ * ✓ Budget          : only shown when campaignMap / adsetMap are populated.
+ *                     If not: shows a "not loaded" chip instead of 0.
+ */
+
 import { useState, useMemo, useCallback } from 'react';
 import {
   ChevronDown, ChevronRight, TrendingUp, Loader2, RefreshCw,
-  AlertTriangle, Zap, Target, BarChart3, Flame, Shield,
+  AlertTriangle, Zap, Target, BarChart3, Flame, Info,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { fetchInsights } from '../lib/api';
@@ -9,328 +21,343 @@ import { normalizeInsight } from '../lib/analytics';
 
 /* ─── PERIODS ─────────────────────────────────────────────────────── */
 const PERIODS = [
-  { id: 'yesterday', label: 'Yesterday', days: 1 },
-  { id: '3d',        label: 'Last 3D',   days: 3, lazy: true },
-  { id: '7d',        label: 'Last 7D',   days: 7 },
+  { id: 'yesterday', label: 'Yesterday', days: 1,  preset: 'yesterday', lazy: true },
+  { id: '3d',        label: 'Last 3D',   days: 3,  preset: 'last_3d',   lazy: true },
+  { id: '7d',        label: 'Last 7D',   days: 7  },
   { id: '14d',       label: 'Last 14D',  days: 14 },
 ];
 
 /* ─── FORMATTERS ──────────────────────────────────────────────────── */
-const n = v => parseFloat(v || 0);
 function fmt(v) {
-  if (!v) return '—';
-  if (v >= 1e7) return '₹' + (v / 1e7).toFixed(2) + 'Cr';
-  if (v >= 1e5) return '₹' + (v / 1e5).toFixed(2) + 'L';
-  if (v >= 1e3) return '₹' + (v / 1e3).toFixed(1) + 'K';
-  return '₹' + Math.round(v);
+  const n = parseFloat(v) || 0;
+  if (!n) return '—';
+  if (n >= 1e7) return '₹' + (n / 1e7).toFixed(2) + 'Cr';
+  if (n >= 1e5) return '₹' + (n / 1e5).toFixed(2) + 'L';
+  if (n >= 1e3) return '₹' + (n / 1e3).toFixed(1) + 'K';
+  return '₹' + Math.round(n);
 }
 function fmtN(v) {
-  if (!v) return '—';
-  if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
-  if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
-  return String(Math.round(v));
+  const n = parseFloat(v) || 0;
+  if (!n) return '—';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(Math.round(n));
 }
-function fmtR(rev, spend) {
-  if (!spend || !rev) return '—';
-  return (rev / spend).toFixed(2) + 'x';
+// ROAS from Meta's purchase_roas — never divide by zero or invent numbers
+function fmtRoas(metaRoas) {
+  const n = parseFloat(metaRoas) || 0;
+  return n > 0 ? n.toFixed(2) + 'x' : '—';
 }
-function fmtPct(v) { return v != null ? Math.round(v) + '%' : '—'; }
-function roasCls(rev, spend) {
+// Aggregated ROAS (unavoidable at collection level)
+function fmtAggRoas(revenue, spend) {
+  if (!spend || !revenue) return '—';
+  return (revenue / spend).toFixed(2) + 'x';
+}
+function roasCls(roas) {
+  const n = parseFloat(roas) || 0;
+  if (n >= 3)   return 'text-emerald-400';
+  if (n >= 1.5) return 'text-amber-400';
+  if (n > 0)    return 'text-red-400';
+  return 'text-slate-500';
+}
+function aggRoasCls(revenue, spend) {
   if (!spend) return 'text-slate-500';
-  const r = rev / spend;
-  if (r >= 3) return 'text-emerald-400';
-  if (r >= 1.5) return 'text-amber-400';
-  return 'text-red-400';
+  return roasCls(revenue / spend);
 }
 function statusCls(s) {
-  const upper = (s || '').toUpperCase();
-  if (upper === 'ACTIVE') return 'bg-emerald-500/15 text-emerald-400 ring-emerald-500/20';
-  if (upper === 'PAUSED') return 'bg-gray-700/40 text-slate-400 ring-gray-600/20';
-  if (upper.includes('PENDING') || upper.includes('PROCESS')) return 'bg-amber-500/15 text-amber-400 ring-amber-500/20';
-  return 'bg-red-500/10 text-red-400 ring-red-500/20';
+  const u = (s || '').toUpperCase();
+  if (u === 'ACTIVE')   return 'bg-emerald-500/15 text-emerald-400';
+  if (u === 'PAUSED')   return 'bg-gray-700/40 text-slate-400';
+  if (u.includes('PEND') || u.includes('PROC')) return 'bg-amber-500/15 text-amber-400';
+  return 'bg-red-500/10 text-red-400';
 }
 function fatigueCls(level) {
   if (level === 'critical') return 'bg-red-500/15 text-red-400';
   if (level === 'high')     return 'bg-orange-500/15 text-orange-400';
   if (level === 'medium')   return 'bg-amber-500/15 text-amber-400';
-  return 'bg-gray-700/30 text-slate-500';
+  return '';
+}
+function fmtBudget(db, lb) {
+  if (db > 0) return fmt(db) + '/d';
+  if (lb > 0) return fmt(lb) + ' LT';
+  return null; // null = not set / unknown
 }
 
 /* ─── BUILD COLLECTION GROUPS ────────────────────────────────────── */
-function buildCollectionGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap, adMap, periodDays) {
-  // 1. Aggregate period metrics per entity
+function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap, adMap, periodDays) {
+  /* ── 1. Period metrics per entity ── */
   const byAd  = {};
   const byAs  = {};
   const byCam = {};
+
   for (const r of periodRows) {
-    const add = (map, id) => {
-      if (!map[id]) map[id] = { spend:0, impressions:0, clicks:0, purchases:0, revenue:0, freqSum:0, n:0 };
+    const addTo = (map, id) => {
+      if (!id) return;
+      if (!map[id]) map[id] = {
+        spend: 0, impressions: 0, clicks: 0, purchases: 0, revenue: 0,
+        freqSum: 0, roasSum: 0, n: 0,
+        _names: {},
+      };
       const m = map[id];
-      m.spend       += n(r.spend);
-      m.impressions += n(r.impressions);
-      m.clicks      += n(r.outboundClicks || r.clicksAll);
-      m.purchases   += n(r.purchases);
-      m.revenue     += n(r.revenue);
-      m.freqSum     += n(r.frequency);
+      m.spend       += parseFloat(r.spend)        || 0;
+      m.impressions += parseFloat(r.impressions)   || 0;
+      m.clicks      += parseFloat(r.outboundClicks || r.clicksAll) || 0;
+      m.purchases   += parseFloat(r.purchases)     || 0;
+      m.revenue     += parseFloat(r.revenue)       || 0;
+      m.freqSum     += parseFloat(r.frequency)     || 0;
+      m.roasSum     += parseFloat(r.metaRoas)      || 0; // for ad-level: take last non-zero
       m.n++;
-      // store names from insight row as fallback
-      if (!m._adName     && r.adName)       m._adName       = r.adName;
-      if (!m._adSetName  && r.adSetName)     m._adSetName    = r.adSetName;
-      if (!m._campName   && r.campaignName)  m._campName     = r.campaignName;
-      if (!m._adSetId    && r.adSetId)       m._adSetId      = r.adSetId;
-      if (!m._campaignId && r.campaignId)    m._campaignId   = r.campaignId;
     };
-    if (r.adId)       add(byAd,  r.adId);
-    if (r.adSetId)    add(byAs,  r.adSetId);
-    if (r.campaignId) add(byCam, r.campaignId);
+    addTo(byAd,  r.adId);
+    addTo(byAs,  r.adSetId);
+    addTo(byCam, r.campaignId);
+
+    // Store name lookups from insight rows (fallback if not in maps)
+    if (byAd[r.adId]) {
+      byAd[r.adId]._names = {
+        ad: r.adName, adSet: r.adSetName, adSetId: r.adSetId,
+        campaign: r.campaignName, campaignId: r.campaignId,
+      };
+    }
   }
 
-  // 2. Enriched map for quality/fatigue
+  /* ── 2. Last metaRoas per ad (there's typically 1 row per ad per preset) ── */
+  const metaRoasByAdId = {};
+  for (const r of periodRows) {
+    if (r.adId && parseFloat(r.metaRoas) > 0) metaRoasByAdId[r.adId] = parseFloat(r.metaRoas);
+  }
+
+  /* ── 3. Enriched map for quality / fatigue signals ── */
   const enrichedByAdId = {};
   for (const r of enrichedRows) enrichedByAdId[r.adId] = r;
 
-  // 3. Candidate ad IDs = ads with spend OR ads in adMap that have a manual mapping
+  /* ── 4. Candidate ad IDs: ads with spend OR ads in adMap that have a collection ── */
   const allAdIds = new Set([
     ...Object.keys(byAd),
     ...Object.keys(adMap).filter(id => manualMap[id]),
   ]);
 
-  // 4. Build groups
+  const hasBudgetData = Object.keys(campaignMap).length > 0 || Object.keys(adsetMap).length > 0;
+
+  /* ── 5. Build groups ── */
   const groups = {};
 
   for (const adId of allAdIds) {
-    const manual     = manualMap[adId] || {};
-    const col        = manual.Collection || 'Unmapped';
-    const adRec      = adMap[adId] || {};
-    const asId       = adRec.adset_id   || byAd[adId]?._adSetId   || '';
-    const camId      = adRec.campaign_id || byAd[adId]?._campaignId || '';
-    const asRec      = adsetMap[asId]    || {};
-    const camRec     = campaignMap[camId] || {};
-    const adName     = adRec.name        || byAd[adId]?._adName   || adId;
-    const asName     = asRec.name        || byAd[adId]?._adSetName || asId;
-    const camName    = camRec.name       || byAd[adId]?._campName  || camId;
-    const adStatus   = adRec.effective_status || adRec.status || '';
+    const manual   = manualMap[adId] || {};
+    const col      = manual.Collection || 'Unmapped';
+    const adRec    = adMap[adId]         || {};
+    const names    = byAd[adId]?._names  || {};
+    const asId     = adRec.adset_id     || names.adSetId   || '';
+    const camId    = adRec.campaign_id  || names.campaignId || '';
+    const asRec    = adsetMap[asId]      || {};
+    const camRec   = campaignMap[camId]  || {};
+    const adName   = adRec.name         || names.ad        || adId;
+    const asName   = asRec.name         || names.adSet     || asId;
+    const camName  = camRec.name        || names.campaign  || camId;
+    const adStatus = adRec.effective_status || adRec.status || '';
 
     if (!groups[col]) {
       groups[col] = {
         collection: col,
         spend: 0, impressions: 0, clicks: 0, purchases: 0, revenue: 0,
         dailyBudget: 0, lifetimeBudget: 0,
+        hasBudgetData,
         campaigns: {}, adsets: {}, ads: [],
-        _campB: new Set(), _asB: new Set(),
+        _campSeen: new Set(), _asSeen: new Set(),
       };
     }
     const g = groups[col];
 
-    // Spend metrics
-    const pm = byAd[adId] || { spend:0, impressions:0, clicks:0, purchases:0, revenue:0, freqSum:0, n:1 };
+    /* Spend metrics */
+    const pm = byAd[adId] || { spend: 0, impressions: 0, clicks: 0, purchases: 0, revenue: 0, n: 1 };
     g.spend       += pm.spend;
     g.impressions += pm.impressions;
     g.clicks      += pm.clicks;
     g.purchases   += pm.purchases;
     g.revenue     += pm.revenue;
 
-    // Budget — Meta returns minor currency units (paise for INR) → /100
+    /* Budget — divide by 100 (Meta: minor currency units) */
     const campDB = parseInt(camRec.daily_budget    || 0);
     const campLB = parseInt(camRec.lifetime_budget || 0);
     const asDB   = parseInt(asRec.daily_budget     || 0);
     const asLB   = parseInt(asRec.lifetime_budget  || 0);
 
-    if (camId && !g._campB.has(camId)) {
-      g._campB.add(camId);
+    if (camId && !g._campSeen.has(camId)) {
+      g._campSeen.add(camId);
       if (campDB > 0) g.dailyBudget    += campDB / 100;
       if (campLB > 0) g.lifetimeBudget += campLB / 100;
     }
-    if (asId && !g._asB.has(asId)) {
-      g._asB.add(asId);
-      // Only add adset budget if its parent campaign doesn't hold one (ABO)
-      if (asDB > 0 && !campDB && !campLB) g.dailyBudget    += asDB / 100;
-      if (asLB > 0 && !campDB && !campLB) g.lifetimeBudget += asLB / 100;
+    if (asId && !g._asSeen.has(asId)) {
+      g._asSeen.add(asId);
+      // ABO: only count adset budget when campaign has none
+      if (!campDB && !campLB) {
+        if (asDB > 0) g.dailyBudget    += asDB / 100;
+        if (asLB > 0) g.lifetimeBudget += asLB / 100;
+      }
     }
 
-    // Campaign entry (deduped)
+    /* Campaign row (deduped) */
     if (camId && !g.campaigns[camId]) {
-      const cm = byCam[camId] || { spend:0, impressions:0, clicks:0, purchases:0, revenue:0 };
+      const cm = byCam[camId] || {};
       g.campaigns[camId] = {
         id: camId, name: camName,
         status: camRec.effective_status || camRec.status || '',
-        objective: camRec.objective || '',
-        dailyBudget:    campDB / 100,
-        lifetimeBudget: campLB / 100,
-        spend: cm.spend, impressions: cm.impressions, clicks: cm.clicks,
-        purchases: cm.purchases, revenue: cm.revenue,
+        objective: (camRec.objective || '').replace(/_/g, ' '),
+        dailyBudget: campDB / 100, lifetimeBudget: campLB / 100,
+        spend: cm.spend || 0, impressions: cm.impressions || 0,
+        clicks: cm.clicks || 0, purchases: cm.purchases || 0, revenue: cm.revenue || 0,
       };
     }
 
-    // Adset entry (deduped)
+    /* Adset row (deduped) */
     if (asId && !g.adsets[asId]) {
-      const am = byAs[asId] || { spend:0, impressions:0, clicks:0, purchases:0, revenue:0 };
+      const am = byAs[asId] || {};
       g.adsets[asId] = {
         id: asId, name: asName,
         campaignId: camId, campaignName: camName,
         status: asRec.effective_status || asRec.status || '',
-        dailyBudget:    asDB / 100,
-        lifetimeBudget: asLB / 100,
-        spend: am.spend, impressions: am.impressions, clicks: am.clicks,
-        purchases: am.purchases, revenue: am.revenue,
+        dailyBudget: asDB / 100, lifetimeBudget: asLB / 100,
+        spend: am.spend || 0, impressions: am.impressions || 0,
+        clicks: am.clicks || 0, purchases: am.purchases || 0, revenue: am.revenue || 0,
       };
     }
 
-    // Enriched / fatigue data
-    const en  = enrichedByAdId[adId] || {};
-    const freq = pm.n > 0 ? pm.freqSum / pm.n : n(en.frequency);
-    const ctr  = pm.impressions > 0 ? (pm.clicks / pm.impressions) * 100 : 0;
-    const cpm  = pm.impressions > 0 ? (pm.spend  / pm.impressions) * 1000 : 0;
-    const roas = pm.spend > 0 && pm.revenue > 0 ? pm.revenue / pm.spend : 0;
+    /* Fatigue / quality from enriched (7D based — best quality data available) */
+    const en    = enrichedByAdId[adId] || {};
+    const freq  = pm.n > 0 ? (pm.freqSum / pm.n) : parseFloat(en.frequency || 0);
+    const qr    = en.qualityRanking    || '';
+    const er    = en.engagementRanking || '';
+    const cr    = en.conversionRanking || '';
+    const trend = en.trendSignal       || '';
 
     let fatigueScore = 0;
     const signals = [];
-    if (freq > 5)      { fatigueScore += 3; signals.push(`Freq ${freq.toFixed(1)}x — critical`); }
+    if      (freq > 5) { fatigueScore += 3; signals.push(`Freq ${freq.toFixed(1)}x — critical`); }
     else if (freq > 3) { fatigueScore += 2; signals.push(`Freq ${freq.toFixed(1)}x — high`); }
     else if (freq > 2) { fatigueScore += 1; signals.push(`Freq ${freq.toFixed(1)}x`); }
 
-    const qr = en.qualityRanking    || '';
-    const er = en.engagementRanking || '';
-    const cr = en.conversionRanking || '';
     if (qr.includes('BELOW')) { fatigueScore += qr.includes('10') || qr.includes('20') ? 2 : 1; signals.push('Below-avg quality'); }
     if (er.includes('BELOW')) { fatigueScore += 1; signals.push('Below-avg engagement'); }
-    if (cr.includes('BELOW')) { fatigueScore += 1; signals.push('Below-avg conversion'); }
-
-    const trend = en.trendSignal || '';
+    if (cr.includes('BELOW')) { fatigueScore += 1; signals.push('Below-avg conv rate'); }
     if (trend.includes('Fatigue / Worsening')) { fatigueScore += 3; signals.push('Fatigue + ROAS declining'); }
     else if (trend.includes('Fatigue'))         { fatigueScore += 2; signals.push('Fatigue risk'); }
     else if (trend.includes('Worsening'))       { fatigueScore += 1; signals.push('ROAS declining'); }
 
-    const fatigueLevel = fatigueScore >= 5 ? 'critical' : fatigueScore >= 3 ? 'high' : fatigueScore >= 1 ? 'medium' : 'none';
+    const fatigueLevel = fatigueScore >= 5 ? 'critical'
+                       : fatigueScore >= 3 ? 'high'
+                       : fatigueScore >= 1 ? 'medium'
+                       : 'none';
 
     g.ads.push({
       id: adId, name: adName,
       adSetId: asId, adSetName: asName,
       campaignId: camId, campaignName: camName,
-      status: adStatus,
-      manual,
+      status: adStatus, manual,
       spend: pm.spend, impressions: pm.impressions, clicks: pm.clicks,
       purchases: pm.purchases, revenue: pm.revenue,
+      // Use Meta's own ROAS — not computed
+      metaRoas:  metaRoasByAdId[adId] || 0,
       frequency: Math.round(freq * 10) / 10,
-      ctr: Math.round(ctr * 100) / 100,
-      cpm: Math.round(cpm),
-      roas,
+      ctr:    pm.impressions > 0 ? (pm.clicks  / pm.impressions) * 100 : 0,
+      cpm:    pm.impressions > 0 ? (pm.spend   / pm.impressions) * 1000 : 0,
       fatigueScore, fatigueLevel, signals,
-      trendSignal: en.trendSignal      || '',
-      currentQuality: en.currentQuality || '',
-      decision: en.decision            || '',
-      qualityRanking:    qr,
-      engagementRanking: er,
-      conversionRanking: cr,
-      audienceFamily: en.audienceFamily || '',
-      creativeDominance: en.creativeDominance || '',
+      trendSignal:    en.trendSignal      || '',
+      currentQuality: en.currentQuality  || '',
+      decision:       en.decision        || '',
+      audienceFamily: en.audienceFamily  || '',
+      qualityRanking: qr, engagementRanking: er, conversionRanking: cr,
     });
   }
 
-  // 5. Finalise
+  /* ── 6. Finalise ── */
   return Object.values(groups).map(g => {
-    delete g._campB; delete g._asB;
-    const roas = g.spend > 0 && g.revenue > 0 ? g.revenue / g.spend : 0;
-    const cpm  = g.impressions > 0 ? (g.spend / g.impressions) * 1000 : 0;
-    const ctr  = g.impressions > 0 ? (g.clicks / g.impressions) * 100 : 0;
+    delete g._campSeen; delete g._asSeen;
+    const ctr = g.impressions > 0 ? (g.clicks / g.impressions) * 100 : 0;
+    const cpm = g.impressions > 0 ? (g.spend  / g.impressions) * 1000 : 0;
     const expectedSpend = g.dailyBudget * periodDays;
     const pacing = expectedSpend > 0 ? (g.spend / expectedSpend) * 100 : null;
     const campaigns = Object.values(g.campaigns).sort((a, b) => b.spend - a.spend);
     const adsets    = Object.values(g.adsets).sort((a, b) => b.spend - a.spend);
     const ads       = g.ads.sort((a, b) => b.spend - a.spend);
     const highFatigueAds = ads.filter(a => a.fatigueLevel === 'critical' || a.fatigueLevel === 'high');
-    const activeAds = ads.filter(a => a.status === 'ACTIVE').length;
-    // Decision distribution
-    const decisionDist = {};
-    for (const a of ads) { if (a.decision) decisionDist[a.decision] = (decisionDist[a.decision] || 0) + 1; }
+    const activeAds      = ads.filter(a => a.status === 'ACTIVE').length;
+    const decisionDist   = {};
+    for (const a of ads) if (a.decision) decisionDist[a.decision] = (decisionDist[a.decision] || 0) + 1;
     return {
-      ...g, roas, cpm, ctr, expectedSpend, pacing,
+      ...g, ctr, cpm, expectedSpend, pacing,
       campaigns, adsets, ads, highFatigueAds, activeAds, decisionDist,
     };
   }).sort((a, b) => b.spend - a.spend);
 }
 
-/* ─── SMALL UI ATOMS ─────────────────────────────────────────────── */
-function Badge({ label, cls = '' }) {
-  return <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold ring-1 ${cls}`}>{label}</span>;
+/* ─── ATOMS ───────────────────────────────────────────────────────── */
+function SBadge({ s }) {
+  if (!s) return null;
+  return <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold ${statusCls(s)}`}>{s}</span>;
 }
-function StatusBadge({ status }) {
-  if (!status) return null;
-  return <Badge label={status} cls={statusCls(status)} />;
-}
-function FatigueBadge({ level }) {
+function FBadge({ level }) {
   if (level === 'none') return null;
-  const labels = { critical: 'FATIGUE', high: 'HIGH FATIGUE', medium: 'FATIGUE RISK' };
-  return <Badge label={labels[level] || level.toUpperCase()} cls={fatigueCls(level) + ' ring-0'} />;
+  const map = { critical: 'FATIGUE', high: 'FATIGUE', medium: 'RISK' };
+  return <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-semibold ${fatigueCls(level)}`}>{map[level]}</span>;
 }
-function Chip({ label, value, cls = '' }) {
+function Chip({ label, value, cls = 'text-white' }) {
   return (
-    <div className="bg-gray-800/50 rounded-lg px-3 py-2 text-center">
+    <div className="bg-gray-800/50 rounded-lg px-3 py-2">
       <div className="text-[10px] text-slate-500 leading-none mb-1">{label}</div>
-      <div className={`text-sm font-semibold ${cls || 'text-white'}`}>{value}</div>
+      <div className={`text-sm font-semibold ${cls}`}>{value}</div>
     </div>
   );
 }
-
-/* ─── PACING BAR ─────────────────────────────────────────────────── */
-function PacingBar({ spend, expectedSpend, pacing }) {
-  if (!expectedSpend) return null;
-  const pct = Math.min(pacing || 0, 140);
-  const cls = pacing > 110 ? 'bg-red-500' : pacing > 90 ? 'bg-emerald-500' : pacing > 70 ? 'bg-amber-400' : 'bg-blue-500';
-  const label = pacing > 110 ? 'Over-pacing' : pacing > 90 ? 'On track' : pacing > 60 ? 'Under-pacing' : 'Under-delivering';
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between text-[10px]">
-        <span className="text-slate-500">Spend vs Budget</span>
-        <span className="text-slate-400">{fmt(spend)} / {fmt(expectedSpend)} · {fmtPct(pacing)}</span>
-      </div>
-      <div className="h-1.5 bg-gray-700/60 rounded-full overflow-hidden">
-        <div className={`h-full rounded-full transition-all ${cls}`} style={{ width: `${pct / 1.4}%` }} />
-      </div>
-      <div className={`text-[9px] ${cls.replace('bg-', 'text-')}`}>{label}</div>
+function BudgetChip({ label, dailyBudget, lifetimeBudget, hasBudgetData }) {
+  if (!hasBudgetData) return (
+    <div className="bg-gray-800/50 rounded-lg px-3 py-2">
+      <div className="text-[10px] text-slate-500 leading-none mb-1">{label}</div>
+      <div className="text-[10px] text-slate-600 italic">not loaded</div>
     </div>
   );
+  const display = fmtBudget(dailyBudget, lifetimeBudget);
+  return <Chip label={label} value={display || 'none set'} cls={display ? 'text-blue-300' : 'text-slate-500'} />;
 }
 
 /* ─── ENTITY TABLE ───────────────────────────────────────────────── */
 function EntityTable({ rows, type }) {
-  const cols = {
+  const colDefs = {
     campaigns: [
-      { key: 'name',           label: 'Campaign',     wide: true, render: r => r.name },
-      { key: 'status',         label: 'Status',       render: r => <StatusBadge status={r.status} /> },
-      { key: 'objective',      label: 'Objective',    render: r => <span className="text-slate-500 text-[11px]">{(r.objective||'').replace(/_/g,' ')}</span> },
-      { key: 'budget',         label: 'Daily Budget', num: true, render: r => r.dailyBudget ? fmt(r.dailyBudget) : (r.lifetimeBudget ? fmt(r.lifetimeBudget) + ' LT' : '—') },
-      { key: 'spend',          label: 'Spend',        num: true, render: r => fmt(r.spend) },
-      { key: 'impressions',    label: 'Impr.',        num: true, render: r => fmtN(r.impressions) },
-      { key: 'clicks',         label: 'Clicks',       num: true, render: r => fmtN(r.clicks) },
-      { key: 'purchases',      label: 'Purch.',       num: true, render: r => fmtN(r.purchases) },
-      { key: 'revenue',        label: 'Revenue',      num: true, cls: () => 'text-emerald-400', render: r => fmt(r.revenue) },
-      { key: 'roas',           label: 'ROAS',         num: true, cls: r => roasCls(r.revenue, r.spend), render: r => fmtR(r.revenue, r.spend) },
+      { h: 'Campaign',    r: row => <span className="font-medium text-white text-xs">{row.name}</span>, w: 'min-w-[160px]' },
+      { h: 'Status',      r: row => <SBadge s={row.status} /> },
+      { h: 'Objective',   r: row => <span className="text-[11px] text-slate-500">{row.objective}</span> },
+      { h: 'Daily Budget',r: row => row.dailyBudget > 0 ? <span className="text-blue-300 font-mono text-xs">{fmt(row.dailyBudget)}</span> : null, num: true },
+      { h: 'Life. Budget',r: row => row.lifetimeBudget > 0 ? <span className="text-blue-300 font-mono text-xs">{fmt(row.lifetimeBudget)}</span> : null, num: true },
+      { h: 'Spend',       r: row => fmt(row.spend),                               num: true },
+      { h: 'Impressions', r: row => fmtN(row.impressions),                        num: true },
+      { h: 'Purchases',   r: row => fmtN(row.purchases),                          num: true },
+      { h: 'Revenue',     r: row => <span className="text-emerald-400 font-mono text-xs">{fmt(row.revenue)}</span>, num: true },
+      { h: 'ROAS',        r: row => <span className={aggRoasCls(row.revenue, row.spend) + ' font-bold font-mono text-xs'}>{fmtAggRoas(row.revenue, row.spend)}</span>, num: true },
     ],
     adsets: [
-      { key: 'name',           label: 'Ad Set',       wide: true, render: r => r.name },
-      { key: 'campaignName',   label: 'Campaign',     sub: true, render: r => r.campaignName },
-      { key: 'status',         label: 'Status',       render: r => <StatusBadge status={r.status} /> },
-      { key: 'budget',         label: 'Budget/day',   num: true, render: r => r.dailyBudget ? fmt(r.dailyBudget) : (r.lifetimeBudget ? fmt(r.lifetimeBudget) + ' LT' : '—') },
-      { key: 'spend',          label: 'Spend',        num: true, render: r => fmt(r.spend) },
-      { key: 'impressions',    label: 'Impr.',        num: true, render: r => fmtN(r.impressions) },
-      { key: 'clicks',         label: 'Clicks',       num: true, render: r => fmtN(r.clicks) },
-      { key: 'purchases',      label: 'Purch.',       num: true, render: r => fmtN(r.purchases) },
-      { key: 'revenue',        label: 'Revenue',      num: true, cls: () => 'text-emerald-400', render: r => fmt(r.revenue) },
-      { key: 'roas',           label: 'ROAS',         num: true, cls: r => roasCls(r.revenue, r.spend), render: r => fmtR(r.revenue, r.spend) },
+      { h: 'Ad Set',      r: row => <div><div className="font-medium text-white text-xs">{row.name}</div><div className="text-[10px] text-slate-500">{row.campaignName}</div></div>, w: 'min-w-[160px]' },
+      { h: 'Status',      r: row => <SBadge s={row.status} /> },
+      { h: 'Daily Budget',r: row => row.dailyBudget > 0 ? <span className="text-blue-300 font-mono text-xs">{fmt(row.dailyBudget)}</span> : null, num: true },
+      { h: 'Life. Budget',r: row => row.lifetimeBudget > 0 ? <span className="text-blue-300 font-mono text-xs">{fmt(row.lifetimeBudget)}</span> : null, num: true },
+      { h: 'Spend',       r: row => fmt(row.spend),                               num: true },
+      { h: 'Impressions', r: row => fmtN(row.impressions),                        num: true },
+      { h: 'Purchases',   r: row => fmtN(row.purchases),                          num: true },
+      { h: 'Revenue',     r: row => <span className="text-emerald-400 font-mono text-xs">{fmt(row.revenue)}</span>, num: true },
+      { h: 'ROAS',        r: row => <span className={aggRoasCls(row.revenue, row.spend) + ' font-bold font-mono text-xs'}>{fmtAggRoas(row.revenue, row.spend)}</span>, num: true },
     ],
     ads: [
-      { key: 'name',           label: 'Ad',           wide: true, render: r => <div><div className="font-medium text-white">{r.name}</div><div className="text-[10px] text-slate-500 truncate max-w-[180px]">{r.adSetName}</div></div> },
-      { key: 'status',         label: 'Status',       render: r => <StatusBadge status={r.status} /> },
-      { key: 'fatigue',        label: 'Fatigue',      render: r => <FatigueBadge level={r.fatigueLevel} /> },
-      { key: 'spend',          label: 'Spend',        num: true, render: r => fmt(r.spend) },
-      { key: 'impressions',    label: 'Impr.',        num: true, render: r => fmtN(r.impressions) },
-      { key: 'freq',           label: 'Freq',         num: true, cls: r => r.frequency > 4 ? 'text-red-400' : r.frequency > 2.5 ? 'text-amber-400' : '', render: r => r.frequency || '—' },
-      { key: 'ctr',            label: 'CTR%',         num: true, render: r => r.ctr ? r.ctr.toFixed(2) + '%' : '—' },
-      { key: 'cpm',            label: 'CPM',          num: true, render: r => r.cpm ? '₹' + r.cpm : '—' },
-      { key: 'purchases',      label: 'Purch.',       num: true, render: r => fmtN(r.purchases) },
-      { key: 'revenue',        label: 'Revenue',      num: true, cls: () => 'text-emerald-400', render: r => fmt(r.revenue) },
-      { key: 'roas',           label: 'ROAS',         num: true, cls: r => roasCls(r.revenue, r.spend), render: r => fmtR(r.revenue, r.spend) },
+      { h: 'Ad',          r: row => <div><div className="font-medium text-white text-xs">{row.name}</div><div className="text-[10px] text-slate-500 truncate max-w-[160px]">{row.adSetName}</div></div>, w: 'min-w-[160px]' },
+      { h: 'Status',      r: row => <SBadge s={row.status} /> },
+      { h: 'Fatigue',     r: row => <FBadge level={row.fatigueLevel} /> },
+      { h: 'Spend',       r: row => fmt(row.spend),         num: true },
+      { h: 'Impressions', r: row => fmtN(row.impressions),  num: true },
+      { h: 'Freq',        r: row => <span className={row.frequency > 4 ? 'text-red-400' : row.frequency > 2.5 ? 'text-amber-400' : 'text-gray-300'}>{row.frequency || '—'}</span>, num: true },
+      { h: 'CTR%',        r: row => row.ctr > 0 ? row.ctr.toFixed(2) + '%' : '—', num: true },
+      { h: 'CPM',         r: row => row.cpm > 0 ? fmt(row.cpm) : '—',             num: true },
+      { h: 'Purchases',   r: row => fmtN(row.purchases),    num: true },
+      { h: 'Revenue',     r: row => <span className="text-emerald-400">{fmt(row.revenue)}</span>, num: true },
+      // Meta's own ROAS — not computed
+      { h: 'ROAS (Meta)', r: row => <span className={roasCls(row.metaRoas) + ' font-bold'}>{fmtRoas(row.metaRoas)}</span>, num: true },
     ],
   }[type] || [];
 
@@ -339,33 +366,25 @@ function EntityTable({ rows, type }) {
       <table className="w-full text-xs">
         <thead>
           <tr className="border-b border-gray-700/40">
-            {cols.map(c => (
-              <th key={c.key}
-                className={`py-2 px-3 text-[10px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap
-                  ${c.num ? 'text-right' : 'text-left'}
-                  ${c.wide ? 'min-w-[180px]' : ''}
-                  ${c.sub ? 'min-w-[120px]' : ''}`}>
-                {c.label}
+            {colDefs.map((c, i) => (
+              <th key={i} className={`py-2 px-3 text-[10px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap ${c.num ? 'text-right' : 'text-left'} ${c.w || ''}`}>
+                {c.h}
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, i) => (
-            <tr key={row.id || i} className="border-b border-gray-800/30 hover:bg-white/[0.02]">
-              {cols.map(c => (
-                <td key={c.key}
-                  className={`py-2 px-3
-                    ${c.num ? 'text-right font-mono' : 'text-left'}
-                    ${c.sub ? 'text-slate-500 text-[11px]' : 'text-gray-300'}
-                    ${c.cls ? c.cls(row) : ''}`}>
-                  {c.render(row)}
+          {rows.map((row, ri) => (
+            <tr key={row.id || ri} className="border-b border-gray-800/30 hover:bg-white/[0.02]">
+              {colDefs.map((c, ci) => (
+                <td key={ci} className={`py-2 px-3 text-gray-300 ${c.num ? 'text-right font-mono' : 'text-left'}`}>
+                  {c.r(row) ?? <span className="text-slate-600">—</span>}
                 </td>
               ))}
             </tr>
           ))}
           {rows.length === 0 && (
-            <tr><td colSpan={cols.length} className="py-6 text-center text-slate-600 text-xs">No data</td></tr>
+            <tr><td colSpan={colDefs.length} className="py-6 text-center text-slate-600 text-xs">No data</td></tr>
           )}
         </tbody>
       </table>
@@ -373,72 +392,70 @@ function EntityTable({ rows, type }) {
   );
 }
 
-/* ─── FATIGUE TABLE ──────────────────────────────────────────────── */
-const FATIGUE_ACTION = {
-  critical: 'Pause and replace creative immediately',
+/* ─── FATIGUE TAB ─────────────────────────────────────────────────── */
+const FATIGUE_REC = {
+  critical: 'Pause immediately and replace creative',
   high:     'Refresh creative this week; reduce budget',
-  medium:   'Monitor closely; prepare fresh variations',
-  none:     'Healthy — no action needed',
+  medium:   'Monitor closely; prepare new variations',
 };
-function FatigueTable({ ads }) {
-  const sorted = [...ads].filter(a => a.fatigueLevel !== 'none').sort((a, b) => b.fatigueScore - a.fatigueScore);
-  if (!sorted.length) return (
-    <div className="py-8 text-center text-slate-500 text-sm">No fatigue detected in this collection</div>
+function FatigueTab({ ads }) {
+  const fatigued = [...ads].filter(a => a.fatigueLevel !== 'none').sort((a, b) => b.fatigueScore - a.fatigueScore);
+  if (!fatigued.length) return (
+    <div className="py-10 text-center text-slate-500 text-sm">No creative fatigue detected in this collection</div>
   );
   return (
-    <div className="space-y-2 p-2">
-      {sorted.map(ad => (
+    <div className="space-y-2 p-3">
+      {fatigued.map(ad => (
         <div key={ad.id} className={`rounded-xl border p-4 ${
-          ad.fatigueLevel === 'critical' ? 'border-red-700/40 bg-red-900/10'
-          : ad.fatigueLevel === 'high'   ? 'border-orange-700/40 bg-orange-900/10'
-          : 'border-amber-700/40 bg-amber-900/10'
-        }`}>
-          <div className="flex items-start justify-between gap-3 mb-2">
+          ad.fatigueLevel === 'critical' ? 'border-red-700/40 bg-red-950/30'
+          : ad.fatigueLevel === 'high'   ? 'border-orange-700/40 bg-orange-950/30'
+          : 'border-amber-700/30 bg-amber-950/20'}`}>
+          <div className="flex items-start justify-between gap-3 mb-3">
             <div className="min-w-0">
-              <div className="font-medium text-white text-sm truncate">{ad.name}</div>
-              <div className="text-[11px] text-slate-500">{ad.adSetName} · {ad.campaignName}</div>
+              <div className="font-semibold text-white text-sm truncate">{ad.name}</div>
+              <div className="text-[11px] text-slate-500 mt-0.5">{ad.adSetName} · {ad.campaignName}</div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              <FatigueBadge level={ad.fatigueLevel} />
-              <span className="text-[11px] text-slate-500">Score {ad.fatigueScore}</span>
+              <FBadge level={ad.fatigueLevel} />
+              <span className="text-[10px] text-slate-500">score {ad.fatigueScore}</span>
             </div>
           </div>
-          <div className="flex flex-wrap gap-1.5 mb-2">
-            {ad.signals.map((s, i) => (
-              <span key={i} className="px-2 py-0.5 rounded-full bg-gray-800 text-slate-400 text-[10px]">{s}</span>
-            ))}
-          </div>
-          <div className="grid grid-cols-4 gap-2 mb-2">
+          <div className="grid grid-cols-4 gap-2 mb-3">
             {[
-              { l: 'Frequency',  v: ad.frequency || '—' },
-              { l: 'ROAS',       v: fmtR(ad.revenue, ad.spend) },
+              { l: 'Frequency', v: ad.frequency || '—', w: ad.frequency > 3 },
+              { l: 'ROAS (Meta)', v: fmtRoas(ad.metaRoas) },
               { l: 'Spend',      v: fmt(ad.spend) },
               { l: 'Trend',      v: ad.trendSignal || '—' },
             ].map(m => (
               <div key={m.l} className="bg-gray-800/50 rounded-lg px-2 py-1.5">
                 <div className="text-[9px] text-slate-500">{m.l}</div>
-                <div className="text-xs font-medium text-white">{m.v}</div>
+                <div className={`text-xs font-semibold ${m.w ? 'text-red-400' : 'text-white'}`}>{m.v}</div>
               </div>
             ))}
           </div>
-          {ad.qualityRanking || ad.engagementRanking ? (
-            <div className="flex gap-2 flex-wrap mb-2">
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {ad.signals.map((s, i) => (
+              <span key={i} className="px-2 py-0.5 rounded-full bg-gray-800 text-slate-400 text-[10px]">{s}</span>
+            ))}
+          </div>
+          {(ad.qualityRanking || ad.engagementRanking || ad.conversionRanking) && (
+            <div className="flex flex-wrap gap-2 mb-3">
               {[
                 { l: 'Quality',    v: ad.qualityRanking },
                 { l: 'Engagement', v: ad.engagementRanking },
                 { l: 'Conversion', v: ad.conversionRanking },
               ].filter(m => m.v).map(m => (
                 <span key={m.l} className={`text-[10px] px-2 py-0.5 rounded ${m.v.includes('BELOW') ? 'bg-red-900/30 text-red-400' : 'bg-emerald-900/30 text-emerald-400'}`}>
-                  {m.l}: {m.v.replace(/_/g,' ')}
+                  {m.l}: {m.v.replace(/_/g, ' ')}
                 </span>
               ))}
             </div>
-          ) : null}
+          )}
           <div className={`text-[11px] flex items-center gap-1 ${
             ad.fatigueLevel === 'critical' ? 'text-red-400' : ad.fatigueLevel === 'high' ? 'text-orange-400' : 'text-amber-400'
           }`}>
-            <AlertTriangle size={10} />
-            {FATIGUE_ACTION[ad.fatigueLevel]}
+            <AlertTriangle size={10} className="shrink-0" />
+            {FATIGUE_REC[ad.fatigueLevel]}
           </div>
         </div>
       ))}
@@ -446,113 +463,115 @@ function FatigueTable({ ads }) {
   );
 }
 
-/* ─── OVERVIEW TAB ───────────────────────────────────────────────── */
+/* ─── OVERVIEW TAB ────────────────────────────────────────────────── */
 function OverviewTab({ g, periodDays }) {
   const cpa = g.purchases > 0 ? g.spend / g.purchases : 0;
-  const kpis = [
-    { l: 'Spend',      v: fmt(g.spend),              c: 'text-white' },
-    { l: 'Revenue',    v: fmt(g.revenue),             c: 'text-emerald-400' },
-    { l: 'ROAS',       v: fmtR(g.revenue, g.spend),  c: roasCls(g.revenue, g.spend) },
-    { l: 'Impressions',v: fmtN(g.impressions),        c: 'text-gray-300' },
-    { l: 'Clicks',     v: fmtN(g.clicks),             c: 'text-gray-300' },
-    { l: 'Purchases',  v: fmtN(g.purchases),          c: 'text-gray-300' },
-    { l: 'CTR',        v: g.ctr ? g.ctr.toFixed(2) + '%' : '—', c: 'text-gray-300' },
-    { l: 'CPM',        v: g.cpm ? fmt(g.cpm) : '—',   c: 'text-gray-300' },
-    { l: 'CPA',        v: fmt(cpa),                    c: cpa > 0 && cpa < 200 ? 'text-emerald-400' : 'text-amber-400' },
-    { l: 'Daily Budget', v: g.dailyBudget ? fmt(g.dailyBudget) : '—', c: 'text-blue-300' },
-    { l: 'Period Budget',v: g.expectedSpend ? fmt(g.expectedSpend) : '—', c: 'text-blue-300' },
-    { l: 'Pacing',     v: g.pacing != null ? fmtPct(g.pacing) : '—',
-      c: g.pacing > 110 ? 'text-red-400' : g.pacing > 85 ? 'text-emerald-400' : 'text-amber-400' },
-  ];
-
   const topAds  = g.ads.filter(a => a.spend > 0).slice(0, 3);
-  const wrstAds = [...g.ads.filter(a => a.spend > 50)].sort((a, b) => (a.revenue/a.spend||0) - (b.revenue/b.spend||0)).slice(0, 3);
-
-  // Decision dist
+  const wrstAds = [...g.ads.filter(a => a.spend > 50)]
+    .sort((a, b) => (parseFloat(a.metaRoas) || 0) - (parseFloat(b.metaRoas) || 0))
+    .slice(0, 3);
   const decEntries = Object.entries(g.decisionDist).sort((a, b) => b[1] - a[1]);
-
-  // Audience breakdown
-  const audDist = {};
-  for (const a of g.ads) { if (a.audienceFamily) audDist[a.audienceFamily] = (audDist[a.audienceFamily] || 0) + 1; }
+  const audDist    = {};
+  for (const a of g.ads) if (a.audienceFamily) audDist[a.audienceFamily] = (audDist[a.audienceFamily] || 0) + 1;
 
   return (
     <div className="p-4 space-y-4">
-      {/* KPI grid */}
-      <div className="grid grid-cols-4 sm:grid-cols-6 gap-2">
-        {kpis.map(k => <Chip key={k.l} label={k.l} value={k.v} cls={k.c} />)}
+      {/* KPI chips */}
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+        <Chip label="Spend"      value={fmt(g.spend)} />
+        <Chip label="Revenue"    value={fmt(g.revenue)} cls="text-emerald-400" />
+        <Chip label="ROAS"       value={fmtAggRoas(g.revenue, g.spend)} cls={aggRoasCls(g.revenue, g.spend)} />
+        <Chip label="Impressions"value={fmtN(g.impressions)} cls="text-gray-300" />
+        <Chip label="Purchases"  value={fmtN(g.purchases)} cls="text-gray-300" />
+        <Chip label="CPA"        value={fmt(cpa)} cls={cpa > 0 && cpa < 300 ? 'text-emerald-400' : 'text-amber-400'} />
+      </div>
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+        <Chip label="CTR%" value={g.ctr > 0 ? g.ctr.toFixed(2) + '%' : '—'} cls="text-gray-300" />
+        <Chip label="CPM"  value={g.cpm > 0 ? fmt(g.cpm) : '—'} cls="text-gray-300" />
+        <BudgetChip label="Daily Budget"  dailyBudget={g.dailyBudget}  lifetimeBudget={0}              hasBudgetData={g.hasBudgetData} />
+        <BudgetChip label="Life. Budget"  dailyBudget={0}              lifetimeBudget={g.lifetimeBudget} hasBudgetData={g.hasBudgetData} />
+        <BudgetChip label="Period Budget" dailyBudget={g.expectedSpend} lifetimeBudget={0}              hasBudgetData={g.hasBudgetData} />
+        <Chip label="Pacing" value={g.pacing != null ? Math.round(g.pacing) + '%' : g.hasBudgetData ? '—' : 'N/A'}
+          cls={g.pacing == null ? 'text-slate-500' : g.pacing > 110 ? 'text-red-400' : g.pacing > 85 ? 'text-emerald-400' : 'text-amber-400'} />
       </div>
 
-      {/* Budget pacing */}
-      {g.expectedSpend > 0 && (
-        <div className="bg-gray-800/30 rounded-xl border border-gray-700/40 p-4">
-          <PacingBar spend={g.spend} expectedSpend={g.expectedSpend} pacing={g.pacing} />
+      {/* Pacing bar */}
+      {g.expectedSpend > 0 && g.pacing != null && (
+        <div className="bg-gray-800/30 rounded-xl border border-gray-700/30 p-3 space-y-1.5">
+          <div className="flex justify-between text-[11px]">
+            <span className="text-slate-500">Spend vs {periodDays}d budget</span>
+            <span className="text-slate-400">{fmt(g.spend)} / {fmt(g.expectedSpend)}</span>
+          </div>
+          <div className="h-2 bg-gray-700/50 rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full ${g.pacing > 110 ? 'bg-red-500' : g.pacing > 85 ? 'bg-emerald-500' : 'bg-amber-400'}`}
+              style={{ width: `${Math.min(g.pacing, 140) / 1.4}%` }}
+            />
+          </div>
+          <div className={`text-[10px] ${g.pacing > 110 ? 'text-red-400' : g.pacing > 85 ? 'text-emerald-400' : 'text-amber-400'}`}>
+            {g.pacing > 110 ? 'Over-pacing' : g.pacing > 85 ? 'On track' : g.pacing > 60 ? 'Under-pacing' : 'Under-delivering'}
+          </div>
         </div>
       )}
 
-      {/* Decision + Audience splits */}
-      <div className="grid grid-cols-2 gap-3">
-        {decEntries.length > 0 && (
-          <div className="bg-gray-800/30 rounded-xl border border-gray-700/40 p-3">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1">
-              <Target size={10} /> Decision Distribution
-            </div>
-            <div className="space-y-1">
-              {decEntries.slice(0, 6).map(([dec, cnt]) => (
-                <div key={dec} className="flex items-center justify-between text-xs">
-                  <span className="text-slate-300">{dec}</span>
-                  <span className="text-slate-500">{cnt} ads</span>
+      {/* Decision + audience */}
+      {(decEntries.length > 0 || Object.keys(audDist).length > 0) && (
+        <div className="grid grid-cols-2 gap-3">
+          {decEntries.length > 0 && (
+            <div className="bg-gray-800/30 rounded-xl border border-gray-700/30 p-3">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1">
+                <Target size={10} /> Decision Split
+              </div>
+              {decEntries.slice(0, 6).map(([d, n]) => (
+                <div key={d} className="flex justify-between text-xs py-0.5">
+                  <span className="text-slate-300">{d}</span>
+                  <span className="text-slate-500">{n}</span>
                 </div>
               ))}
             </div>
-          </div>
-        )}
-        {Object.keys(audDist).length > 0 && (
-          <div className="bg-gray-800/30 rounded-xl border border-gray-700/40 p-3">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1">
-              <Zap size={10} /> Audience Split
-            </div>
-            <div className="space-y-1">
-              {Object.entries(audDist).sort((a, b) => b[1] - a[1]).map(([aud, cnt]) => (
-                <div key={aud} className="flex items-center justify-between text-xs">
+          )}
+          {Object.keys(audDist).length > 0 && (
+            <div className="bg-gray-800/30 rounded-xl border border-gray-700/30 p-3">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-1">
+                <Zap size={10} /> Audience Split
+              </div>
+              {Object.entries(audDist).sort((a, b) => b[1] - a[1]).map(([aud, n]) => (
+                <div key={aud} className="flex justify-between text-xs py-0.5">
                   <span className="text-slate-300">{aud}</span>
-                  <span className="text-slate-500">{cnt} ads</span>
+                  <span className="text-slate-500">{n} ads</span>
                 </div>
               ))}
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
 
-      {/* Top / worst ads */}
+      {/* Top / worst */}
       {(topAds.length > 0 || wrstAds.length > 0) && (
         <div className="grid grid-cols-2 gap-3">
           {topAds.length > 0 && (
-            <div className="bg-gray-800/30 rounded-xl border border-gray-700/40 p-3">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-600 mb-2 flex items-center gap-1">
-                <TrendingUp size={10} /> Top Ads by Spend
-              </div>
+            <div className="bg-gray-800/30 rounded-xl border border-gray-700/30 p-3">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-emerald-700 mb-2">Top Spend</div>
               {topAds.map(a => (
-                <div key={a.id} className="flex items-center justify-between py-1 border-b border-gray-700/30 last:border-0 text-xs">
-                  <span className="text-slate-300 truncate max-w-[130px]">{a.name}</span>
-                  <div className="flex items-center gap-2 shrink-0 ml-1">
+                <div key={a.id} className="flex justify-between items-center py-1 border-b border-gray-700/30 last:border-0 text-xs gap-2">
+                  <span className="text-slate-300 truncate">{a.name}</span>
+                  <div className="flex gap-2 shrink-0">
                     <span className="text-white font-medium">{fmt(a.spend)}</span>
-                    <span className={roasCls(a.revenue, a.spend)}>{fmtR(a.revenue, a.spend)}</span>
+                    <span className={roasCls(a.metaRoas)}>{fmtRoas(a.metaRoas)}</span>
                   </div>
                 </div>
               ))}
             </div>
           )}
           {wrstAds.length > 0 && (
-            <div className="bg-gray-800/30 rounded-xl border border-gray-700/40 p-3">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-red-600 mb-2 flex items-center gap-1">
-                <AlertTriangle size={10} /> Worst ROAS
-              </div>
+            <div className="bg-gray-800/30 rounded-xl border border-gray-700/30 p-3">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-red-700 mb-2">Worst ROAS</div>
               {wrstAds.map(a => (
-                <div key={a.id} className="flex items-center justify-between py-1 border-b border-gray-700/30 last:border-0 text-xs">
-                  <span className="text-slate-300 truncate max-w-[130px]">{a.name}</span>
-                  <div className="flex items-center gap-2 shrink-0 ml-1">
+                <div key={a.id} className="flex justify-between items-center py-1 border-b border-gray-700/30 last:border-0 text-xs gap-2">
+                  <span className="text-slate-300 truncate">{a.name}</span>
+                  <div className="flex gap-2 shrink-0">
                     <span className="text-white font-medium">{fmt(a.spend)}</span>
-                    <span className={roasCls(a.revenue, a.spend)}>{fmtR(a.revenue, a.spend)}</span>
+                    <span className={roasCls(a.metaRoas)}>{fmtRoas(a.metaRoas)}</span>
                   </div>
                 </div>
               ))}
@@ -564,100 +583,91 @@ function OverviewTab({ g, periodDays }) {
   );
 }
 
-/* ─── COLLECTION CARD ────────────────────────────────────────────── */
+/* ─── COLLECTION CARD ─────────────────────────────────────────────── */
 function CollectionCard({ g, totalSpend, periodDays }) {
   const [open, setOpen]     = useState(false);
   const [subTab, setSubTab] = useState('overview');
-  const pct   = totalSpend > 0 ? (g.spend / totalSpend) * 100 : 0;
-  const tabs  = [
-    { id: 'overview',  label: 'Overview',     icon: BarChart3 },
-    { id: 'campaigns', label: `Campaigns`,    count: g.campaigns.length },
-    { id: 'adsets',    label: `Ad Sets`,      count: g.adsets.length },
-    { id: 'ads',       label: `Ads`,          count: g.ads.length },
-    { id: 'fatigue',   label: `Fatigue`,      count: g.highFatigueAds.length,
-      warn: g.highFatigueAds.length > 0 },
+  const pct = totalSpend > 0 ? (g.spend / totalSpend) * 100 : 0;
+
+  const tabs = [
+    { id: 'overview',  label: 'Overview',  Icon: BarChart3 },
+    { id: 'campaigns', label: 'Campaigns', count: g.campaigns.length },
+    { id: 'adsets',    label: 'Ad Sets',   count: g.adsets.length },
+    { id: 'ads',       label: 'Ads',       count: g.ads.length },
+    { id: 'fatigue',   label: 'Fatigue',   count: g.highFatigueAds.length, warn: g.highFatigueAds.length > 0 },
   ];
 
+  const budgetDisplay = fmtBudget(g.dailyBudget, g.lifetimeBudget);
+
   return (
-    <div className={`border rounded-xl overflow-hidden transition-colors ${
-      open ? 'border-gray-700/80' : 'border-gray-800/60 hover:border-gray-700/60'
-    }`}>
-      {/* Clickable header */}
+    <div className={`border rounded-xl overflow-hidden ${open ? 'border-gray-700/80' : 'border-gray-800/60'}`}>
       <button
         onClick={() => setOpen(o => !o)}
         className="w-full flex items-center gap-3 px-5 py-4 bg-gray-900/50 hover:bg-gray-800/40 transition-colors text-left"
       >
-        <span className="text-slate-500 shrink-0">
-          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        </span>
+        <span className="text-slate-500 shrink-0">{open ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}</span>
 
         {/* Name + bar */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-white">{g.collection}</span>
             {g.highFatigueAds.length > 0 && (
-              <span className="flex items-center gap-1 text-[10px] text-orange-400">
-                <Flame size={10} />{g.highFatigueAds.length} fatigued
+              <span className="text-[10px] text-orange-400 flex items-center gap-0.5">
+                <Flame size={9}/>{g.highFatigueAds.length} fatigued
               </span>
             )}
           </div>
-          <div className="flex items-center gap-2 mt-1.5 max-w-[180px]">
+          <div className="flex items-center gap-1.5 mt-1.5 max-w-[160px]">
             <div className="flex-1 h-1 bg-gray-700/50 rounded-full overflow-hidden">
-              <div className="h-full bg-brand-500 rounded-full" style={{ width: `${Math.max(pct, 1)}%` }} />
+              <div className="h-full bg-brand-500 rounded-full" style={{ width: `${Math.max(pct, 1)}%` }}/>
             </div>
             <span className="text-[10px] text-slate-500 shrink-0">{pct.toFixed(1)}%</span>
           </div>
         </div>
 
-        {/* Metrics strip */}
-        <div className="hidden sm:flex items-center gap-4 shrink-0">
+        {/* Metrics */}
+        <div className="hidden md:flex items-center gap-4 shrink-0">
           {[
-            { l: 'Spend',    v: fmt(g.spend),          c: 'text-white font-semibold text-sm' },
-            { l: 'Budget/d', v: g.dailyBudget ? fmt(g.dailyBudget) : '—', c: 'text-blue-300 text-sm' },
-            { l: 'Pacing',   v: g.pacing != null ? fmtPct(g.pacing) : '—',
-              c: (g.pacing > 110 ? 'text-red-400' : g.pacing > 85 ? 'text-emerald-400' : 'text-amber-400') + ' text-sm' },
-            { l: 'Revenue',  v: fmt(g.revenue),         c: 'text-emerald-400 text-sm' },
-            { l: 'ROAS',     v: fmtR(g.revenue, g.spend), c: roasCls(g.revenue, g.spend) + ' text-sm font-bold' },
-            { l: 'Active Ads', v: g.activeAds + ' / ' + g.ads.length, c: 'text-gray-300 text-sm' },
+            { l: 'Spend',     v: fmt(g.spend),                         c: 'text-white font-semibold' },
+            { l: 'Budget/d',  v: g.hasBudgetData ? (budgetDisplay || 'none') : '—',  c: g.hasBudgetData && budgetDisplay ? 'text-blue-300' : 'text-slate-500' },
+            { l: 'Pacing',    v: g.pacing != null ? Math.round(g.pacing) + '%' : '—',
+              c: g.pacing == null ? 'text-slate-500' : g.pacing > 110 ? 'text-red-400' : g.pacing > 85 ? 'text-emerald-400' : 'text-amber-400' },
+            { l: 'Revenue',   v: fmt(g.revenue),                        c: 'text-emerald-400' },
+            { l: 'ROAS',      v: fmtAggRoas(g.revenue, g.spend),        c: aggRoasCls(g.revenue, g.spend) + ' font-bold' },
+            { l: 'Ads',       v: `${g.activeAds}A / ${g.ads.length}`,   c: 'text-gray-300' },
           ].map(m => (
-            <div key={m.l} className="text-right min-w-[60px]">
+            <div key={m.l} className="text-right min-w-[56px]">
               <div className="text-[9px] text-slate-500 leading-none mb-1">{m.l}</div>
-              <div className={m.c}>{m.v}</div>
+              <div className={`text-sm ${m.c}`}>{m.v}</div>
             </div>
           ))}
         </div>
 
-        {/* Mobile compact */}
-        <div className="flex sm:hidden items-center gap-3 shrink-0">
+        {/* Mobile: spend + ROAS only */}
+        <div className="flex md:hidden items-center gap-3 shrink-0">
           <div className="text-right">
             <div className="text-[9px] text-slate-500">Spend</div>
             <div className="text-sm font-semibold text-white">{fmt(g.spend)}</div>
           </div>
           <div className="text-right">
             <div className="text-[9px] text-slate-500">ROAS</div>
-            <div className={`text-sm font-bold ${roasCls(g.revenue, g.spend)}`}>{fmtR(g.revenue, g.spend)}</div>
+            <div className={`text-sm font-bold ${aggRoasCls(g.revenue, g.spend)}`}>{fmtAggRoas(g.revenue, g.spend)}</div>
           </div>
         </div>
       </button>
 
-      {/* Expanded body */}
       {open && (
         <div className="border-t border-gray-800/60 bg-gray-950/40">
           {/* Sub-tabs */}
-          <div className="flex gap-1 px-4 pt-3 overflow-x-auto">
+          <div className="flex gap-0.5 px-4 pt-3 overflow-x-auto">
             {tabs.map(t => {
-              const Icon = t.icon;
+              const Icon = t.Icon;
               return (
-                <button
-                  key={t.id}
-                  onClick={() => setSubTab(t.id)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg text-xs font-medium transition-colors whitespace-nowrap border-b-2
-                    ${subTab === t.id
-                      ? 'bg-gray-800/60 text-white border-brand-500'
-                      : 'text-slate-500 hover:text-slate-300 border-transparent hover:bg-gray-800/30'
-                    } ${t.warn ? 'text-orange-400' : ''}`}
-                >
-                  {Icon && <Icon size={11} />}
+                <button key={t.id} onClick={() => setSubTab(t.id)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg text-xs font-medium whitespace-nowrap border-b-2 transition-colors
+                    ${subTab === t.id ? 'bg-gray-800/60 text-white border-brand-500' : 'text-slate-500 hover:text-slate-300 border-transparent hover:bg-gray-800/30'}
+                    ${t.warn ? '!text-orange-400' : ''}`}>
+                  {Icon && <Icon size={11}/>}
                   {t.label}
                   {t.count != null && (
                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full min-w-[18px] text-center
@@ -669,14 +679,12 @@ function CollectionCard({ g, totalSpend, periodDays }) {
               );
             })}
           </div>
-
-          {/* Tab content */}
           <div className="border-t border-gray-800/50">
             {subTab === 'overview'  && <OverviewTab g={g} periodDays={periodDays} />}
             {subTab === 'campaigns' && <div className="px-1 py-1"><EntityTable rows={g.campaigns} type="campaigns" /></div>}
-            {subTab === 'adsets'    && <div className="px-1 py-1"><EntityTable rows={g.adsets} type="adsets" /></div>}
-            {subTab === 'ads'       && <div className="px-1 py-1"><EntityTable rows={g.ads} type="ads" /></div>}
-            {subTab === 'fatigue'   && <FatigueTable ads={g.ads} />}
+            {subTab === 'adsets'    && <div className="px-1 py-1"><EntityTable rows={g.adsets}    type="adsets" /></div>}
+            {subTab === 'ads'       && <div className="px-1 py-1"><EntityTable rows={g.ads}       type="ads" /></div>}
+            {subTab === 'fatigue'   && <FatigueTab ads={g.ads} />}
           </div>
         </div>
       )}
@@ -684,20 +692,52 @@ function CollectionCard({ g, totalSpend, periodDays }) {
   );
 }
 
-/* ─── MAIN PAGE ──────────────────────────────────────────────────── */
+/* ─── LAZY FETCH PANEL ────────────────────────────────────────────── */
+function LazyFetchPanel({ period, status, msg, onFetch }) {
+  const meta = PERIODS.find(p => p.id === period);
+  return (
+    <div className="flex flex-col items-center justify-center py-14 border border-gray-800/40 rounded-2xl bg-gray-900/20 text-center">
+      <Info size={32} className="text-slate-600 mb-3" />
+      <div className="text-sm font-medium text-white mb-1">{meta?.label} is not in the standard pull</div>
+      <div className="text-xs text-slate-500 mb-4 max-w-xs">
+        Fetch it now directly from Meta API. Data stays in memory until you leave the page.
+      </div>
+      {status === 'error' && (
+        <div className="text-xs text-red-400 mb-3 max-w-xs bg-red-900/20 border border-red-700/30 rounded-lg px-3 py-2">{msg}</div>
+      )}
+      <button
+        onClick={onFetch}
+        disabled={status === 'loading'}
+        className="flex items-center gap-2 px-4 py-2 bg-brand-600 hover:bg-brand-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
+      >
+        {status === 'loading' ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+        {status === 'loading' ? (msg || 'Fetching…') : `Fetch ${meta?.label}`}
+      </button>
+    </div>
+  );
+}
+
+/* ─── MAIN PAGE ───────────────────────────────────────────────────── */
 export default function CollectionSpend() {
-  const { rawAccounts, enrichedRows, manualMap, campaignMap, adsetMap, adMap, brands, activeBrandIds } = useStore();
+  const {
+    brandData, brands, activeBrandIds,
+    enrichedRows, manualMap, campaignMap, adsetMap, adMap,
+  } = useStore();
 
-  const [period, setPeriod]           = useState('7d');
-  const [rows3d, setRows3d]           = useState([]);
-  const [fetch3dStatus, setFetch3dStatus] = useState('idle');
-  const [fetch3dMsg, setFetch3dMsg]   = useState('');
-  const [sortBy, setSortBy]           = useState('spend');
+  const [period, setPeriod] = useState('7d');
+  const [sortBy, setSortBy] = useState('spend');
 
-  /* ── fetch 3D on demand ── */
-  const fetchRows3d = useCallback(async () => {
-    setFetch3dStatus('loading');
-    setFetch3dMsg('Connecting...');
+  // Lazy-fetched data: keyed by period id
+  const [lazyData, setLazyData] = useState({});   // { [id]: rows[] }
+  const [lazyStatus, setLazyStatus] = useState({}); // { [id]: 'idle'|'loading'|'done'|'error' }
+  const [lazyMsg, setLazyMsg]   = useState({});     // { [id]: string }
+
+  /* ── Lazy fetch ── */
+  const doFetch = useCallback(async (pid) => {
+    const meta = PERIODS.find(p => p.id === pid);
+    if (!meta?.lazy || !meta.preset) return;
+    setLazyStatus(s => ({ ...s, [pid]: 'loading' }));
+    setLazyMsg(s => ({ ...s, [pid]: 'Connecting…' }));
     const collected = [];
     const active = (brands || []).filter(b => (activeBrandIds || []).includes(b.id));
     try {
@@ -706,69 +746,68 @@ export default function CollectionSpend() {
         if (!token) continue;
         for (const acc of accounts) {
           if (!acc.id || !acc.key) continue;
-          setFetch3dMsg(`Fetching ${acc.key}...`);
-          const raw = await fetchInsights(apiVersion, token, acc.id, 'last_3d');
-          collected.push(...raw.map(r => normalizeInsight(r, acc.key, '3D')));
+          setLazyMsg(s => ({ ...s, [pid]: `Fetching ${acc.key}…` }));
+          const raw = await fetchInsights(apiVersion, token, acc.id, meta.preset);
+          collected.push(...raw.map(r => normalizeInsight(r, acc.key, pid)));
         }
       }
-      setRows3d(collected);
-      setFetch3dStatus('done');
-      setFetch3dMsg('');
+      setLazyData(d => ({ ...d, [pid]: collected }));
+      setLazyStatus(s => ({ ...s, [pid]: 'done' }));
+      setLazyMsg(s => ({ ...s, [pid]: '' }));
     } catch (e) {
-      setFetch3dStatus('error');
-      setFetch3dMsg(e.message);
+      setLazyStatus(s => ({ ...s, [pid]: 'error' }));
+      setLazyMsg(s => ({ ...s, [pid]: e.message }));
     }
   }, [brands, activeBrandIds]);
 
-  function handlePeriod(id) {
-    setPeriod(id);
-    if (id === '3d' && fetch3dStatus === 'idle') fetchRows3d();
-  }
-
-  /* ── period rows ── */
-  const periodDays = PERIODS.find(p => p.id === period)?.days || 7;
+  /* ── Period rows — use brandData directly (no rawAccounts, avoids ×N bug) ── */
+  const periodMeta = PERIODS.find(p => p.id === period) || PERIODS[2];
   const periodRows = useMemo(() => {
-    if (period === '3d')        return rows3d;
-    if (period === 'yesterday') return rawAccounts.flatMap(a => a.insightsToday || []);
-    if (period === '7d')        return rawAccounts.flatMap(a => a.insights7d    || []);
-    if (period === '14d')       return rawAccounts.flatMap(a => a.insights14d   || []);
-    return [];
-  }, [period, rawAccounts, rows3d]);
+    const active = (brands || []).filter(b => (activeBrandIds || []).includes(b.id));
+    if (periodMeta.lazy) return lazyData[period] || [];
+    if (period === '7d')  return active.flatMap(b => brandData[b.id]?.insights7d   || []);
+    if (period === '14d') return active.flatMap(b => brandData[b.id]?.insights14d  || []);
+    if (period === '30d') return active.flatMap(b => brandData[b.id]?.insights30d  || []);
+    return active.flatMap(b => brandData[b.id]?.insightsToday || []);
+  }, [period, periodMeta.lazy, brands, activeBrandIds, brandData, lazyData]);
 
-  /* ── build collection groups ── */
+  /* ── Build groups ── */
   const groups = useMemo(
-    () => buildCollectionGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap, adMap, periodDays),
-    [periodRows, enrichedRows, manualMap, campaignMap, adsetMap, adMap, periodDays],
+    () => buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap, adMap, periodMeta.days),
+    [periodRows, enrichedRows, manualMap, campaignMap, adsetMap, adMap, periodMeta.days],
   );
 
-  /* ── sort ── */
+  /* ── Sort ── */
   const sorted = useMemo(() => {
     const arr = [...groups];
     if (sortBy === 'budget')  return arr.sort((a, b) => b.dailyBudget - a.dailyBudget);
-    if (sortBy === 'roas')    return arr.sort((a, b) => b.roas - a.roas);
+    if (sortBy === 'roas')    return arr.sort((a, b) => (b.revenue / b.spend || 0) - (a.revenue / a.spend || 0));
     if (sortBy === 'fatigue') return arr.sort((a, b) => b.highFatigueAds.length - a.highFatigueAds.length);
     if (sortBy === 'name')    return arr.sort((a, b) => a.collection.localeCompare(b.collection));
-    return arr; // default: spend (already sorted)
+    return arr; // 'spend': already sorted in buildGroups
   }, [groups, sortBy]);
 
-  /* ── totals ── */
-  const totals = useMemo(() => ({
+  /* ── Totals ── */
+  const T = useMemo(() => ({
     spend:         groups.reduce((s, g) => s + g.spend, 0),
     revenue:       groups.reduce((s, g) => s + g.revenue, 0),
     purchases:     groups.reduce((s, g) => s + g.purchases, 0),
-    impressions:   groups.reduce((s, g) => s + g.impressions, 0),
     dailyBudget:   groups.reduce((s, g) => s + g.dailyBudget, 0),
     expectedSpend: groups.reduce((s, g) => s + g.expectedSpend, 0),
     highFatigue:   groups.reduce((s, g) => s + g.highFatigueAds.length, 0),
     activeAds:     groups.reduce((s, g) => s + g.activeAds, 0),
     totalAds:      groups.reduce((s, g) => s + g.ads.length, 0),
+    hasBudget:     groups.some(g => g.hasBudgetData && (g.dailyBudget > 0 || g.lifetimeBudget > 0)),
   }), [groups]);
 
-  const periodName = { yesterday:'Yesterday', '3d':'Last 3 Days', '7d':'Last 7 Days', '14d':'Last 14 Days' }[period];
+  const lazyNeedsLoad = periodMeta.lazy && !lazyStatus[period] || lazyStatus[period] === 'idle';
+  const lazyLoading   = lazyStatus[period] === 'loading';
+  const lazyError     = lazyStatus[period] === 'error';
+  const lazyReady     = lazyStatus[period] === 'done';
 
   return (
     <div className="space-y-5">
-      {/* Header */}
+      {/* Header + sort */}
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-white flex items-center gap-2">
@@ -776,23 +815,16 @@ export default function CollectionSpend() {
             Collection Spend
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            Full spend, budget & creative health by collection — {periodName}
+            {periodMeta.label} — spend, budget & creative health by collection
           </p>
         </div>
-        {/* Sort */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          <span className="text-[11px] text-slate-500">Sort</span>
-          {[
-            { id: 'spend', l: 'Spend' },
-            { id: 'budget', l: 'Budget' },
-            { id: 'roas', l: 'ROAS' },
-            { id: 'fatigue', l: 'Fatigue' },
-            { id: 'name', l: 'A–Z' },
-          ].map(s => (
-            <button key={s.id} onClick={() => setSortBy(s.id)}
-              className={`px-2 py-1 rounded text-[11px] font-medium transition-colors
-                ${sortBy === s.id ? 'bg-brand-600/20 text-brand-300' : 'text-slate-500 hover:text-slate-300'}`}>
-              {s.l}
+        <div className="flex items-center gap-1 shrink-0 flex-wrap">
+          <span className="text-[11px] text-slate-500 mr-1">Sort</span>
+          {['spend','budget','roas','fatigue','name'].map(s => (
+            <button key={s} onClick={() => setSortBy(s)}
+              className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors capitalize
+                ${sortBy === s ? 'bg-brand-600/20 text-brand-300' : 'text-slate-500 hover:text-slate-300'}`}>
+              {s}
             </button>
           ))}
         </div>
@@ -801,54 +833,57 @@ export default function CollectionSpend() {
       {/* Period tabs */}
       <div className="flex gap-1.5 flex-wrap">
         {PERIODS.map(p => (
-          <button key={p.id} onClick={() => handlePeriod(p.id)}
+          <button key={p.id} onClick={() => setPeriod(p.id)}
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-1.5 ${
               period === p.id
                 ? 'bg-brand-600/20 text-brand-300 ring-1 ring-brand-500/30'
                 : 'bg-gray-800/50 text-slate-400 hover:text-slate-200 hover:bg-gray-800'
             }`}>
             {p.label}
-            {p.lazy && fetch3dStatus === 'loading' && period === p.id && <Loader2 size={11} className="animate-spin" />}
+            {p.lazy && lazyLoading && period === p.id && <Loader2 size={11} className="animate-spin"/>}
           </button>
         ))}
-        {period === '3d' && fetch3dStatus === 'done' && (
-          <button onClick={fetchRows3d} className="px-3 py-2 rounded-lg text-xs text-slate-500 hover:text-slate-200 hover:bg-gray-800 flex items-center gap-1.5">
-            <RefreshCw size={11} /> Refresh 3D
+        {lazyReady && (
+          <button onClick={() => doFetch(period)}
+            className="px-3 py-2 rounded-lg text-xs text-slate-500 hover:text-slate-200 hover:bg-gray-800 flex items-center gap-1.5">
+            <RefreshCw size={11}/> Refresh
           </button>
         )}
       </div>
 
-      {/* 3D status */}
-      {period === '3d' && fetch3dStatus === 'loading' && (
-        <div className="flex items-center gap-2 text-sm text-slate-400 bg-gray-800/40 rounded-xl border border-gray-700/30 px-4 py-3">
-          <Loader2 size={14} className="animate-spin text-brand-400 shrink-0" />
-          {fetch3dMsg}
-        </div>
+      {/* Lazy: needs fetch */}
+      {periodMeta.lazy && (lazyNeedsLoad || lazyLoading || lazyError) && (
+        <LazyFetchPanel
+          period={period}
+          status={lazyStatus[period] || 'idle'}
+          msg={lazyMsg[period] || ''}
+          onFetch={() => doFetch(period)}
+        />
       )}
-      {period === '3d' && fetch3dStatus === 'error' && (
-        <div className="flex items-center gap-3 bg-red-900/20 border border-red-800/30 rounded-xl px-4 py-3">
-          <span className="text-red-400 text-sm flex-1">{fetch3dMsg}</span>
-          <button onClick={fetchRows3d} className="text-xs text-red-300 underline shrink-0">Retry</button>
+
+      {/* Budget not loaded notice */}
+      {!periodMeta.lazy && !lazyNeedsLoad && groups.length > 0 && !T.hasBudget && (
+        <div className="flex items-center gap-2 text-xs text-slate-500 bg-gray-800/30 border border-gray-700/30 rounded-xl px-4 py-3">
+          <Info size={13} className="shrink-0" />
+          Budget data not loaded — pull Meta structure (campaigns/adsets) from Setup to see budgets and pacing
         </div>
       )}
 
       {/* Summary KPIs */}
-      {groups.length > 0 && (
+      {groups.length > 0 && !(lazyNeedsLoad || lazyLoading) && (
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
           {[
-            { l: 'Total Spend',    v: fmt(totals.spend),       c: 'text-white' },
-            { l: 'Total Budget/d', v: totals.dailyBudget ? fmt(totals.dailyBudget) : '—', c: 'text-blue-300' },
-            { l: 'Period Budget',  v: totals.expectedSpend ? fmt(totals.expectedSpend) : '—', c: 'text-blue-300' },
-            { l: 'Pacing',        v: totals.expectedSpend ? fmtPct(totals.spend / totals.expectedSpend * 100) : '—',
-              c: totals.expectedSpend && totals.spend / totals.expectedSpend > 1.1 ? 'text-red-400'
-               : totals.expectedSpend && totals.spend / totals.expectedSpend > 0.85 ? 'text-emerald-400' : 'text-amber-400' },
-            { l: 'Total Revenue',  v: fmt(totals.revenue),     c: 'text-emerald-400' },
-            { l: 'Overall ROAS',   v: fmtR(totals.revenue, totals.spend), c: roasCls(totals.revenue, totals.spend) },
-            { l: 'Active Ads',     v: `${totals.activeAds} / ${totals.totalAds}`, c: 'text-gray-300' },
-            { l: 'Fatigued Ads',  v: String(totals.highFatigue), c: totals.highFatigue > 0 ? 'text-orange-400' : 'text-slate-500' },
+            { l: 'Total Spend',    v: fmt(T.spend),        c: 'text-white' },
+            { l: 'Total Revenue',  v: fmt(T.revenue),      c: 'text-emerald-400' },
+            { l: 'Overall ROAS',   v: fmtAggRoas(T.revenue, T.spend), c: aggRoasCls(T.revenue, T.spend) },
+            { l: 'Purchases',      v: fmtN(T.purchases),   c: 'text-gray-300' },
+            { l: 'Daily Budget',   v: T.hasBudget ? fmt(T.dailyBudget) : '—', c: T.hasBudget ? 'text-blue-300' : 'text-slate-500' },
+            { l: 'Period Budget',  v: T.hasBudget ? fmt(T.expectedSpend) : '—', c: T.hasBudget ? 'text-blue-300' : 'text-slate-500' },
+            { l: 'Active Ads',     v: `${T.activeAds}/${T.totalAds}`, c: 'text-gray-300' },
+            { l: 'Fatigued Ads',   v: String(T.highFatigue), c: T.highFatigue > 0 ? 'text-orange-400' : 'text-slate-500' },
           ].map(k => (
             <div key={k.l} className="bg-gray-900/60 rounded-xl border border-gray-800/50 px-3 py-3">
-              <div className="text-[10px] text-slate-500 mb-1 leading-none">{k.l}</div>
+              <div className="text-[10px] text-slate-500 mb-1">{k.l}</div>
               <div className={`text-lg font-bold ${k.c}`}>{k.v}</div>
             </div>
           ))}
@@ -856,35 +891,31 @@ export default function CollectionSpend() {
       )}
 
       {/* Fatigue alert */}
-      {totals.highFatigue > 0 && (
+      {T.highFatigue > 0 && !(lazyNeedsLoad || lazyLoading) && (
         <div className="flex items-center gap-3 bg-orange-900/20 border border-orange-700/30 rounded-xl px-4 py-3">
-          <Flame size={16} className="text-orange-400 shrink-0" />
+          <Flame size={15} className="text-orange-400 shrink-0"/>
           <span className="text-sm text-orange-300">
-            <strong>{totals.highFatigue} ads</strong> show high creative fatigue across {groups.filter(g => g.highFatigueAds.length > 0).length} collections.
-            Expand each collection and open the <strong>Fatigue</strong> tab for details.
+            <strong>{T.highFatigue} ads</strong> show high creative fatigue across&nbsp;
+            {groups.filter(g => g.highFatigueAds.length > 0).length} collection(s). Open each collection → Fatigue tab for details.
           </span>
         </div>
       )}
 
-      {/* Empty state */}
-      {groups.length === 0 && fetch3dStatus !== 'loading' && (
-        <div className="flex flex-col items-center justify-center py-20 text-slate-500 border border-gray-800/40 rounded-2xl bg-gray-900/20">
-          <Shield size={40} className="mb-3 opacity-20" />
-          <div className="text-sm font-medium">No data for {periodName}</div>
-          <div className="text-xs mt-1 opacity-60 text-center max-w-xs">
-            {period === '3d' && fetch3dStatus === 'idle'
-              ? 'Click the Last 3D tab to fetch data from Meta.'
-              : 'Fetch Meta data from Setup, then assign collections to ads via the manual map.'}
-          </div>
+      {/* Collection cards */}
+      {sorted.length > 0 && !(lazyNeedsLoad || lazyLoading) && (
+        <div className="space-y-2">
+          {sorted.map(g => (
+            <CollectionCard key={g.collection} g={g} totalSpend={T.spend} periodDays={periodMeta.days}/>
+          ))}
         </div>
       )}
 
-      {/* Collection cards */}
-      {sorted.length > 0 && (
-        <div className="space-y-2">
-          {sorted.map(g => (
-            <CollectionCard key={g.collection} g={g} totalSpend={totals.spend} periodDays={periodDays} />
-          ))}
+      {/* No data (post-load) */}
+      {sorted.length === 0 && !lazyNeedsLoad && !lazyLoading && (
+        <div className="flex flex-col items-center justify-center py-16 text-slate-500 border border-gray-800/40 rounded-2xl bg-gray-900/20">
+          <BarChart3 size={36} className="mb-3 opacity-20"/>
+          <div className="text-sm font-medium">No spend data for {periodMeta.label}</div>
+          <div className="text-xs mt-1 opacity-60">Assign collections to your ads via the manual map in Setup.</div>
         </div>
       )}
     </div>
