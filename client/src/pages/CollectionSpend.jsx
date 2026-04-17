@@ -97,21 +97,24 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
       if (!map[id]) map[id] = {
         spend:0, impressions:0, clicks:0, purchases:0, revenue:0,
         freqSum:0, n:0,
-        // store last non-zero Meta values (preset windows → 1 row per ad)
         metaRoas:0, metaCpr:0,
-        _n: {},  // names from insight row
+        _roasWSum:0, _roasWN:0, _cprWSum:0, _cprWN:0,
+        _n: {},
       };
       const m = map[id];
-      m.spend       += parseFloat(r.spend)                          || 0;
+      const _sp = parseFloat(r.spend) || 0;
+      m.spend       += _sp;
       m.impressions += parseFloat(r.impressions)                     || 0;
       m.clicks      += parseFloat(r.outboundClicks || r.clicksAll)  || 0;
       m.purchases   += parseFloat(r.purchases)                       || 0;
       m.revenue     += parseFloat(r.revenue)                         || 0;
       m.freqSum     += parseFloat(r.frequency)                       || 0;
       m.n++;
-      // keep last non-zero (preset windows have 1 row/ad; for multi-row take last)
-      if (parseFloat(r.metaRoas) > 0) m.metaRoas = parseFloat(r.metaRoas);
-      if (parseFloat(r.metaCpr)  > 0) m.metaCpr  = parseFloat(r.metaCpr);
+      // Spend-weighted accumulation — Meta's raw values, no division
+      const _roas = parseFloat(r.metaRoas) || 0;
+      const _cpr  = parseFloat(r.metaCpr)  || 0;
+      if (_roas > 0 && _sp > 0) { m._roasWSum += _sp * _roas; m._roasWN += _sp; }
+      if (_cpr  > 0 && _sp > 0) { m._cprWSum  += _sp * _cpr;  m._cprWN  += _sp; }
     };
     acc(byAd,  r.adId);
     acc(byAs,  r.adSetId);
@@ -121,6 +124,12 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
       ad: r.adName, adSet: r.adSetName, adSetId: r.adSetId,
       campaign: r.campaignName, campaignId: r.campaignId,
     };
+  }
+
+  // Resolve spend-weighted avg ROAS/CPR — Meta raw, never computed
+  for (const m of [...Object.values(byAd), ...Object.values(byAs), ...Object.values(byCam)]) {
+    m.metaRoas = m._roasWN > 0 ? m._roasWSum / m._roasWN : 0;
+    m.metaCpr  = m._cprWN  > 0 ? m._cprWSum  / m._cprWN  : 0;
   }
 
   /* ── 2. Enriched map ── */
@@ -193,6 +202,7 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
         collection: col, hasBudgetData,
         spend:0, impressions:0, clicks:0, purchases:0, revenue:0,
         dailyBudget:0, lifetimeBudget:0,
+        _roasWSum:0, _roasWN:0, _cprWSum:0, _cprWN:0,
         campaigns:{}, adsets:{}, ads:[],
       };
     }
@@ -205,6 +215,8 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
     g.clicks      += pm.clicks;
     g.purchases   += pm.purchases;
     g.revenue     += pm.revenue;
+    if (pm.metaRoas > 0 && pm.spend > 0) { g._roasWSum += pm.spend * pm.metaRoas; g._roasWN += pm.spend; }
+    if (pm.metaCpr  > 0 && pm.spend > 0) { g._cprWSum  += pm.spend * pm.metaCpr;  g._cprWN  += pm.spend; }
 
     /* Budget (Meta minor units → /100). Only count in primary collection, only once globally. */
     const campDB = parseInt(camRec.daily_budget    || 0);
@@ -235,7 +247,7 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
         dailyBudget: campDB / 100, lifetimeBudget: campLB / 100,
         spend: cm.spend||0, impressions: cm.impressions||0,
         clicks: cm.clicks||0, purchases: cm.purchases||0, revenue: cm.revenue||0,
-        metaCpr: cm.metaCpr||0,
+        metaRoas: cm.metaRoas||0, metaCpr: cm.metaCpr||0,
       };
     }
 
@@ -249,7 +261,7 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
         dailyBudget: asDB / 100, lifetimeBudget: asLB / 100,
         spend: am.spend||0, impressions: am.impressions||0,
         clicks: am.clicks||0, purchases: am.purchases||0, revenue: am.revenue||0,
-        metaCpr: am.metaCpr||0,
+        metaRoas: am.metaRoas||0, metaCpr: am.metaCpr||0,
       };
     }
 
@@ -299,9 +311,9 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
   return Object.values(groups).map(g => {
     const ctr = g.impressions > 0 ? (g.clicks / g.impressions) * 100 : 0;
     const cpm = g.impressions > 0 ? (g.spend  / g.impressions) * 1000 : 0;
-    // Aggregated ROAS and CPR from Meta data (revenue/spend, spend/purchases)
-    const aggRoas = g.spend > 0 && g.revenue > 0 ? g.revenue / g.spend : 0;
-    const aggCpr  = g.purchases > 0 ? g.spend / g.purchases : 0;
+    // Spend-weighted avg of Meta's own purchase_roas and cost_per_result — no division
+    const avgMetaRoas = g._roasWN > 0 ? g._roasWSum / g._roasWN : 0;
+    const avgMetaCpr  = g._cprWN  > 0 ? g._cprWSum  / g._cprWN  : 0;
     const expectedSpend  = g.dailyBudget * periodDays;
     const pacing         = expectedSpend > 0 ? (g.spend / expectedSpend) * 100 : null;
     const campaigns      = Object.values(g.campaigns).sort((a, b) => b.spend - a.spend);
@@ -312,7 +324,7 @@ function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap,
     const decisionDist   = {};
     for (const a of ads) if (a.decision) decisionDist[a.decision] = (decisionDist[a.decision] || 0) + 1;
     return {
-      ...g, ctr, cpm, aggRoas, aggCpr, expectedSpend, pacing,
+      ...g, ctr, cpm, avgMetaRoas, avgMetaCpr, expectedSpend, pacing,
       campaigns, adsets, ads, highFatigueAds, activeAds, decisionDist,
     };
   }).sort((a, b) => b.spend - a.spend);
@@ -360,8 +372,8 @@ function EntityTable({ rows, type }) {
       { h: 'Impressions', r: row => fmtN(row.impressions),                        num: true },
       { h: 'Purchases',   r: row => fmtN(row.purchases),                          num: true },
       { h: 'Revenue',     r: row => <span className="text-emerald-400 font-mono text-xs">{fmt(row.revenue)}</span>, num: true },
-      { h: 'ROAS',        r: row => <span className={aggRoasCls(row.revenue, row.spend) + ' font-bold font-mono text-xs'}>{fmtAggRoas(row.revenue, row.spend)}</span>, num: true },
-      { h: 'CPR',         r: row => { const v = row.metaCpr > 0 ? row.metaCpr : (row.purchases > 0 ? row.spend / row.purchases : 0); return v > 0 ? <span className="font-mono text-xs text-gray-300">{fmt(v)}</span> : null; }, num: true },
+      { h: 'ROAS (Meta)', r: row => <span className={roasCls(row.metaRoas) + ' font-bold font-mono text-xs'}>{fmtRoas(row.metaRoas)}</span>, num: true },
+      { h: 'CPR (Meta)',  r: row => row.metaCpr > 0 ? <span className="font-mono text-xs text-gray-300">{fmt(row.metaCpr)}</span> : null, num: true },
     ],
     adsets: [
       { h: 'Ad Set',      r: row => <div><div className="font-medium text-white text-xs">{row.name}</div><div className="text-[10px] text-slate-500">{row.campaignName}</div></div>, w: 'min-w-[160px]' },
@@ -372,8 +384,8 @@ function EntityTable({ rows, type }) {
       { h: 'Impressions', r: row => fmtN(row.impressions),                        num: true },
       { h: 'Purchases',   r: row => fmtN(row.purchases),                          num: true },
       { h: 'Revenue',     r: row => <span className="text-emerald-400 font-mono text-xs">{fmt(row.revenue)}</span>, num: true },
-      { h: 'ROAS',        r: row => <span className={aggRoasCls(row.revenue, row.spend) + ' font-bold font-mono text-xs'}>{fmtAggRoas(row.revenue, row.spend)}</span>, num: true },
-      { h: 'CPR',         r: row => { const v = row.metaCpr > 0 ? row.metaCpr : (row.purchases > 0 ? row.spend / row.purchases : 0); return v > 0 ? <span className="font-mono text-xs text-gray-300">{fmt(v)}</span> : null; }, num: true },
+      { h: 'ROAS (Meta)', r: row => <span className={roasCls(row.metaRoas) + ' font-bold font-mono text-xs'}>{fmtRoas(row.metaRoas)}</span>, num: true },
+      { h: 'CPR (Meta)',  r: row => row.metaCpr > 0 ? <span className="font-mono text-xs text-gray-300">{fmt(row.metaCpr)}</span> : null, num: true },
     ],
     ads: [
       { h: 'Ad',          r: row => <div><div className="font-medium text-white text-xs">{row.name}</div><div className="text-[10px] text-slate-500 truncate max-w-[160px]">{row.adSetName}</div></div>, w: 'min-w-[160px]' },
@@ -496,7 +508,6 @@ function FatigueTab({ ads }) {
 
 /* ─── OVERVIEW TAB ────────────────────────────────────────────────── */
 function OverviewTab({ g, periodDays }) {
-  const cpa = g.purchases > 0 ? g.spend / g.purchases : 0;
   const topAds  = g.ads.filter(a => a.spend > 0).slice(0, 3);
   const wrstAds = [...g.ads.filter(a => a.spend > 50)]
     .sort((a, b) => (parseFloat(a.metaRoas) || 0) - (parseFloat(b.metaRoas) || 0))
@@ -511,10 +522,10 @@ function OverviewTab({ g, periodDays }) {
       <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
         <Chip label="Spend"      value={fmt(g.spend)} />
         <Chip label="Revenue"    value={fmt(g.revenue)} cls="text-emerald-400" />
-        <Chip label="ROAS"       value={fmtAggRoas(g.revenue, g.spend)} cls={aggRoasCls(g.revenue, g.spend)} />
-        <Chip label="Impressions"value={fmtN(g.impressions)} cls="text-gray-300" />
-        <Chip label="Purchases"  value={fmtN(g.purchases)} cls="text-gray-300" />
-        <Chip label="CPR"        value={fmt(cpa)} cls={cpa > 0 && cpa < 300 ? 'text-emerald-400' : 'text-amber-400'} />
+        <Chip label="ROAS (Meta)" value={fmtRoas(g.avgMetaRoas)} cls={roasCls(g.avgMetaRoas)} />
+        <Chip label="Impressions" value={fmtN(g.impressions)} cls="text-gray-300" />
+        <Chip label="Purchases"   value={fmtN(g.purchases)} cls="text-gray-300" />
+        <Chip label="CPR (Meta)"  value={g.avgMetaCpr > 0 ? fmt(g.avgMetaCpr) : '—'} cls={g.avgMetaCpr > 0 && g.avgMetaCpr < 500 ? 'text-emerald-400' : 'text-amber-400'} />
       </div>
       <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
         <Chip label="CTR%" value={g.ctr > 0 ? g.ctr.toFixed(2) + '%' : '—'} cls="text-gray-300" />
@@ -663,9 +674,9 @@ function CollectionCard({ g, totalSpend, periodDays }) {
             { l: 'Budget/d',  v: g.hasBudgetData ? (budgetDisplay || 'none') : '—',  c: g.hasBudgetData && budgetDisplay ? 'text-blue-300' : 'text-slate-500' },
             { l: 'Pacing',    v: g.pacing != null ? Math.round(g.pacing) + '%' : '—',
               c: g.pacing == null ? 'text-slate-500' : g.pacing > 110 ? 'text-red-400' : g.pacing > 85 ? 'text-emerald-400' : 'text-amber-400' },
-            { l: 'Revenue',   v: fmt(g.revenue),                        c: 'text-emerald-400' },
-            { l: 'ROAS',      v: fmtAggRoas(g.revenue, g.spend),        c: aggRoasCls(g.revenue, g.spend) + ' font-bold' },
-            { l: 'CPR',       v: g.aggCpr > 0 ? fmt(g.aggCpr) : '—',   c: 'text-gray-300' },
+            { l: 'Revenue',   v: fmt(g.revenue),                                   c: 'text-emerald-400' },
+            { l: 'ROAS',      v: fmtRoas(g.avgMetaRoas),                            c: roasCls(g.avgMetaRoas) + ' font-bold' },
+            { l: 'CPR',       v: g.avgMetaCpr > 0 ? fmt(g.avgMetaCpr) : '—',       c: 'text-gray-300' },
             { l: 'Ads',       v: `${g.activeAds}A / ${g.ads.length}`,   c: 'text-gray-300' },
           ].map(m => (
             <div key={m.l} className="text-right min-w-[56px]">
@@ -683,7 +694,7 @@ function CollectionCard({ g, totalSpend, periodDays }) {
           </div>
           <div className="text-right">
             <div className="text-[9px] text-slate-500">ROAS</div>
-            <div className={`text-sm font-bold ${aggRoasCls(g.revenue, g.spend)}`}>{fmtAggRoas(g.revenue, g.spend)}</div>
+            <div className={`text-sm font-bold ${roasCls(g.avgMetaRoas)}`}>{fmtRoas(g.avgMetaRoas)}</div>
           </div>
         </div>
       </button>
@@ -813,24 +824,32 @@ export default function CollectionSpend() {
   const sorted = useMemo(() => {
     const arr = [...groups];
     if (sortBy === 'budget')  return arr.sort((a, b) => b.dailyBudget - a.dailyBudget);
-    if (sortBy === 'roas')    return arr.sort((a, b) => (b.revenue / b.spend || 0) - (a.revenue / a.spend || 0));
+    if (sortBy === 'roas')    return arr.sort((a, b) => (b.avgMetaRoas || 0) - (a.avgMetaRoas || 0));
     if (sortBy === 'fatigue') return arr.sort((a, b) => b.highFatigueAds.length - a.highFatigueAds.length);
     if (sortBy === 'name')    return arr.sort((a, b) => a.collection.localeCompare(b.collection));
     return arr; // 'spend': already sorted in buildGroups
   }, [groups, sortBy]);
 
   /* ── Totals ── */
-  const T = useMemo(() => ({
-    spend:         groups.reduce((s, g) => s + g.spend, 0),
-    revenue:       groups.reduce((s, g) => s + g.revenue, 0),
-    purchases:     groups.reduce((s, g) => s + g.purchases, 0),
-    dailyBudget:   groups.reduce((s, g) => s + g.dailyBudget, 0),
-    expectedSpend: groups.reduce((s, g) => s + g.expectedSpend, 0),
-    highFatigue:   groups.reduce((s, g) => s + g.highFatigueAds.length, 0),
-    activeAds:     groups.reduce((s, g) => s + g.activeAds, 0),
-    totalAds:      groups.reduce((s, g) => s + g.ads.length, 0),
-    hasBudget:     groups.some(g => g.hasBudgetData && (g.dailyBudget > 0 || g.lifetimeBudget > 0)),
-  }), [groups]);
+  const T = useMemo(() => {
+    const roasWSum = groups.reduce((s, g) => s + (g.avgMetaRoas > 0 ? g.spend * g.avgMetaRoas : 0), 0);
+    const roasWN   = groups.reduce((s, g) => s + (g.avgMetaRoas > 0 ? g.spend : 0), 0);
+    const cprWSum  = groups.reduce((s, g) => s + (g.avgMetaCpr  > 0 ? g.spend * g.avgMetaCpr  : 0), 0);
+    const cprWN    = groups.reduce((s, g) => s + (g.avgMetaCpr  > 0 ? g.spend : 0), 0);
+    return {
+      spend:         groups.reduce((s, g) => s + g.spend, 0),
+      revenue:       groups.reduce((s, g) => s + g.revenue, 0),
+      purchases:     groups.reduce((s, g) => s + g.purchases, 0),
+      dailyBudget:   groups.reduce((s, g) => s + g.dailyBudget, 0),
+      expectedSpend: groups.reduce((s, g) => s + g.expectedSpend, 0),
+      highFatigue:   groups.reduce((s, g) => s + g.highFatigueAds.length, 0),
+      activeAds:     groups.reduce((s, g) => s + g.activeAds, 0),
+      totalAds:      groups.reduce((s, g) => s + g.ads.length, 0),
+      hasBudget:     groups.some(g => g.hasBudgetData && (g.dailyBudget > 0 || g.lifetimeBudget > 0)),
+      avgMetaRoas:   roasWN > 0 ? roasWSum / roasWN : 0,
+      avgMetaCpr:    cprWN  > 0 ? cprWSum  / cprWN  : 0,
+    };
+  }, [groups]);
 
   const lazyNeedsLoad = periodMeta.lazy && !lazyStatus[period] || lazyStatus[period] === 'idle';
   const lazyLoading   = lazyStatus[period] === 'loading';
@@ -907,7 +926,7 @@ export default function CollectionSpend() {
           {[
             { l: 'Total Spend',    v: fmt(T.spend),        c: 'text-white' },
             { l: 'Total Revenue',  v: fmt(T.revenue),      c: 'text-emerald-400' },
-            { l: 'Overall ROAS',   v: fmtAggRoas(T.revenue, T.spend), c: aggRoasCls(T.revenue, T.spend) },
+            { l: 'Overall ROAS',   v: fmtRoas(T.avgMetaRoas), c: roasCls(T.avgMetaRoas) },
             { l: 'Purchases',      v: fmtN(T.purchases),   c: 'text-gray-300' },
             { l: 'Daily Budget',   v: T.hasBudget ? fmt(T.dailyBudget) : '—', c: T.hasBudget ? 'text-blue-300' : 'text-slate-500' },
             { l: 'Period Budget',  v: T.hasBudget ? fmt(T.expectedSpend) : '—', c: T.hasBudget ? 'text-blue-300' : 'text-slate-500' },
