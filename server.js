@@ -449,10 +449,10 @@ app.post('/api/ga/report', async (req, res) => {
       }
     };
 
+    // GA4 allows max 10 concurrent requests per property — run in two batches of 9
     const [
       dailyTrend, sourceMedium, campaigns, landingPages, devices,
-      geo, pages, events, items, utmDrill, browsers, userType, monthlyTrend,
-      sessionHour, deviceChannel, osVersion, engagementByChannel, screenResolution,
+      geo, pages, events, items, utmDrill,
     ] = await Promise.all([
       run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'date'}],
         metrics:['sessions','totalUsers','newUsers','engagedSessions','bounceRate','screenPageViews','conversions','purchaseRevenue','averageSessionDuration'].map(n=>({name:n})) }),
@@ -470,10 +470,17 @@ app.post('/api/ga/report', async (req, res) => {
         metrics:['screenPageViews','averageSessionDuration','bounceRate','engagedSessions'].map(n=>({name:n})), limit:200 }),
       run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'eventName'}],
         metrics:['eventCount','totalUsers','conversions'].map(n=>({name:n})), limit:50 }),
+      // addToCarts and checkouts are event-scoped — incompatible with item dimensions
       run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'itemName'},{name:'itemId'},{name:'itemCategory'},{name:'itemBrand'}],
-        metrics:['itemRevenue','itemsPurchased','addToCarts','checkouts'].map(n=>({name:n})), limit:200 }),
+        metrics:['itemRevenue','itemsPurchased'].map(n=>({name:n})), limit:200 }),
       run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'sessionSource'},{name:'sessionMedium'},{name:'sessionCampaignName'},{name:'sessionManualAdContent'}],
         metrics:['sessions','newUsers','conversions','purchaseRevenue'].map(n=>({name:n})), limit:500 }),
+    ]);
+
+    const [
+      browsers, userType, monthlyTrend,
+      sessionHour, deviceChannel, osVersion, engagementByChannel, screenResolution,
+    ] = await Promise.all([
       run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'browser'},{name:'deviceCategory'}],
         metrics:['sessions','totalUsers','conversions'].map(n=>({name:n})), limit:30 }),
       run({ dateRanges:[{startDate:since,endDate:until}], dimensions:[{name:'newVsReturning'}],
