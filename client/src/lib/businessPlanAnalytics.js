@@ -143,63 +143,36 @@ export function detectGrowthStage(avgOrdersPerDay) {
 
 /* ─── DEFAULT PLAN ───────────────────────────────────────────────────── */
 export const DEFAULT_PLAN = {
-  brandName: 'Dawbu',
+  /* ── TAOS Business Plan — Mar–Dec 2026 ── */
+  aov: 340,
+  cpr: 55,
+  avgBudgetPerCampaign:    1136,
+  avgCreativesPerCampaign: 1.75,
+  inventoryCostPct: 0.20,
+  grossMarginPct:   0.50,
+  opsCostPct:       0.12,
 
-  /* ── 5 core inputs — everything else derives from these ── */
-  baseOrdersPerDay:  350,
-  monthlyGrowthRate: 0.20,
-  targetCpr:   70,
-  targetRoas:  4.5,
-  aov:         350,
+  collectionAlloc: { plants: 0.35, seeds: 0.20, allMix: 0.45 },
+  collectionRoas:  { plants: 4.53, seeds: 3.58, allMix: 4.83 },
 
-  /* ── unit economics ── */
-  avgBudgetPerCampaign:    620,
-  avgCreativesPerCampaign: 1.0,
-  inventoryCostPct: 0.30,
-  grossMarginPct:   0.60,
-  opsCostPct:       0.05,
-
-  /* ── collections: drives budget split, ROAS targets, procurement ── */
-  collections: [
-    { key: 'buildingBlock',   label: 'Building Block',   alloc: 0.49, roas: 4.20,  cpr: 124, color: '#818cf8' },
-    { key: 'miniature',       label: 'Miniature',        alloc: 0.31, roas: 4.07,  cpr: 82,  color: '#22c55e' },
-    { key: 'diamondPainting', label: 'Diamond Painting', alloc: 0.07, roas: 11.47, cpr: 86,  color: '#f59e0b' },
-    { key: 'other',           label: 'Other',            alloc: 0.13, roas: 6.18,  cpr: 89,  color: '#64748b' },
+  months: [
+    { key: '2026-03', label: 'Mar 2026', ordersPerDay:  800, aov: 340, adBudgetPerDay:  44000 },
+    { key: '2026-04', label: 'Apr 2026', ordersPerDay:  960, aov: 345, adBudgetPerDay:  52800 },
+    { key: '2026-05', label: 'May 2026', ordersPerDay: 1152, aov: 350, adBudgetPerDay:  63360 },
+    { key: '2026-06', label: 'Jun 2026', ordersPerDay: 1382, aov: 355, adBudgetPerDay:  76032 },
+    { key: '2026-07', label: 'Jul 2026', ordersPerDay: 1658, aov: 360, adBudgetPerDay:  91238 },
+    { key: '2026-08', label: 'Aug 2026', ordersPerDay: 1990, aov: 365, adBudgetPerDay: 109486 },
+    { key: '2026-09', label: 'Sep 2026', ordersPerDay: 2388, aov: 370, adBudgetPerDay: 131383 },
+    { key: '2026-10', label: 'Oct 2026', ordersPerDay: 2866, aov: 375, adBudgetPerDay: 157660 },
+    { key: '2026-11', label: 'Nov 2026', ordersPerDay: 3439, aov: 380, adBudgetPerDay: 189192 },
+    { key: '2026-12', label: 'Dec 2026', ordersPerDay: 4128, aov: 385, adBudgetPerDay: 227030 },
   ],
 
-  /* ── SKU dimensions: drives warehouse space calculation ── */
-  skuDimensions: [
-    { key: 'buildingBlock',   label: 'Building Block',   lengthCm: 30, widthCm: 20, heightCm: 15, unitsPerOrder: 1.2, bufferDays: 75 },
-    { key: 'miniature',       label: 'Miniature',        lengthCm: 20, widthCm: 15, heightCm: 10, unitsPerOrder: 1.0, bufferDays: 75 },
-    { key: 'diamondPainting', label: 'Diamond Painting', lengthCm: 25, widthCm: 20, heightCm:  5, unitsPerOrder: 1.0, bufferDays: 45 },
-    { key: 'other',           label: 'Other',            lengthCm: 15, widthCm: 10, heightCm:  5, unitsPerOrder: 1.5, bufferDays: 30 },
-  ],
-
-  /* ── warehouses: sqMeters × height × utilization = usable m³ ── */
   warehouses: [
-    { id: 'wh1', name: 'Pune WH1',  location: 'Pune',   sqMeters: 500, heightMeters: 3.5, utilizationPct: 0.70, active: true,  notes: 'Primary — BB + Mini' },
-    { id: 'wh2', name: 'Pune WH2',  location: 'Pune',   sqMeters: 300, heightMeters: 3.5, utilizationPct: 0.70, active: false, notes: 'Activate at Growth stage' },
-    { id: 'wh3', name: 'Mumbai WH', location: 'Mumbai', sqMeters: 400, heightMeters: 4.0, utilizationPct: 0.70, active: false, notes: 'West hub — Accelerate stage' },
+    { id: 'wh1', name: 'Pune WH1',  location: 'Pune',      capacity: 5000, active: true,  notes: 'Primary — all categories',     skuCategories: 'Plants, All Mix' },
+    { id: 'wh2', name: 'Pune WH2',  location: 'Pune',      capacity: 3000, active: true,  notes: 'Expanding capacity',            skuCategories: 'Plants, All Mix' },
+    { id: 'wh3', name: 'Hyderabad', location: 'Hyderabad', capacity: 2000, active: false, notes: 'Seeds hub — activate at scale', skuCategories: 'Seeds' },
   ],
-
-  /* ── suppliers: collectionKey links to collections array ── */
-  suppliers: [
-    { id: 'sup1', name: 'China Import BB',   category: 'Building Block',   collectionKey: 'buildingBlock',   leadTimeDays: 45, paymentTerms: 'Advance', moqUnits: 500, notes: 'Sea freight 40–45 days' },
-    { id: 'sup2', name: 'China Import Mini', category: 'Miniature',        collectionKey: 'miniature',       leadTimeDays: 45, paymentTerms: 'Advance', moqUnits: 300, notes: 'Sea freight 40–45 days' },
-    { id: 'sup3', name: 'China Import DP',   category: 'Diamond Painting', collectionKey: 'diamondPainting', leadTimeDays: 30, paymentTerms: 'Advance', moqUnits: 200, notes: 'Air freight when urgent' },
-    { id: 'sup4', name: 'Local Accessories', category: 'Other',            collectionKey: 'other',           leadTimeDays: 7,  paymentTerms: 'Net-7',   moqUnits: 50,  notes: 'Local add-ons' },
-  ],
-
-  notes: '',
-
-  shiftRoles: {
-    packer:    'Packer',
-    qc:        'QC Inspector',
-    ops:       'Ops Lead',
-    cs:        'CS Agent',
-    logistics: 'Logistics',
-    manager:   'Shift Manager',
-  },
 };
 
 /* Helper: get collectionAlloc-style object from plan.collections array */
