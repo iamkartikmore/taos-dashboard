@@ -25,18 +25,60 @@ const lsKey = id => `taos_bplan_v7_${id || 'default'}`;
 const lsGet = id => { try { const r = localStorage.getItem(lsKey(id)); return r ? JSON.parse(r) : null; } catch { return null; } };
 const lsSet = (id, v) => { try { localStorage.setItem(lsKey(id), JSON.stringify(v)); } catch {} };
 
+const TAOS_COLL_KEYS = new Set(['plants', 'seeds', 'allMix']);
+
 function hydrate(stored, brandName) {
   const isTaos = !brandName || brandName.toLowerCase().includes('taos');
   const seed   = isTaos ? DEFAULT_PLAN : GENERIC_PLAN;
   if (!stored) return { ...seed };
+  // If a non-TAOS brand has TAOS collection keys saved (stale data), wipe them
+  const storedCollKeys = Object.keys(stored.collectionAlloc || {});
+  const staleCollections = !isTaos && storedCollKeys.length > 0 &&
+    storedCollKeys.every(k => TAOS_COLL_KEYS.has(k));
   return {
     ...seed,
     ...stored,
     months: seed.months.map((dm, i) => ({ ...dm, ...(stored.months?.[i] || {}) })),
     warehouses: stored.warehouses?.length ? stored.warehouses : seed.warehouses,
-    collectionAlloc: stored.collectionAlloc || seed.collectionAlloc,
-    collectionRoas:  stored.collectionRoas  || seed.collectionRoas,
+    collectionAlloc: staleCollections ? seed.collectionAlloc : (stored.collectionAlloc || seed.collectionAlloc),
+    collectionRoas:  staleCollections ? seed.collectionRoas  : (stored.collectionRoas  || seed.collectionRoas),
   };
+}
+
+/* Period → since Date */
+const PERIOD_OPTIONS = [
+  { id: '7d',   label: '7 Days' },
+  { id: '14d',  label: '14 Days' },
+  { id: '30d',  label: '30 Days' },
+  { id: 'last-month', label: 'Last Month' },
+  { id: '90d',  label: '90 Days' },
+  { id: '180d', label: '6 Months' },
+  { id: '365d', label: '1 Year' },
+];
+
+function periodToSince(period) {
+  const now = new Date();
+  if (period === '7d')   return new Date(now - 7   * 86400000);
+  if (period === '14d')  return new Date(now - 14  * 86400000);
+  if (period === '30d')  return new Date(now - 30  * 86400000);
+  if (period === '90d')  return new Date(now - 90  * 86400000);
+  if (period === '180d') return new Date(now - 180 * 86400000);
+  if (period === '365d') return new Date(now - 365 * 86400000);
+  if (period === 'last-month') {
+    return new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  }
+  return new Date(now - 90 * 86400000); // default 90d
+}
+
+function chunkDateRange(sinceMs, nowMs, chunkMs = 30 * 86400000) {
+  const chunks = [];
+  let start = sinceMs;
+  while (start < nowMs) {
+    const end = Math.min(start + chunkMs, nowMs);
+    chunks.push([new Date(start).toISOString(), new Date(end).toISOString()]);
+    start = end + 1000;
+  }
+  return chunks;
 }
 
 /* ─── HELPERS ────────────────────────────────────────────────────────── */
@@ -1192,58 +1234,68 @@ function TabCapital({ plan, wc, cmStack, rtoModel }) {
 }
 
 /* ─── LIVE PULL PANEL ────────────────────────────────────────────────── */
-function PullPanel({ isPulling, pullLog, pullProgress, onPull, lastPullAt, stats, onUpload }) {
+function PullPanel({ isPulling, pullLog, pullProgress, onPull, lastPullAt, stats, onUpload, pullPeriod, onPeriodChange }) {
   const fileRef = useRef();
   const hasData = stats.orders > 0 || stats.skus > 0;
   return (
-    <div className={clsx('rounded-xl border p-3.5',
+    <div className={clsx('rounded-xl border p-4',
       isPulling ? 'border-brand-700/60 bg-brand-950/30' : hasData ? 'border-gray-800/50 bg-gray-900/40' : 'border-gray-800/40 bg-gray-900/30')}>
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-3 min-w-0">
-          <span className="text-xs font-bold text-white shrink-0">Live Data</span>
+        <div className="flex items-center gap-3 min-w-0 flex-wrap">
+          <span className="text-sm font-semibold text-white shrink-0">Live Data</span>
           {hasData && !isPulling && (
-            <div className="flex items-center gap-2 text-[10px]">
-              {stats.orders > 0 && <span className="bg-emerald-500/15 text-emerald-400 px-2 py-0.5 rounded-full font-semibold">{stats.orders.toLocaleString()} orders</span>}
-              {stats.skus > 0  && <span className="bg-emerald-500/15 text-emerald-400 px-2 py-0.5 rounded-full font-semibold">{stats.skus} SKUs</span>}
-              {stats.ads > 0   && <span className="bg-emerald-500/15 text-emerald-400 px-2 py-0.5 rounded-full font-semibold">{stats.ads.toLocaleString()} ads</span>}
-              {lastPullAt && <span className="text-slate-600">· {new Date(lastPullAt).toLocaleTimeString()}</span>}
+            <div className="flex items-center gap-2 text-xs">
+              {stats.orders > 0 && <span className="bg-emerald-500/15 text-emerald-400 px-2.5 py-0.5 rounded-full font-semibold">{stats.orders.toLocaleString()} orders</span>}
+              {stats.skus > 0  && <span className="bg-emerald-500/15 text-emerald-400 px-2.5 py-0.5 rounded-full font-semibold">{stats.skus} SKUs</span>}
+              {stats.ads > 0   && <span className="bg-emerald-500/15 text-emerald-400 px-2.5 py-0.5 rounded-full font-semibold">{stats.ads.toLocaleString()} ads</span>}
+              {lastPullAt && <span className="text-slate-500">· {new Date(lastPullAt).toLocaleTimeString()}</span>}
             </div>
           )}
-          {!hasData && !isPulling && <span className="text-[10px] text-slate-500">Pull to load live orders & inventory</span>}
+          {!hasData && !isPulling && <span className="text-xs text-slate-500">Pull to load live orders & inventory</span>}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          {/* Period selector */}
+          <div className="flex items-center gap-1 bg-gray-800/80 rounded-lg p-1">
+            {PERIOD_OPTIONS.map(opt => (
+              <button key={opt.id} onClick={() => onPeriodChange(opt.id)} disabled={isPulling}
+                className={clsx('px-2.5 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap',
+                  pullPeriod === opt.id ? 'bg-brand-600 text-white' : 'text-slate-400 hover:text-slate-200 hover:bg-gray-700')}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
           <button onClick={() => fileRef.current?.click()}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-800 border border-gray-700/60 text-slate-400 rounded-lg text-[10px] hover:bg-gray-700 hover:text-slate-200 transition-colors">
-            <Upload size={10}/>CSV
+            className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-800 border border-gray-700/60 text-slate-400 rounded-lg text-xs hover:bg-gray-700 hover:text-slate-200 transition-colors">
+            <Upload size={11}/>CSV
           </button>
           <input ref={fileRef} type="file" accept=".csv" className="hidden" onChange={e => {
             const f = e.target.files?.[0]; if (!f) return;
             const r = new FileReader(); r.onload = ev => onUpload(ev.target.result); r.readAsText(f); e.target.value = '';
           }}/>
           <button onClick={onPull} disabled={isPulling}
-            className={clsx('flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all',
+            className={clsx('flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-bold transition-all',
               isPulling ? 'bg-brand-800/50 text-brand-400 cursor-not-allowed' : 'bg-brand-600 hover:bg-brand-500 text-white shadow-lg shadow-brand-900/40')}>
-            <RefreshCw size={12} className={isPulling ? 'animate-spin' : ''}/>
-            {isPulling ? 'Pulling…' : 'Pull Live Data'}
+            <RefreshCw size={13} className={isPulling ? 'animate-spin' : ''}/>
+            {isPulling ? 'Pulling…' : 'Pull'}
           </button>
         </div>
       </div>
       {isPulling && (
         <div className="mt-3">
-          <div className="flex justify-between text-[10px] text-slate-500 mb-1"><span>Fetching…</span><span className="text-brand-400 font-semibold">{pullProgress}%</span></div>
+          <div className="flex justify-between text-xs text-slate-500 mb-1.5"><span>Fetching {pullPeriod}…</span><span className="text-brand-400 font-semibold">{pullProgress}%</span></div>
           <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
             <div className="h-full bg-gradient-to-r from-brand-600 to-brand-400 rounded-full transition-all duration-500" style={{ width: `${pullProgress}%` }}/>
           </div>
         </div>
       )}
       {pullLog.length > 0 && (
-        <div className="mt-3 space-y-0.5 max-h-28 overflow-y-auto">
+        <div className="mt-3 space-y-1 max-h-32 overflow-y-auto">
           {pullLog.map((e, i) => (
-            <div key={i} className="flex items-center gap-2 text-[10px]">
+            <div key={i} className="flex items-center gap-2 text-xs">
               <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0',
                 e.status === 'done' ? 'bg-emerald-400' : e.status === 'error' ? 'bg-red-400' : 'bg-amber-400 animate-pulse')}/>
               <span className={e.status === 'error' ? 'text-red-400' : e.status === 'done' ? 'text-slate-300' : 'text-slate-500'}>{e.msg}</span>
-              {e.count != null && e.count > 0 && <span className="text-slate-600">· {e.count.toLocaleString()}</span>}
+              {e.count != null && e.count > 0 && <span className="text-slate-500">· {e.count.toLocaleString()}</span>}
               <span className="text-slate-700 ml-auto shrink-0">{e.ts}</span>
             </div>
           ))}
@@ -1267,6 +1319,7 @@ export default function BusinessPlan() {
   const [pullProgress, setPullProgress]    = useState(0);
   const [lastPullAt, setLastPullAt]        = useState(null);
   const [uploadedOrders, setUploadedOrders]= useState([]);
+  const [pullPeriod, setPullPeriod]        = useState('90d');
 
   const [plan, setPlan] = useState(() => {
     const b = brands.find(br => br.id === (activeBrandIds[0] || 'default'));
@@ -1294,9 +1347,21 @@ export default function BusinessPlan() {
     const active = brands.filter(b => activeBrandIds.includes(b.id));
     if (!active.length) return;
     setIsPulling(true); setPullLog([]); setPullProgress(0);
-    const totalSteps = active.reduce((s, b) => s + (b.meta?.accounts?.filter(a => a.id && a.key).length || 0) + 2, 0);
+
+    const sinceDate = periodToSince(pullPeriod);
+    const nowDate   = new Date();
+    const chunks    = chunkDateRange(sinceDate.getTime(), nowDate.getTime());
+    const isChunked = chunks.length > 1;
+
+    // Estimate total steps: meta accounts + inventory + order chunks per brand
+    const totalSteps = active.reduce((s, b) => {
+      const metaCount = b.meta?.accounts?.filter(a => a.id && a.key).length || 0;
+      const shopCount = b.shopify?.shop ? (1 + chunks.length) : 0;
+      return s + metaCount + shopCount;
+    }, 0);
     let done = 0;
     const tick = () => { done++; setPullProgress(Math.round((done / Math.max(totalSteps, 1)) * 100)); };
+    const ts = () => new Date().toLocaleTimeString();
 
     for (const brand of active) {
       const { token, apiVersion: ver, accounts = [] } = brand.meta || {};
@@ -1305,13 +1370,13 @@ export default function BusinessPlan() {
         setBrandMetaStatus(brand.id, 'loading');
         const results = [];
         for (const acc of valid) {
-          setPullLog(prev => [...prev, { msg: `Meta ${acc.key}…`, status: 'loading', ts: new Date().toLocaleTimeString() }]);
+          setPullLog(prev => [...prev, { msg: `Meta ${acc.key}…`, status: 'loading', ts: ts() }]);
           try {
             const r = await pullAccount({ ver: ver || 'v21.0', token, accountKey: acc.key, accountId: acc.id });
             results.push(r);
-            setPullLog(prev => [...prev.slice(0, -1), { msg: `${acc.key}: ${r.ads?.length || 0} ads`, count: r.ads?.length, status: 'done', ts: new Date().toLocaleTimeString() }]);
+            setPullLog(prev => [...prev.slice(0, -1), { msg: `${acc.key}: ${r.ads?.length || 0} ads`, count: r.ads?.length, status: 'done', ts: ts() }]);
           } catch (e) {
-            setPullLog(prev => [...prev.slice(0, -1), { msg: `${acc.key} failed: ${e.message}`, status: 'error', ts: new Date().toLocaleTimeString() }]);
+            setPullLog(prev => [...prev.slice(0, -1), { msg: `${acc.key} failed: ${e.message}`, status: 'error', ts: ts() }]);
           }
           tick();
         }
@@ -1320,31 +1385,59 @@ export default function BusinessPlan() {
           setBrandMetaStatus(brand.id, 'success');
         }
       }
+
       const { shop, clientId, clientSecret } = brand.shopify || {};
       if (shop && clientId && clientSecret) {
-        setPullLog(prev => [...prev, { msg: `Shopify inventory…`, status: 'loading', ts: new Date().toLocaleTimeString() }]);
+        // Inventory
+        setPullLog(prev => [...prev, { msg: `Shopify inventory…`, status: 'loading', ts: ts() }]);
         try {
           const { map, locations, skuToItemId, collections } = await fetchShopifyInventory(shop, clientId, clientSecret);
           setBrandInventory(brand.id, map, locations, null, skuToItemId, collections);
-          setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory: ${Object.keys(map).length} SKUs`, count: Object.keys(map).length, status: 'done', ts: new Date().toLocaleTimeString() }]);
+          setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory: ${Object.keys(map).length} SKUs`, count: Object.keys(map).length, status: 'done', ts: ts() }]);
         } catch (e) {
-          setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory failed: ${e.message}`, status: 'error', ts: new Date().toLocaleTimeString() }]);
+          setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory failed: ${e.message}`, status: 'error', ts: ts() }]);
         }
         tick();
-        setPullLog(prev => [...prev, { msg: `Orders 180d…`, status: 'loading', ts: new Date().toLocaleTimeString() }]);
-        try {
-          const now = new Date(), since = new Date(now - 180 * 86400000).toISOString();
-          const res = await fetchShopifyOrders(shop, clientId, clientSecret, since, now.toISOString());
-          setBrandOrders(brand.id, res.orders, '180d');
-          setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders: ${res.orders?.length || 0} (180d)`, count: res.orders?.length, status: 'done', ts: new Date().toLocaleTimeString() }]);
-        } catch (e) {
-          setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders failed: ${e.message}`, status: 'error', ts: new Date().toLocaleTimeString() }]);
+
+        // Orders — chunked to avoid Shopify timeouts on long periods
+        let allFetched = [];
+        if (isChunked) {
+          setPullLog(prev => [...prev, { msg: `Orders (${pullPeriod}, ${chunks.length} chunks)…`, status: 'loading', ts: ts() }]);
+          let chunkErrors = 0;
+          for (let ci = 0; ci < chunks.length; ci++) {
+            const [cStart, cEnd] = chunks[ci];
+            setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders chunk ${ci+1}/${chunks.length}…`, status: 'loading', ts: ts() }]);
+            try {
+              const res = await fetchShopifyOrders(shop, clientId, clientSecret, cStart, cEnd);
+              allFetched = [...allFetched, ...(res.orders || [])];
+              tick();
+            } catch (e) {
+              chunkErrors++;
+              setPullLog(prev => [...prev.slice(0, -1), { msg: `Chunk ${ci+1} failed: ${e.message}`, status: 'error', ts: ts() }]);
+              tick();
+            }
+          }
+          setPullLog(prev => [...prev.slice(0, -1), {
+            msg: `Orders: ${allFetched.length} (${pullPeriod}${chunkErrors ? `, ${chunkErrors} chunk errors` : ''})`,
+            count: allFetched.length, status: chunkErrors > 0 ? 'error' : 'done', ts: ts(),
+          }]);
+        } else {
+          // Single chunk (≤ 30d)
+          setPullLog(prev => [...prev, { msg: `Orders (${pullPeriod})…`, status: 'loading', ts: ts() }]);
+          try {
+            const res = await fetchShopifyOrders(shop, clientId, clientSecret, chunks[0][0], chunks[0][1]);
+            allFetched = res.orders || [];
+            setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders: ${allFetched.length} (${pullPeriod})`, count: allFetched.length, status: 'done', ts: ts() }]);
+          } catch (e) {
+            setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders failed: ${e.message}`, status: 'error', ts: ts() }]);
+          }
+          tick();
         }
-        tick();
+        if (allFetched.length > 0) setBrandOrders(brand.id, allFetched, pullPeriod);
       }
     }
     setPullProgress(100); setIsPulling(false); setLastPullAt(Date.now());
-  }, [brands, activeBrandIds, setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders]);
+  }, [brands, activeBrandIds, pullPeriod, setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders]);
 
   const handleUpload = useCallback(text => setUploadedOrders(prev => [...prev, ...parseOrdersCsv(text)]), []);
 
@@ -1359,6 +1452,39 @@ export default function BusinessPlan() {
   const rtoModel   = useMemo(() => buildRTOModel({ plan, predictions }), [plan, predictions]);
   const cmStack    = useMemo(() => buildContributionStack({ plan, pva }), [plan, pva]);
   const bcgMatrix  = useMemo(() => buildBCGMatrix({ plan, allOrders, enrichedRows }), [plan, allOrders, enrichedRows]);
+
+  // Multi-brand combined BCG
+  const combinedBCG = useMemo(() => {
+    if (activeBrandIds.length <= 1) return bcgMatrix;
+    const allPoints = activeBrandIds.flatMap(id => {
+      const b = brands.find(br => br.id === id);
+      const bp = hydrate(lsGet(id), b?.name);
+      const m  = buildBCGMatrix({ plan: bp, allOrders, enrichedRows });
+      const prefix = b?.name?.split(' ')[0] || id;
+      return m.matrix.map(item => ({
+        ...item,
+        label: `${prefix} · ${item.label}`,
+        collection: `${id}_${item.collection}`,
+      }));
+    });
+    if (!allPoints.length) return bcgMatrix;
+    const sorted = (arr) => [...arr].sort((a,b)=>a-b);
+    const shares  = sorted(allPoints.map(p=>p.shareX));
+    const growths = sorted(allPoints.map(p=>p.growthY));
+    const mShare  = shares[Math.floor(shares.length/2)];
+    const mGrowth = growths[Math.floor(growths.length/2)];
+    const QUAD = { Star:['#22c55e','Invest aggressively'], 'Cash Cow':['#f59e0b','Milk margins'], 'Question Mark':['#818cf8','Test 2x budget'], Dog:['#ef4444','Harvest or drop'] };
+    const getQ = p => {
+      const hs = p.shareX >= mShare, hg = p.growthY >= mGrowth;
+      const name = hs&&hg ? 'Star' : hs&&!hg ? 'Cash Cow' : !hs&&hg ? 'Question Mark' : 'Dog';
+      return { name, icon: null, color: QUAD[name][0], action: QUAD[name][1] };
+    };
+    return {
+      matrix: allPoints.map(p=>({...p, quadrant: getQ(p)})),
+      medianShare: mShare, medianGrowth: mGrowth, combined: true,
+      recommendations: allPoints.map(p=>({ collection: p.label, quadrant: getQ(p).name, color: p.color, budgetSignal: getQ(p).name==='Star'?'+30%':getQ(p).name==='Cash Cow'?'Maintain':getQ(p).name==='Question Mark'?'Test +20%':'-50%' })),
+    };
+  }, [activeBrandIds, brands, bcgMatrix, allOrders, enrichedRows]);
 
   const brand = brands.find(b => b.id === primaryBrandId);
   const warehouseTags = useMemo(() => parseWarehouseTags(allOrders), [allOrders]);
@@ -1394,7 +1520,8 @@ export default function BusinessPlan() {
 
       {/* Live pull panel */}
       <PullPanel isPulling={isPulling} pullLog={pullLog} pullProgress={pullProgress}
-        onPull={handlePull} lastPullAt={lastPullAt} stats={stats} onUpload={handleUpload}/>
+        onPull={handlePull} lastPullAt={lastPullAt} stats={stats} onUpload={handleUpload}
+        pullPeriod={pullPeriod} onPeriodChange={setPullPeriod}/>
 
       {/* Tab bar */}
       <div className="flex gap-1 bg-gray-900/60 rounded-xl p-1 border border-gray-800/50 overflow-x-auto scrollbar-none">
@@ -1407,9 +1534,9 @@ export default function BusinessPlan() {
         ))}
       </div>
 
-      {tab === 'command'   && <TabCommand   plan={plan} pva={pva} predictions={predictions} allOrders={allOrders} constraint={constraint} breaking={breaking} bcgMatrix={bcgMatrix}/>}
+      {tab === 'command'   && <TabCommand   plan={plan} pva={pva} predictions={predictions} allOrders={allOrders} constraint={constraint} breaking={breaking} bcgMatrix={combinedBCG}/>}
       {tab === 'revenue'   && <TabRevenue   plan={plan} pva={pva} savePlan={savePlan} allOrders={allOrders}/>}
-      {tab === 'marketing' && <TabMarketing plan={plan} pva={pva} savePlan={savePlan} bcgMatrix={bcgMatrix}/>}
+      {tab === 'marketing' && <TabMarketing plan={plan} pva={pva} savePlan={savePlan} bcgMatrix={combinedBCG}/>}
       {tab === 'inventory' && <TabInventory inventoryMap={inventoryMap} allOrders={allOrders} growthInv={growthInv}/>}
       {tab === 'warehouse' && <TabWarehouses plan={plan} savePlan={savePlan} warehouseTags={warehouseTags} allOrders={allOrders}/>}
       {tab === 'capital'   && <TabCapital   plan={plan} wc={wc} cmStack={cmStack} rtoModel={rtoModel}/>}
