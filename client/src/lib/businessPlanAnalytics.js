@@ -191,6 +191,15 @@ export const DEFAULT_PLAN = {
   ],
 
   notes: '',
+
+  shiftRoles: {
+    packer:    'Packer',
+    qc:        'QC Inspector',
+    ops:       'Ops Lead',
+    cs:        'CS Agent',
+    logistics: 'Logistics',
+    manager:   'Shift Manager',
+  },
 };
 
 /* Helper: get collectionAlloc-style object from plan.collections array */
