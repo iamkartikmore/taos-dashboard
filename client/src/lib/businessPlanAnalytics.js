@@ -187,11 +187,41 @@ export const DEFAULT_PLAN = {
   ],
 
   warehouses: [
-    { id: 'wh1', name: 'Pune WH1',  location: 'Pune',      capacity: 5000, active: true,  notes: 'Primary — all categories',     skuCategories: 'Plants, All Mix' },
-    { id: 'wh2', name: 'Pune WH2',  location: 'Pune',      capacity: 3000, active: true,  notes: 'Expanding capacity',            skuCategories: 'Plants, All Mix' },
-    { id: 'wh3', name: 'Hyderabad', location: 'Hyderabad', capacity: 2000, active: false, notes: 'Seeds hub — activate at scale', skuCategories: 'Seeds' },
+    { id: 'wh1', name: 'Pune WH1',  location: 'Pune',      capacity: 5000, active: true,  orderTag: '1', notes: 'Primary — all categories',     skuCategories: 'Plants, All Mix' },
+    { id: 'wh2', name: 'Pune WH2',  location: 'Pune',      capacity: 3000, active: true,  orderTag: '8', notes: 'Expanding capacity',            skuCategories: 'Plants, All Mix' },
+    { id: 'wh3', name: 'Hyderabad', location: 'Hyderabad', capacity: 2000, active: false, orderTag: '9', notes: 'Seeds hub — activate at scale', skuCategories: 'Seeds' },
   ],
 };
+
+/* ── Generic plan seed for non-TAOS brands ──────────────────────────── */
+export const GENERIC_PLAN = {
+  aov: 300, cpr: 60,
+  avgBudgetPerCampaign: 1000, avgCreativesPerCampaign: 2,
+  inventoryCostPct: 0.20, grossMarginPct: 0.50, opsCostPct: 0.12,
+  codPct: 0.60, rtoRateCOD: 0.28, rtoRatePrepaid: 0.06,
+  forwardShipping: 65, reverseLogistics: 60, restockingCost: 25, damageWriteoff: 20,
+  gatewayFeePct: 0.029, gatewayFeeFixed: 3, pickPackCost: 15, packagingCost: 8,
+  defaultLeadTimeDays: 45,
+  collectionAlloc: { colA: 0.40, colB: 0.35, colC: 0.25 },
+  collectionRoas:  { colA: 4.0,  colB: 3.5,  colC: 4.5  },
+  months: DEFAULT_PLAN.months.map(m => ({ ...m })),
+  warehouses: [],
+};
+
+/* ── Parse warehouse:N tags from orders ─────────────────────────────── */
+export function parseWarehouseTags(orders = []) {
+  const map = {};
+  orders.forEach(o => {
+    const tags = (o.tags || '').split(',').map(t => t.trim().toLowerCase());
+    const whTag = tags.find(t => /^warehouse:\d+$/.test(t));
+    if (!whTag) return;
+    const num = whTag.split(':')[1];
+    if (!map[num]) map[num] = { tagNum: num, orders: 0, revenue: 0 };
+    map[num].orders++;
+    map[num].revenue += parseFloat(o.total_price || o.totalPrice || 0);
+  });
+  return map;
+}
 
 /* Helper: get collectionAlloc-style object from plan.collections array */
 export function collectionAllocObj(plan) {
