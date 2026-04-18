@@ -59,23 +59,78 @@ async function shopifyToken(shopDomain, clientId, clientSecret) {
 /* ─── AUTH ────────────────────────────────────────────────────────── */
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-prod';
+const JWT_SECRET       = process.env.JWT_SECRET || 'dev-secret-change-in-prod';
 const googleAuthClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
-function loadAuthConfig() {
+// GitHub API persistence — config lives in git, server is stateless
+const GH_TOKEN = process.env.GITHUB_TOKEN;
+const GH_OWNER = process.env.GITHUB_OWNER || 'iamkartikmore';
+const GH_REPO  = process.env.GITHUB_REPO  || 'taos-dashboard';
+const GH_FILE  = 'auth-config.json';
+const GH_API   = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_FILE}`;
+const GH_HEADS = () => ({ Authorization: `Bearer ${GH_TOKEN}`, Accept: 'application/vnd.github+json' });
+
+let _configCache = null;
+let _configTs    = 0;
+let _configSha   = null;
+const CACHE_TTL  = 30_000; // 30s — short so permission changes apply quickly
+
+async function loadAuthConfig() {
+  if (_configCache && Date.now() - _configTs < CACHE_TTL) return _configCache;
+
+  // Try GitHub API first (always authoritative)
+  if (GH_TOKEN) {
+    try {
+      const r = await axios.get(GH_API, { headers: GH_HEADS(), timeout: 8000 });
+      const config = JSON.parse(Buffer.from(r.data.content, 'base64').toString('utf8'));
+      _configCache = config;
+      _configTs    = Date.now();
+      _configSha   = r.data.sha;
+      return config;
+    } catch (e) {
+      console.warn('[auth] GitHub read failed, using cache/local:', e.message);
+    }
+  }
+
+  if (_configCache) return _configCache; // stale cache is better than nothing
+
+  try { return JSON.parse(fs.readFileSync(path.join(__dirname, GH_FILE), 'utf8')); }
+  catch { return { users: [], roles: {} }; }
+}
+
+async function saveAuthConfig(config) {
+  // Update cache immediately so next request sees new data
+  _configCache = config;
+  _configTs    = Date.now();
+
+  // Write local file as fallback
+  try { fs.writeFileSync(path.join(__dirname, GH_FILE), JSON.stringify(config, null, 2)); } catch {}
+
+  if (!GH_TOKEN) { console.warn('[auth] No GITHUB_TOKEN — changes are local only'); return; }
+
   try {
-    return JSON.parse(fs.readFileSync(path.join(__dirname, 'auth-config.json'), 'utf8'));
-  } catch { return { users: [], roles: {} }; }
+    // Re-fetch SHA if we don't have it
+    if (!_configSha) {
+      const r = await axios.get(GH_API, { headers: GH_HEADS(), timeout: 8000 });
+      _configSha = r.data.sha;
+    }
+    const r = await axios.put(GH_API, {
+      message: 'chore(auth): update user config via admin panel [skip ci]',
+      content: Buffer.from(JSON.stringify(config, null, 2)).toString('base64'),
+      sha: _configSha,
+    }, { headers: GH_HEADS(), timeout: 10000 });
+    _configSha = r.data.content?.sha;
+    console.log('[auth] auth-config.json committed to GitHub ✓');
+  } catch (e) {
+    console.warn('[auth] GitHub write failed:', e.message);
+    _configSha = null; // force re-fetch SHA on next write
+  }
 }
 
 function resolveModules(userConfig, roles) {
   const mods = userConfig.modules;
   if (mods && mods.length > 0) return mods;
   return roles[userConfig.role] || [];
-}
-
-function saveAuthConfig(config) {
-  fs.writeFileSync(path.join(__dirname, 'auth-config.json'), JSON.stringify(config, null, 2));
 }
 
 /* ─── USAGE LOGGING (in-memory ring buffer) ────────────────────── */
@@ -112,43 +167,43 @@ function requireAdmin(req, res, next) {
 }
 
 // GET /api/admin/users
-app.get('/api/admin/users', requireAdmin, (req, res) => {
-  const { users } = loadAuthConfig();
+app.get('/api/admin/users', requireAdmin, async (req, res) => {
+  const { users } = await loadAuthConfig();
   res.json(users);
 });
 
 // POST /api/admin/users
-app.post('/api/admin/users', requireAdmin, (req, res) => {
-  const config = loadAuthConfig();
+app.post('/api/admin/users', requireAdmin, async (req, res) => {
+  const config = await loadAuthConfig();
   const { email, name, role, modules, brands } = req.body;
   if (!email || !name || !role) return res.status(400).json({ error: 'email, name, role required' });
   if (config.users.find(u => u.email.toLowerCase() === email.toLowerCase()))
     return res.status(409).json({ error: 'User already exists' });
   config.users.push({ email: email.toLowerCase(), name, role, modules: modules || [], brands: brands || ['*'] });
-  saveAuthConfig(config);
+  await saveAuthConfig(config);
   pushLog({ type: 'admin', action: 'add_user', email: req.adminUser.email, target: email });
   res.json({ ok: true });
 });
 
 // PUT /api/admin/users/:email
-app.put('/api/admin/users/:email', requireAdmin, (req, res) => {
-  const config = loadAuthConfig();
+app.put('/api/admin/users/:email', requireAdmin, async (req, res) => {
+  const config = await loadAuthConfig();
   const idx = config.users.findIndex(u => u.email.toLowerCase() === req.params.email.toLowerCase());
   if (idx === -1) return res.status(404).json({ error: 'User not found' });
   const { name, role, modules, brands } = req.body;
   config.users[idx] = { ...config.users[idx], name, role, modules: modules || [], brands: brands || ['*'] };
-  saveAuthConfig(config);
+  await saveAuthConfig(config);
   pushLog({ type: 'admin', action: 'update_user', email: req.adminUser.email, target: req.params.email });
   res.json({ ok: true });
 });
 
 // DELETE /api/admin/users/:email
-app.delete('/api/admin/users/:email', requireAdmin, (req, res) => {
-  const config = loadAuthConfig();
+app.delete('/api/admin/users/:email', requireAdmin, async (req, res) => {
+  const config = await loadAuthConfig();
   const before = config.users.length;
   config.users = config.users.filter(u => u.email.toLowerCase() !== req.params.email.toLowerCase());
   if (config.users.length === before) return res.status(404).json({ error: 'User not found' });
-  saveAuthConfig(config);
+  await saveAuthConfig(config);
   pushLog({ type: 'admin', action: 'delete_user', email: req.adminUser.email, target: req.params.email });
   res.json({ ok: true });
 });
@@ -160,8 +215,8 @@ app.get('/api/admin/logs', requireAdmin, (req, res) => {
 });
 
 // GET /api/admin/roles — expose role→modules map to client
-app.get('/api/admin/roles', requireAdmin, (req, res) => {
-  const { roles } = loadAuthConfig();
+app.get('/api/admin/roles', requireAdmin, async (req, res) => {
+  const { roles } = await loadAuthConfig();
   res.json(roles);
 });
 
@@ -176,7 +231,7 @@ app.post('/api/auth/verify', async (req, res) => {
     });
     const payload = ticket.getPayload();
     const email = payload.email?.toLowerCase();
-    const { users, roles } = loadAuthConfig();
+    const { users, roles } = await loadAuthConfig();
     const userConfig = users.find(u => u.email.toLowerCase() === email);
     if (!userConfig) return res.status(403).json({ error: 'Access denied — your email is not authorised.' });
     const modules = resolveModules(userConfig, roles);
@@ -191,12 +246,12 @@ app.post('/api/auth/verify', async (req, res) => {
 });
 
 // GET /api/auth/me — validate existing JWT and refresh permissions from config
-app.get('/api/auth/me', (req, res) => {
+app.get('/api/auth/me', async (req, res) => {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ error: 'Not authenticated' });
   try {
     const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET);
-    const { users, roles } = loadAuthConfig();
+    const { users, roles } = await loadAuthConfig();
     const userConfig = users.find(u => u.email.toLowerCase() === decoded.email);
     if (!userConfig) return res.status(403).json({ error: 'Access revoked' });
     const modules = resolveModules(userConfig, roles);
