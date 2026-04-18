@@ -1986,7 +1986,7 @@ function TabTargets({ plan, pva, savePlan, collContrib, brand, ordersCount }) {
 }
 
 /* ─── LIVE PULL PANEL ────────────────────────────────────────────────── */
-function PullPanel({ isPulling, pullLog, pullProgress, onPull, lastPullAt, stats, onUpload, pullPeriod, onPeriodChange }) {
+function PullPanel({ isPulling, pullLog, pullProgress, onPull, lastPullAt, stats, onUpload, pullPeriod, onPeriodChange, failedBrands = [], onRetryBrand }) {
   const fileRef = useRef();
   const hasData = stats.orders > 0 || stats.skus > 0;
   return (
@@ -2028,10 +2028,22 @@ function PullPanel({ isPulling, pullLog, pullProgress, onPull, lastPullAt, stats
             className={clsx('flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-bold transition-all',
               isPulling ? 'bg-brand-800/50 text-brand-400 cursor-not-allowed' : 'bg-brand-600 hover:bg-brand-500 text-white shadow-lg shadow-brand-900/40')}>
             <RefreshCw size={13} className={isPulling ? 'animate-spin' : ''}/>
-            {isPulling ? 'Pulling…' : 'Pull'}
+            {isPulling ? 'Pulling…' : 'Pull All'}
           </button>
         </div>
       </div>
+      {/* Retry buttons for failed brands */}
+      {!isPulling && failedBrands.length > 0 && (
+        <div className="mt-3 flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-red-400 font-semibold">Errors detected:</span>
+          {failedBrands.map(b => (
+            <button key={b.id} onClick={() => onRetryBrand?.(b.id)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-red-900/30 border border-red-700/40 text-red-300 rounded-lg text-xs font-semibold hover:bg-red-900/50 transition-colors">
+              <RefreshCw size={11}/>Retry {b.name}
+            </button>
+          ))}
+        </div>
+      )}
       {isPulling && (
         <div className="mt-3">
           <div className="flex justify-between text-xs text-slate-500 mb-1.5"><span>Fetching {pullPeriod}…</span><span className="text-brand-400 font-semibold">{pullProgress}%</span></div>
@@ -2120,66 +2132,59 @@ export default function BusinessPlan() {
     });
   }, [primaryBrandId]);
 
-  const handlePull = useCallback(async () => {
-    const active = brands.filter(b => activeBrandIds.includes(b.id));
-    if (!active.length) return;
-    setIsPulling(true); setPullLog([]); setPullProgress(0);
+  // Pull a single brand — used by "Retry" buttons and the main Pull handler
+  const pullOneBrand = useCallback(async (brand, chunks, isChunked, tick, ts) => {
+    const { token, apiVersion: ver, accounts = [] } = brand.meta || {};
+    const valid = accounts.filter(a => a.id && a.key);
 
-    const sinceDate = periodToSince(pullPeriod);
-    const nowDate   = new Date();
-    const chunks    = chunkDateRange(sinceDate.getTime(), nowDate.getTime());
-    const isChunked = chunks.length > 1;
-
-    // Estimate total steps: meta accounts + inventory + order chunks per brand
-    const totalSteps = active.reduce((s, b) => {
-      const metaCount = b.meta?.accounts?.filter(a => a.id && a.key).length || 0;
-      const shopCount = b.shopify?.shop ? (1 + chunks.length) : 0;
-      return s + metaCount + shopCount;
-    }, 0);
-    let done = 0;
-    const tick = () => { done++; setPullProgress(Math.round((done / Math.max(totalSteps, 1)) * 100)); };
-    const ts = () => new Date().toLocaleTimeString();
-
-    for (const brand of active) {
-      const { token, apiVersion: ver, accounts = [] } = brand.meta || {};
-      const valid = accounts.filter(a => a.id && a.key);
-      if (token && valid.length) {
-        setBrandMetaStatus(brand.id, 'loading');
-        const results = [];
-        for (const acc of valid) {
-          setPullLog(prev => [...prev, { msg: `Meta ${acc.key}…`, status: 'loading', ts: ts() }]);
+    // ── Meta accounts: up to 3 attempts each ──
+    if (token && valid.length) {
+      setBrandMetaStatus(brand.id, 'loading');
+      const results = [];
+      for (const acc of valid) {
+        let accDone = false;
+        setPullLog(prev => [...prev, { msg: `Meta ${acc.key}…`, status: 'loading', ts: ts() }]);
+        for (let attempt = 0; attempt < 3 && !accDone; attempt++) {
+          if (attempt > 0) {
+            await new Promise(r => setTimeout(r, 6000 * attempt)); // 6s, 12s
+            setPullLog(prev => [...prev.slice(0, -1), { msg: `Meta ${acc.key} retry ${attempt}…`, status: 'loading', ts: ts() }]);
+          }
           try {
             const r = await pullAccount({ ver: ver || 'v21.0', token, accountKey: acc.key, accountId: acc.id });
             results.push(r);
             setPullLog(prev => [...prev.slice(0, -1), { msg: `${acc.key}: ${r.ads?.length || 0} ads`, count: r.ads?.length, status: 'done', ts: ts() }]);
+            accDone = true;
           } catch (e) {
-            setPullLog(prev => [...prev.slice(0, -1), { msg: `${acc.key} failed: ${e.message}`, status: 'error', ts: ts() }]);
+            if (attempt >= 2)
+              setPullLog(prev => [...prev.slice(0, -1), { msg: `${acc.key} failed (3 tries): ${e.message}`, status: 'error', ts: ts() }]);
           }
-          tick();
         }
-        if (results.length) {
-          setBrandMetaData(brand.id, { campaigns: results.flatMap(r => r.campaigns), adsets: results.flatMap(r => r.adsets), ads: results.flatMap(r => r.ads), insightsToday: results.flatMap(r => r.insightsToday), insights7d: results.flatMap(r => r.insights7d), insights14d: results.flatMap(r => r.insights14d), insights30d: results.flatMap(r => r.insights30d) });
-          setBrandMetaStatus(brand.id, 'success');
-        }
+        tick();
       }
+      if (results.length) {
+        setBrandMetaData(brand.id, { campaigns: results.flatMap(r => r.campaigns), adsets: results.flatMap(r => r.adsets), ads: results.flatMap(r => r.ads), insightsToday: results.flatMap(r => r.insightsToday), insights7d: results.flatMap(r => r.insights7d), insights14d: results.flatMap(r => r.insights14d), insights30d: results.flatMap(r => r.insights30d) });
+        setBrandMetaStatus(brand.id, 'success');
+      }
+    }
 
-      const { shop, clientId, clientSecret } = brand.shopify || {};
-      if (shop && clientId && clientSecret) {
-        // Inventory — retry up to 2 extra times on failure (server has 25s budget; this gives it ~3 attempts)
-        setPullLog(prev => [...prev, { msg: `Shopify inventory…`, status: 'loading', ts: ts() }]);
-        let invDone = false;
-        for (let invAttempt = 0; invAttempt < 3 && !invDone; invAttempt++) {
-          if (invAttempt > 0) {
-            await new Promise(r => setTimeout(r, 3000));
-            setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory retry ${invAttempt}/2…`, status: 'loading', ts: ts() }]);
-          }
-          try {
-            const { map, locations, skuToItemId, collections } = await fetchShopifyInventory(shop, clientId, clientSecret);
-            setBrandInventory(brand.id, map, locations, null, skuToItemId, collections);
-            const skuCount = Object.keys(map).length;
-            setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory: ${skuCount} SKUs${collections?.length ? `, ${collections.length} collections` : ''}`, count: skuCount, status: 'done', ts: ts() }]);
-            invDone = true;
-          } catch (e) {
+    const { shop, clientId, clientSecret } = brand.shopify || {};
+    if (shop && clientId && clientSecret) {
+      // ── Inventory: 3 attempts, 8s / 15s delays ──
+      setPullLog(prev => [...prev, { msg: `Shopify inventory…`, status: 'loading', ts: ts() }]);
+      let invDone = false;
+      for (let invAttempt = 0; invAttempt < 3 && !invDone; invAttempt++) {
+        if (invAttempt > 0) {
+          const delay = invAttempt === 1 ? 8000 : 15000;
+          await new Promise(r => setTimeout(r, delay));
+          setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory retry ${invAttempt}/2 (${delay/1000}s wait)…`, status: 'loading', ts: ts() }]);
+        }
+        try {
+          const { map, locations, skuToItemId, collections } = await fetchShopifyInventory(shop, clientId, clientSecret);
+          setBrandInventory(brand.id, map, locations, null, skuToItemId, collections);
+          const skuCount = Object.keys(map).length;
+          setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory: ${skuCount} SKUs${collections?.length ? `, ${collections.length} collections` : ''}`, count: skuCount, status: 'done', ts: ts() }]);
+          invDone = true;
+        } catch (e) {
             if (invAttempt >= 2) {
               setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory failed after 3 tries: ${e.message}`, status: 'error', ts: ts() }]);
             }
@@ -2242,9 +2247,46 @@ export default function BusinessPlan() {
         }
         if (allFetched.length > 0) setBrandOrders(brand.id, allFetched, pullPeriod);
       }
-    }
+  }, [pullPeriod, setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders]);
+
+  // Pull all active brands
+  const handlePull = useCallback(async () => {
+    const active = brands.filter(b => activeBrandIds.includes(b.id));
+    if (!active.length) return;
+    setIsPulling(true); setPullLog([]); setPullProgress(0);
+
+    const sinceDate  = periodToSince(pullPeriod);
+    const chunks     = chunkDateRange(sinceDate.getTime(), Date.now());
+    const isChunked  = chunks.length > 1;
+    const totalSteps = active.reduce((s, b) => {
+      const metaCount = b.meta?.accounts?.filter(a => a.id && a.key).length || 0;
+      const shopCount = b.shopify?.shop ? (1 + chunks.length) : 0;
+      return s + metaCount + shopCount;
+    }, 0);
+    let done = 0;
+    const tick = () => { done++; setPullProgress(Math.round((done / Math.max(totalSteps, 1)) * 100)); };
+    const ts = () => new Date().toLocaleTimeString();
+
+    for (const brand of active) await pullOneBrand(brand, chunks, isChunked, tick, ts);
     setPullProgress(100); setIsPulling(false); setLastPullAt(Date.now());
-  }, [brands, activeBrandIds, pullPeriod, setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders]);
+  }, [brands, activeBrandIds, pullPeriod, pullOneBrand]);
+
+  // Retry a single brand (shown after errors)
+  const handleRetryBrand = useCallback(async (brandId) => {
+    const brand = brands.find(b => b.id === brandId);
+    if (!brand || isPulling) return;
+    setIsPulling(true);
+    setPullLog(prev => [...prev, { msg: `── Retrying ${brand.name} ──`, status: 'loading', ts: new Date().toLocaleTimeString() }]);
+
+    const sinceDate = periodToSince(pullPeriod);
+    const chunks    = chunkDateRange(sinceDate.getTime(), Date.now());
+    const isChunked = chunks.length > 1;
+    const noop      = () => {};
+    const ts        = () => new Date().toLocaleTimeString();
+
+    await pullOneBrand(brand, chunks, isChunked, noop, ts);
+    setIsPulling(false); setLastPullAt(Date.now());
+  }, [brands, isPulling, pullPeriod, pullOneBrand]);
 
   const handleUpload = useCallback(text => setUploadedOrders(prev => [...prev, ...parseOrdersCsv(text)]), []);
 
@@ -2267,6 +2309,18 @@ export default function BusinessPlan() {
   const brand = brands.find(b => b.id === primaryBrandId);
   const warehouseTags = useMemo(() => parseWarehouseTags(allOrders), [allOrders]);
   const stats = { orders: allOrders.length, skus: Object.keys(inventoryMap || {}).length, ads: enrichedRows?.length || 0 };
+
+  // Brands that had errors — derived from pull log for retry buttons
+  const failedBrands = useMemo(() => {
+    if (isPulling || !pullLog.length) return [];
+    const failed = [];
+    brands.filter(b => activeBrandIds.includes(b.id)).forEach(b => {
+      const brandLogs = pullLog.filter(l => l.msg.includes(b.name) || l.msg.includes(b.meta?.accounts?.[0]?.key || '__'));
+      const hasError  = pullLog.some(l => l.status === 'error' && (l.msg.includes(b.name) || l.msg.toLowerCase().includes('failed')));
+      if (hasError) failed.push(b);
+    });
+    return failed;
+  }, [isPulling, pullLog, brands, activeBrandIds]);
 
   const totalPlanRev = pva.reduce((s, m) => s + m.planRevenue, 0);
 
@@ -2313,7 +2367,8 @@ export default function BusinessPlan() {
       {/* Live pull panel */}
       <PullPanel isPulling={isPulling} pullLog={pullLog} pullProgress={pullProgress}
         onPull={handlePull} lastPullAt={lastPullAt} stats={stats} onUpload={handleUpload}
-        pullPeriod={pullPeriod} onPeriodChange={setPullPeriod}/>
+        pullPeriod={pullPeriod} onPeriodChange={setPullPeriod}
+        failedBrands={failedBrands} onRetryBrand={handleRetryBrand}/>
 
       {/* Tab bar */}
       <div className="flex gap-1 bg-gray-900/60 rounded-xl p-1 border border-gray-800/50 overflow-x-auto scrollbar-none">

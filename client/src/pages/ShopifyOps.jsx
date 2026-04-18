@@ -1,23 +1,71 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
+  LineChart, Line, PieChart, Pie,
 } from 'recharts';
 import {
-  Truck, MapPin, Building2, Hash, ChevronDown, ChevronRight,
-  Package, Clock, AlertTriangle, CheckCircle, Download, RefreshCw,
+  Truck, Package, Users, RotateCcw, Sun, Sunset, Moon,
+  ChevronDown, ChevronRight, Download, RefreshCw, Search,
+  AlertTriangle, CheckCircle, Clock, Edit2, Check, X,
+  Plus, Trash2, Hash, MapPin, ArrowUpRight, Filter,
+  Clipboard, Tag, DollarSign, TrendingUp, TrendingDown,
+  Zap, Activity,
 } from 'lucide-react';
+import clsx from 'clsx';
 import { useStore } from '../store';
 
-/* ─── FORMATTERS ─────────────────────────────────────────────────── */
+/* ─── CONSTANTS ─────────────────────────────────────────────────── */
+const LS_OVERRIDES = 'taos_ops_overrides_v2';
+const LS_TICKETS   = 'taos_ops_tickets_v2';
+
+const SHIFTS = [
+  { id: 'morning',   label: 'Morning',   range: '6AM–2PM',  icon: Sun,    color: '#f59e0b' },
+  { id: 'afternoon', label: 'Afternoon', range: '2PM–10PM', icon: Sunset, color: '#f97316' },
+  { id: 'night',     label: 'Night',     range: '10PM–6AM', icon: Moon,   color: '#818cf8' },
+];
+
+const PRIORITY_OPTIONS = ['Normal','Urgent','Watch','Done'];
+const PRIORITY_COLORS  = { Urgent: '#ef4444', Normal: '#3b82f6', Watch: '#f59e0b', Done: '#22c55e' };
+
+const TICKET_TYPES    = ['Wrong Item','Damaged','Not Delivered','Refund Request','Exchange','Other'];
+const TICKET_STATUSES = ['Open','In Progress','Escalated','Resolved','Closed'];
+const TICKET_STATUS_COLORS = {
+  Open: '#3b82f6', 'In Progress': '#f59e0b', Escalated: '#ef4444',
+  Resolved: '#22c55e', Closed: '#64748b',
+};
+
+const RETURN_STATUSES = ['Pending','Pickup Scheduled','Received','Refund Initiated','Refund Done','Rejected'];
+const RETURN_STATUS_COLORS = {
+  Pending: '#f59e0b', 'Pickup Scheduled': '#3b82f6', Received: '#a78bfa',
+  'Refund Initiated': '#fb923c', 'Refund Done': '#22c55e', Rejected: '#ef4444',
+};
+
+/* ─── UTILS ──────────────────────────────────────────────────────── */
 const p   = v => parseFloat(v || 0);
 const cur = v => `₹${p(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 const num = v => p(v).toLocaleString('en-IN', { maximumFractionDigits: 0 });
-const pct = v => `${p(v).toFixed(1)}%`;
 const dec = (v, d = 1) => p(v).toFixed(d);
 const hrs = h => h < 24 ? `${dec(h)}h` : `${dec(h / 24, 1)}d`;
+const ago = dt => {
+  if (!dt) return '—';
+  const ms = Date.now() - new Date(dt).getTime();
+  const h  = ms / 3600000;
+  if (h < 1) return `${Math.floor(ms / 60000)}m ago`;
+  if (h < 24) return `${Math.floor(h)}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+};
 
-/* ─── CSV EXPORT ─────────────────────────────────────────────────── */
+function lsGet(k, fb) { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : fb; } catch { return fb; } }
+function lsSet(k, v)   { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+
+function getCurrentShift() {
+  const h = new Date().getHours();
+  if (h >= 6  && h < 14) return 'morning';
+  if (h >= 14 && h < 22) return 'afternoon';
+  return 'night';
+}
+
 function exportCSV(filename, rows, cols) {
   if (!rows?.length) return;
   const header = cols.map(c => `"${c.label}"`).join(',');
@@ -25,588 +73,1041 @@ function exportCSV(filename, rows, cols) {
     const v = c.fn ? c.fn(r) : (r[c.key] ?? '');
     return `"${String(v).replace(/"/g, '""')}"`;
   }).join(','));
-  const csv = [header, ...lines].join('\n');
-  const a = Object.assign(document.createElement('a'), {
-    href: URL.createObjectURL(new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' })),
-    download: filename,
-  });
+  const blob = new Blob(['\uFEFF' + [header, ...lines].join('\n')], { type: 'text/csv;charset=utf-8' });
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: filename });
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
 }
 
-/* ─── CORE GEO BUILDER ───────────────────────────────────────────── */
-// Builds warehouse → state → city → pincode breakdown directly from raw orders.
-// Kept deliberately simple (no O(n²) ops) — works on any time window.
-function buildOpsGeo(orders, selectedTags = []) {
-  if (!orders?.length) return { warehouses: [], tagList: [], geoByTag: {} };
-
-  // Collect all tags
-  const tagSet = new Set();
-  orders.forEach(o => {
-    if (!o.cancelled_at)
-      String(o.tags || '').split(',').forEach(t => { const c = t.trim(); if (c) tagSet.add(c); });
-  });
-  const tagList = [...tagSet].sort();
-
-  // Decide which tags to include
-  const activeTags = selectedTags.length === 0 ? tagList : selectedTags;
-  const activeSet  = new Set(activeTags);
-
-  // Build geo map per tag
-  // geoByTag[tag][state][city][pincode] = { orders, revenue, fulfillMs[] }
-  const geoByTag = {};
-
-  orders.filter(o => !o.cancelled_at).forEach(o => {
-    const orderTags = String(o.tags || '').split(',').map(t => t.trim()).filter(Boolean);
-    const matchTags = orderTags.length ? orderTags.filter(t => activeSet.has(t)) : [];
-    // Also show orders without any tag if we are showing "all"
-    if (matchTags.length === 0) {
-      if (selectedTags.length === 0) matchTags.push('(untagged)');
-      else return;
-    }
-
-    const state   = (o.shipping_address?.province || o.billing_address?.province || 'Unknown').trim();
-    const city    = (o.shipping_address?.city     || o.billing_address?.city     || 'Unknown').trim();
-    const pin     = (o.shipping_address?.zip      || o.billing_address?.zip      || '—').trim();
-    const rev     = p(o.total_price);
-
-    // Fulfillment time
-    let fulfillMs = null;
-    if (o.fulfillments?.length && o.fulfillments[0].created_at && o.created_at) {
-      const ms = new Date(o.fulfillments[0].created_at) - new Date(o.created_at);
-      if (ms >= 0 && ms < 30 * 24 * 3600000) fulfillMs = ms;
-    }
-
-    const fulfillStatus = o.fulfillment_status || 'unfulfilled';
-
-    matchTags.forEach(tag => {
-      if (!geoByTag[tag]) geoByTag[tag] = {};
-      const T = geoByTag[tag];
-      if (!T[state]) T[state] = { state, orders: 0, revenue: 0, fulfillMs: [], cities: {} };
-      T[state].orders++;
-      T[state].revenue += rev;
-      if (fulfillMs !== null) T[state].fulfillMs.push(fulfillMs);
-
-      const C = T[state].cities;
-      if (!C[city]) C[city] = { city, orders: 0, revenue: 0, fulfillMs: [], pincodes: {} };
-      C[city].orders++;
-      C[city].revenue += rev;
-      if (fulfillMs !== null) C[city].fulfillMs.push(fulfillMs);
-
-      const P = C[city].pincodes;
-      if (!P[pin]) P[pin] = { pincode: pin, orders: 0, revenue: 0, fulfillMs: [], statuses: {} };
-      P[pin].orders++;
-      P[pin].revenue += rev;
-      if (fulfillMs !== null) P[pin].fulfillMs.push(fulfillMs);
-      P[pin].statuses[fulfillStatus] = (P[pin].statuses[fulfillStatus] || 0) + 1;
-    });
-  });
-
-  // Post-process: sort and compute stats
-  const statsOf = arr => {
-    if (!arr.length) return null;
-    const sorted = [...arr].sort((a, b) => a - b);
-    const avg = arr.reduce((s, v) => s + v, 0) / arr.length;
-    const p50 = sorted[Math.floor(sorted.length / 2)];
-    const under24 = arr.filter(v => v < 86400000).length;
-    return { avg: avg / 3600000, median: p50 / 3600000, sla24: under24 / arr.length * 100 };
-  };
-
-  const warehouses = activeTags.filter(t => geoByTag[t]).map(tag => {
-    const stateMap = geoByTag[tag] || {};
-    let totalOrders = 0, totalRev = 0, allMs = [];
-    const states = Object.values(stateMap).map(s => {
-      totalOrders += s.orders;
-      totalRev    += s.revenue;
-      allMs.push(...s.fulfillMs);
-      const cities = Object.values(s.cities).map(c => {
-        const pincodes = Object.values(c.pincodes)
-          .map(pp => ({ ...pp, fulfillStats: statsOf(pp.fulfillMs), aov: pp.orders ? pp.revenue / pp.orders : 0 }))
-          .sort((a, b) => b.orders - a.orders);
-        return { ...c, fulfillStats: statsOf(c.fulfillMs), aov: c.orders ? c.revenue / c.orders : 0, pincodes };
-      }).sort((a, b) => b.orders - a.orders);
-      return { ...s, fulfillStats: statsOf(s.fulfillMs), aov: s.orders ? s.revenue / s.orders : 0, cities };
-    }).sort((a, b) => b.orders - a.orders);
-
-    return { tag, orders: totalOrders, revenue: totalRev, fulfillStats: statsOf(allMs), states };
-  });
-
-  return { warehouses, tagList, geoByTag };
+/* ─── INLINE EDIT CELL ───────────────────────────────────────────── */
+function InlineEdit({ value, onSave, placeholder = '—', multiline = false, className = '' }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft]     = useState(value || '');
+  const ref = useRef(null);
+  useEffect(() => { if (editing) ref.current?.focus(); }, [editing]);
+  const commit = () => { onSave(draft); setEditing(false); };
+  const cancel = () => { setDraft(value || ''); setEditing(false); };
+  if (editing) return (
+    <div className="flex items-center gap-1">
+      {multiline
+        ? <textarea ref={ref} value={draft} onChange={e => setDraft(e.target.value)}
+            rows={2}
+            className="text-xs bg-gray-800 border border-brand-500/50 rounded px-1.5 py-1 text-slate-200 focus:outline-none resize-none w-40"
+            onKeyDown={e => { if (e.key === 'Escape') cancel(); }}/>
+        : <input ref={ref} value={draft} onChange={e => setDraft(e.target.value)}
+            className="text-xs bg-gray-800 border border-brand-500/50 rounded px-1.5 py-0.5 text-slate-200 focus:outline-none w-32"
+            onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') cancel(); }}/>
+      }
+      <button onClick={commit}  className="p-0.5 text-emerald-400 hover:text-emerald-300"><Check size={12}/></button>
+      <button onClick={cancel}  className="p-0.5 text-red-400 hover:text-red-300"><X size={12}/></button>
+    </div>
+  );
+  return (
+    <button onClick={() => { setDraft(value || ''); setEditing(true); }}
+      className={clsx('flex items-center gap-1 group text-left', className)}>
+      <span className={value ? 'text-slate-300' : 'text-slate-600 italic'}>{value || placeholder}</span>
+      <Edit2 size={10} className="opacity-0 group-hover:opacity-60 text-slate-500 shrink-0"/>
+    </button>
+  );
 }
 
-/* ─── STAT PILL ─────────────────────────────────────────────────── */
-function SLA({ stats }) {
-  if (!stats) return <span className="text-slate-600 text-xs">—</span>;
-  const color = stats.sla24 >= 80 ? '#22c55e' : stats.sla24 >= 50 ? '#f59e0b' : '#ef4444';
+/* ─── PILL SELECT ─────────────────────────────────────────────────── */
+function PillSelect({ value, options, colorMap, onSave }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = e => { if (!ref.current?.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [open]);
+  const color = colorMap?.[value] || '#64748b';
   return (
-    <div className="text-xs">
-      <span className="font-semibold" style={{ color }}>{dec(stats.sla24)}%</span>
-      <span className="text-slate-600 ml-1">&lt;24h · avg {hrs(stats.avg)}</span>
+    <div className="relative" ref={ref}>
+      <button onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-all"
+        style={{ background: color + '18', borderColor: color + '50', color }}>
+        {value}
+        <ChevronDown size={9}/>
+      </button>
+      {open && (
+        <div className="absolute z-50 top-full mt-1 left-0 bg-gray-900 border border-gray-700 rounded-lg py-1 shadow-2xl min-w-[140px]">
+          {options.map(opt => (
+            <button key={opt} onClick={() => { onSave(opt); setOpen(false); }}
+              className="w-full text-left px-3 py-1.5 text-xs hover:bg-gray-800 flex items-center gap-2"
+              style={{ color: colorMap?.[opt] || '#94a3b8' }}>
+              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: colorMap?.[opt] || '#64748b' }}/>
+              {opt}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-/* ─── GEO TABLE ─────────────────────────────────────────────────── */
-function GeoTable({ states, totalOrders }) {
-  const [openStates, setOpenStates] = useState({});
-  const [openCities, setOpenCities] = useState({});
-
-  const toggleState = useCallback(s => setOpenStates(p => ({ ...p, [s]: !p[s] })), []);
-  const toggleCity  = useCallback(k => setOpenCities(p => ({ ...p, [k]: !p[k] })), []);
-
-  if (!states?.length) return (
-    <div className="py-8 text-center text-slate-600 text-sm">No geo data — orders need shipping addresses.</div>
+/* ─── KPI CARD ───────────────────────────────────────────────────── */
+function KPI({ label, value, sub, color, icon: Icon, trend }) {
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider">{label}</span>
+        {Icon && <Icon size={14} style={{ color: color || '#64748b' }}/>}
+      </div>
+      <div className="text-xl font-bold" style={{ color: color || '#fff' }}>{value}</div>
+      {sub && <div className="text-[10px] text-slate-500 mt-0.5">{sub}</div>}
+    </div>
   );
+}
+
+/* ─── SEARCH BAR ─────────────────────────────────────────────────── */
+function SearchBar({ value, onChange, placeholder }) {
+  return (
+    <div className="relative">
+      <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500"/>
+      <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+        className="pl-7 pr-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-brand-500 w-56 placeholder-slate-600"/>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   TAB 1 — DISPATCH
+═══════════════════════════════════════════════════════════════════ */
+function DispatchTab({ orders, overrides, setOverrides }) {
+  const [search, setSearch]     = useState('');
+  const [filter, setFilter]     = useState('all');
+  const [sortBy, setSortBy]     = useState('created');
+  const [pageSize, setPageSize] = useState(50);
+
+  const saveOverride = useCallback((orderId, patch) => {
+    const updated = { ...overrides, [orderId]: { ...(overrides[orderId] || {}), ...patch } };
+    lsSet(LS_OVERRIDES, updated);
+    setOverrides(updated);
+  }, [overrides, setOverrides]);
+
+  const activeOrders = useMemo(() => orders.filter(o => !o.cancelled_at), [orders]);
+
+  // KPIs
+  const pending      = activeOrders.filter(o => o.fulfillment_status === 'unfulfilled' || !o.fulfillment_status).length;
+  const dispatched   = activeOrders.filter(o => o.fulfillment_status === 'fulfilled').length;
+  const partial      = activeOrders.filter(o => o.fulfillment_status === 'partial').length;
+  const withTracking = activeOrders.filter(o => o.fulfillments?.some(f => f.tracking_number)).length;
+
+  // Overdue: unfulfilled for >24h
+  const overdue = activeOrders.filter(o => {
+    if (o.fulfillment_status !== 'unfulfilled' && o.fulfillment_status) return false;
+    const ageH = (Date.now() - new Date(o.created_at).getTime()) / 3600000;
+    return ageH > 24;
+  }).length;
+
+  // Hourly dispatch chart (last 12h)
+  const hourlyData = useMemo(() => {
+    const now = Date.now();
+    const buckets = Array.from({ length: 12 }, (_, i) => {
+      const h = new Date(now - (11 - i) * 3600000);
+      return { hour: `${h.getHours()}:00`, dispatched: 0, received: 0 };
+    });
+    activeOrders.forEach(o => {
+      // received
+      const createdH = Math.floor((now - new Date(o.created_at).getTime()) / 3600000);
+      if (createdH < 12) buckets[11 - createdH].received++;
+      // dispatched
+      if (o.fulfillments?.length) {
+        const fH = Math.floor((now - new Date(o.fulfillments[0].created_at).getTime()) / 3600000);
+        if (fH < 12) buckets[11 - fH].dispatched++;
+      }
+    });
+    return buckets;
+  }, [activeOrders]);
+
+  // Carrier breakdown
+  const carrierData = useMemo(() => {
+    const map = {};
+    activeOrders.forEach(o => {
+      o.fulfillments?.forEach(f => {
+        const c = f.tracking_company || 'Unknown';
+        map[c] = (map[c] || 0) + 1;
+      });
+    });
+    return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value).slice(0, 6);
+  }, [activeOrders]);
+
+  // Filtered + sorted table
+  const rows = useMemo(() => {
+    let list = [...activeOrders];
+    if (filter === 'pending')    list = list.filter(o => o.fulfillment_status === 'unfulfilled' || !o.fulfillment_status);
+    if (filter === 'dispatched') list = list.filter(o => o.fulfillment_status === 'fulfilled');
+    if (filter === 'partial')    list = list.filter(o => o.fulfillment_status === 'partial');
+    if (filter === 'overdue')    list = list.filter(o => {
+      if (o.fulfillment_status !== 'unfulfilled' && o.fulfillment_status) return false;
+      return (Date.now() - new Date(o.created_at).getTime()) / 3600000 > 24;
+    });
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter(o =>
+        (o.name || '').toLowerCase().includes(q) ||
+        (o.email || '').toLowerCase().includes(q) ||
+        o.fulfillments?.some(f => (f.tracking_number || '').toLowerCase().includes(q))
+      );
+    }
+    if (sortBy === 'amount')    list.sort((a, b) => p(b.total_price) - p(a.total_price));
+    if (sortBy === 'created')   list.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    if (sortBy === 'priority')  list.sort((a, b) => {
+      const order = { Urgent: 0, Watch: 1, Normal: 2, Done: 3 };
+      return (order[overrides[a.id]?.priority] ?? 2) - (order[overrides[b.id]?.priority] ?? 2);
+    });
+    return list.slice(0, pageSize);
+  }, [activeOrders, filter, search, sortBy, overrides, pageSize]);
+
+  const CARRIERS_COLORS = ['#3b82f6','#22c55e','#f59e0b','#a78bfa','#f472b6','#34d399'];
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-xs min-w-[600px]">
-        <thead>
-          <tr className="border-b border-gray-700">
-            {['Location','Orders','Share','Revenue','AOV','Avg Ship','SLA <24h'].map(h => (
-              <th key={h} className="px-2 py-2 text-left text-[10px] text-slate-500 font-semibold uppercase tracking-wider first:pl-0">{h}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {states.map(s => {
-            const sOpen = openStates[s.state];
-            const sharePct = totalOrders > 0 ? s.orders / totalOrders * 100 : 0;
-            return (
-              <>
-                {/* State row */}
-                <tr key={s.state}
-                  className="border-b border-gray-800/40 cursor-pointer hover:bg-gray-800/30 transition-colors"
-                  onClick={() => toggleState(s.state)}>
-                  <td className="px-0 py-2 font-semibold text-slate-200">
-                    <div className="flex items-center gap-1.5">
-                      {sOpen ? <ChevronDown size={12} className="text-brand-400 shrink-0"/> : <ChevronRight size={12} className="text-slate-600 shrink-0"/>}
-                      <MapPin size={11} className="text-slate-500 shrink-0"/>
-                      {s.state}
-                    </div>
-                  </td>
-                  <td className="px-2 py-2">
-                    <div className="flex items-center gap-1.5">
-                      <div className="w-14 h-1 bg-gray-800 rounded-full overflow-hidden">
-                        <div className="h-full rounded-full bg-brand-500/70" style={{ width: `${sharePct}%` }}/>
-                      </div>
-                      <span className="font-semibold text-slate-200 tabular-nums">{num(s.orders)}</span>
-                    </div>
-                  </td>
-                  <td className="px-2 py-2 tabular-nums text-slate-400">{dec(sharePct)}%</td>
-                  <td className="px-2 py-2 tabular-nums text-emerald-400 font-semibold">{cur(s.revenue)}</td>
-                  <td className="px-2 py-2 tabular-nums text-slate-400">{cur(s.aov)}</td>
-                  <td className="px-2 py-2 text-slate-400">{s.fulfillStats ? hrs(s.fulfillStats.avg) : '—'}</td>
-                  <td className="px-2 py-2"><SLA stats={s.fulfillStats}/></td>
-                </tr>
+    <div className="space-y-5">
+      {/* KPIs */}
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        <KPI label="Pending Dispatch" value={num(pending)}    color="#f59e0b" icon={Clock}       sub="unfulfilled orders"/>
+        <KPI label="Dispatched"       value={num(dispatched)} color="#22c55e" icon={CheckCircle} sub="fulfilled"/>
+        <KPI label="Partial"          value={num(partial)}    color="#3b82f6" icon={Package}     sub="partial fulfillment"/>
+        <KPI label="Overdue >24h"     value={num(overdue)}    color="#ef4444" icon={AlertTriangle} sub="needs action"/>
+        <KPI label="With Tracking #"  value={num(withTracking)} color="#a78bfa" icon={Hash}      sub="trackable orders"/>
+      </div>
 
-                {/* City rows */}
-                {sOpen && s.cities.map(c => {
-                  const cKey  = `${s.state}|${c.city}`;
-                  const cOpen = openCities[cKey];
-                  const cShare = s.orders > 0 ? c.orders / s.orders * 100 : 0;
+      {/* Charts row */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {/* Hourly dispatch */}
+        <div className="lg:col-span-2 bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <h3 className="text-xs font-semibold text-slate-300 mb-3">Hourly Activity (Last 12h)</h3>
+          <ResponsiveContainer width="100%" height={160}>
+            <BarChart data={hourlyData} margin={{ left: 0, right: 0, top: 0, bottom: 0 }}>
+              <XAxis dataKey="hour" tick={{ fill: '#475569', fontSize: 9 }} axisLine={false} tickLine={false}/>
+              <YAxis tick={{ fill: '#475569', fontSize: 9 }} axisLine={false} tickLine={false} width={24}/>
+              <Tooltip contentStyle={{ background: '#111827', border: '1px solid #374151', borderRadius: 6, fontSize: 11 }}/>
+              <Bar dataKey="received"   name="Orders In"  fill="#3b82f6" opacity={0.5} radius={[2,2,0,0]} maxBarSize={16}/>
+              <Bar dataKey="dispatched" name="Dispatched" fill="#22c55e"             radius={[2,2,0,0]} maxBarSize={16}/>
+            </BarChart>
+          </ResponsiveContainer>
+          <div className="flex items-center gap-4 mt-1">
+            <div className="flex items-center gap-1.5 text-[10px] text-slate-500"><span className="w-2 h-2 rounded-sm bg-blue-500/50 shrink-0"/>Orders In</div>
+            <div className="flex items-center gap-1.5 text-[10px] text-slate-500"><span className="w-2 h-2 rounded-sm bg-emerald-500 shrink-0"/>Dispatched</div>
+          </div>
+        </div>
+
+        {/* Carrier breakdown */}
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <h3 className="text-xs font-semibold text-slate-300 mb-3">Carrier Split</h3>
+          {carrierData.length === 0
+            ? <div className="text-xs text-slate-600 py-6 text-center">No fulfilled orders yet</div>
+            : <div className="space-y-2">
+                {carrierData.map((c, i) => {
+                  const total = carrierData.reduce((s, x) => s + x.value, 0);
                   return (
-                    <>
-                      <tr key={cKey}
-                        className="border-b border-gray-800/20 cursor-pointer hover:bg-gray-800/20 transition-colors bg-gray-900/30"
-                        onClick={() => toggleCity(cKey)}>
-                        <td className="py-1.5 pl-6 font-medium text-slate-300">
-                          <div className="flex items-center gap-1.5">
-                            {cOpen ? <ChevronDown size={11} className="text-slate-500 shrink-0"/> : <ChevronRight size={11} className="text-slate-700 shrink-0"/>}
-                            <Building2 size={10} className="text-slate-600 shrink-0"/>
-                            {c.city}
-                          </div>
-                        </td>
-                        <td className="px-2 py-1.5">
-                          <div className="flex items-center gap-1.5">
-                            <div className="w-10 h-0.5 bg-gray-800 rounded-full overflow-hidden">
-                              <div className="h-full rounded-full bg-blue-500/60" style={{ width: `${cShare}%` }}/>
-                            </div>
-                            <span className="text-slate-300 tabular-nums">{num(c.orders)}</span>
-                          </div>
-                        </td>
-                        <td className="px-2 py-1.5 tabular-nums text-slate-500">{dec(cShare)}%</td>
-                        <td className="px-2 py-1.5 tabular-nums text-emerald-400/80">{cur(c.revenue)}</td>
-                        <td className="px-2 py-1.5 tabular-nums text-slate-500">{cur(c.aov)}</td>
-                        <td className="px-2 py-1.5 text-slate-500">{c.fulfillStats ? hrs(c.fulfillStats.avg) : '—'}</td>
-                        <td className="px-2 py-1.5"><SLA stats={c.fulfillStats}/></td>
-                      </tr>
-
-                      {/* Pincode rows */}
-                      {cOpen && c.pincodes.slice(0, 30).map(pp => (
-                        <tr key={pp.pincode} className="border-b border-gray-800/10 bg-gray-950/40">
-                          <td className="py-1 pl-12 text-slate-500">
-                            <div className="flex items-center gap-1.5">
-                              <Hash size={9} className="text-slate-700 shrink-0"/>
-                              <span className="font-mono text-[10px]">{pp.pincode}</span>
-                              {/* fulfillment status badges */}
-                              <div className="flex gap-1 ml-1">
-                                {Object.entries(pp.statuses).slice(0, 3).map(([st, cnt]) => (
-                                  <span key={st} className="px-1.5 py-0.5 rounded text-[9px] font-medium"
-                                    style={{
-                                      background: st === 'fulfilled' ? '#05230f' : st === 'unfulfilled' ? '#220f05' : '#1c1c2e',
-                                      color: st === 'fulfilled' ? '#22c55e' : st === 'unfulfilled' ? '#f59e0b' : '#94a3b8',
-                                    }}>
-                                    {st} ×{cnt}
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-                          </td>
-                          <td className="px-2 py-1 tabular-nums text-slate-500 text-[10px]">{num(pp.orders)}</td>
-                          <td className="px-2 py-1 tabular-nums text-slate-600 text-[10px]">{dec(pp.orders / (s.orders || 1) * 100, 1)}%</td>
-                          <td className="px-2 py-1 tabular-nums text-emerald-400/60 text-[10px]">{cur(pp.revenue)}</td>
-                          <td className="px-2 py-1 tabular-nums text-slate-600 text-[10px]">{cur(pp.aov)}</td>
-                          <td className="px-2 py-1 text-slate-600 text-[10px]">{pp.fulfillStats ? hrs(pp.fulfillStats.avg) : '—'}</td>
-                          <td className="px-2 py-1"><SLA stats={pp.fulfillStats}/></td>
-                        </tr>
-                      ))}
-                      {cOpen && c.pincodes.length > 30 && (
-                        <tr className="bg-gray-950/40">
-                          <td colSpan={7} className="pl-12 py-1 text-[10px] text-slate-600">+{c.pincodes.length - 30} more pincodes</td>
-                        </tr>
-                      )}
-                    </>
+                    <div key={c.name}>
+                      <div className="flex justify-between text-[11px] mb-0.5">
+                        <span className="text-slate-300 truncate max-w-[110px]">{c.name}</span>
+                        <span className="text-slate-500 tabular-nums">{c.value} · {dec(c.value / total * 100)}%</span>
+                      </div>
+                      <div className="h-1 bg-gray-800 rounded-full">
+                        <div className="h-full rounded-full" style={{ width: `${c.value / total * 100}%`, background: CARRIERS_COLORS[i] }}/>
+                      </div>
+                    </div>
                   );
                 })}
-              </>
-            );
-          })}
-        </tbody>
-      </table>
+              </div>
+          }
+        </div>
+      </div>
+
+      {/* Order table */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <h3 className="text-xs font-semibold text-slate-300">Order Tracker</h3>
+          <div className="flex gap-1 ml-2 flex-wrap">
+            {[['all','All'],['pending','Pending'],['dispatched','Dispatched'],['partial','Partial'],['overdue','Overdue']].map(([k,l]) => (
+              <button key={k} onClick={() => setFilter(k)}
+                className={clsx('px-2 py-0.5 rounded text-[10px] font-semibold transition-all',
+                  filter === k ? 'bg-brand-600/30 text-brand-300' : 'text-slate-500 hover:text-slate-300')}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <div className="ml-auto flex items-center gap-2 flex-wrap">
+            <SearchBar value={search} onChange={setSearch} placeholder="Order # / email / tracking…"/>
+            <select value={sortBy} onChange={e => setSortBy(e.target.value)}
+              className="px-2 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-slate-300 focus:outline-none">
+              <option value="created">Sort: Newest</option>
+              <option value="amount">Sort: Amount</option>
+              <option value="priority">Sort: Priority</option>
+            </select>
+            <button onClick={() => exportCSV('dispatch.csv', rows, [
+              { key: 'name', label: 'Order' },
+              { key: 'email', label: 'Email' },
+              { key: 'total_price', label: 'Amount' },
+              { key: 'fulfillment_status', label: 'Status' },
+              { fn: r => r.fulfillments?.[0]?.tracking_number || '', label: 'Tracking #' },
+              { fn: r => r.fulfillments?.[0]?.tracking_company || '', label: 'Carrier' },
+              { fn: r => overrides[r.id]?.priority || 'Normal', label: 'Priority' },
+              { fn: r => overrides[r.id]?.notes || '', label: 'Notes' },
+            ])} className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-slate-400 hover:text-slate-200 transition-colors">
+              <Download size={11}/> Export
+            </button>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs min-w-[900px]">
+            <thead>
+              <tr className="border-b border-gray-700">
+                {['Order #','Created','Customer','Amount','Fulfillment','Tracking #','Carrier','Priority','Notes'].map(h => (
+                  <th key={h} className="px-2 py-2 text-left text-[10px] text-slate-500 font-semibold uppercase tracking-wider first:pl-0">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(o => {
+                const tracking = o.fulfillments?.[0]?.tracking_number;
+                const trackUrl = o.fulfillments?.[0]?.tracking_url;
+                const carrier  = o.fulfillments?.[0]?.tracking_company;
+                const ov       = overrides[o.id] || {};
+                const priority = ov.priority || 'Normal';
+                const ageH     = (Date.now() - new Date(o.created_at).getTime()) / 3600000;
+                const isOverdue = (o.fulfillment_status === 'unfulfilled' || !o.fulfillment_status) && ageH > 24;
+                return (
+                  <tr key={o.id} className={clsx(
+                    'border-b border-gray-800/40 hover:bg-gray-800/30 transition-colors',
+                    isOverdue && 'bg-red-950/10',
+                  )}>
+                    <td className="px-0 py-2 font-mono font-semibold text-slate-200">{o.name}</td>
+                    <td className="px-2 py-2 text-slate-400 tabular-nums whitespace-nowrap">{ago(o.created_at)}</td>
+                    <td className="px-2 py-2 text-slate-300 max-w-[120px] truncate">{o.email}</td>
+                    <td className="px-2 py-2 text-emerald-400 font-semibold tabular-nums">{cur(o.total_price)}</td>
+                    <td className="px-2 py-2">
+                      <span className={clsx('px-1.5 py-0.5 rounded text-[10px] font-semibold', {
+                        'bg-emerald-500/15 text-emerald-400': o.fulfillment_status === 'fulfilled',
+                        'bg-amber-500/15 text-amber-400':    !o.fulfillment_status || o.fulfillment_status === 'unfulfilled',
+                        'bg-blue-500/15 text-blue-400':      o.fulfillment_status === 'partial',
+                      })}>
+                        {o.fulfillment_status || 'unfulfilled'}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2">
+                      {tracking
+                        ? trackUrl
+                          ? <a href={trackUrl} target="_blank" rel="noreferrer"
+                              className="font-mono text-[10px] text-brand-400 hover:underline flex items-center gap-0.5">
+                              {tracking} <ArrowUpRight size={9}/>
+                            </a>
+                          : <span className="font-mono text-[10px] text-slate-300">{tracking}</span>
+                        : <span className="text-slate-600">—</span>
+                      }
+                    </td>
+                    <td className="px-2 py-2 text-slate-400 text-[10px]">{carrier || '—'}</td>
+                    <td className="px-2 py-2">
+                      <PillSelect value={priority} options={PRIORITY_OPTIONS} colorMap={PRIORITY_COLORS}
+                        onSave={v => saveOverride(o.id, { priority: v })}/>
+                    </td>
+                    <td className="px-2 py-2 max-w-[160px]">
+                      <InlineEdit value={ov.notes} placeholder="Add note…"
+                        onSave={v => saveOverride(o.id, { notes: v })}/>
+                    </td>
+                  </tr>
+                );
+              })}
+              {rows.length === 0 && (
+                <tr><td colSpan={9} className="py-10 text-center text-slate-600 text-xs">No orders match the current filter</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        {activeOrders.length > pageSize && (
+          <button onClick={() => setPageSize(n => n + 50)}
+            className="mt-3 text-xs text-slate-500 hover:text-slate-300 underline">
+            Load more ({activeOrders.length - pageSize} remaining)
+          </button>
+        )}
+      </div>
     </div>
   );
 }
 
-/* ─── MAIN PAGE ─────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════
+   TAB 2 — WAREHOUSE (INVENTORY)
+═══════════════════════════════════════════════════════════════════ */
+function WarehouseTab({ brandData, activeBrandId, overrides, setOverrides }) {
+  const [search, setSearch]  = useState('');
+  const [filter, setFilter]  = useState('all');
+
+  const saveOverride = useCallback((sku, patch) => {
+    const key = `wh_${sku}`;
+    const updated = { ...overrides, [key]: { ...(overrides[key] || {}), ...patch } };
+    lsSet(LS_OVERRIDES, updated);
+    setOverrides(updated);
+  }, [overrides, setOverrides]);
+
+  // Flatten inventory across all active brand data
+  const inventoryItems = useMemo(() => {
+    const items = [];
+    Object.entries(brandData || {}).forEach(([, d]) => {
+      if (!d?.inventoryMap) return;
+      Object.entries(d.inventoryMap).forEach(([sku, info]) => {
+        items.push({ sku, ...info });
+      });
+    });
+    return items;
+  }, [brandData]);
+
+  const totalSKUs    = inventoryItems.length;
+  const lowStock     = inventoryItems.filter(i => (i.available ?? i.quantity ?? 0) > 0 && (i.available ?? i.quantity ?? 0) <= 10).length;
+  const outOfStock   = inventoryItems.filter(i => (i.available ?? i.quantity ?? 0) <= 0).length;
+  const totalUnits   = inventoryItems.reduce((s, i) => s + (i.available ?? i.quantity ?? 0), 0);
+
+  const rows = useMemo(() => {
+    let list = [...inventoryItems];
+    if (filter === 'low')  list = list.filter(i => (i.available ?? i.quantity ?? 0) > 0 && (i.available ?? i.quantity ?? 0) <= 10);
+    if (filter === 'out')  list = list.filter(i => (i.available ?? i.quantity ?? 0) <= 0);
+    if (filter === 'ok')   list = list.filter(i => (i.available ?? i.quantity ?? 0) > 10);
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter(i => (i.sku || '').toLowerCase().includes(q) || (i.title || '').toLowerCase().includes(q));
+    }
+    return list.sort((a, b) => (a.available ?? a.quantity ?? 0) - (b.available ?? b.quantity ?? 0));
+  }, [inventoryItems, filter, search]);
+
+  if (!inventoryItems.length) return (
+    <div className="flex flex-col items-center justify-center h-48 gap-3 text-slate-500">
+      <Package size={32} className="opacity-30"/>
+      <p className="text-sm">No inventory data — fetch inventory in Shopify Orders first.</p>
+    </div>
+  );
+
+  return (
+    <div className="space-y-5">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <KPI label="Total SKUs"   value={num(totalSKUs)}  color="#3b82f6" icon={Package}/>
+        <KPI label="Total Units"  value={num(totalUnits)} color="#a78bfa" icon={Activity}/>
+        <KPI label="Low Stock"    value={num(lowStock)}   color="#f59e0b" icon={AlertTriangle} sub="≤10 units"/>
+        <KPI label="Out of Stock" value={num(outOfStock)} color="#ef4444" icon={TrendingDown}/>
+      </div>
+
+      {/* Summary alert */}
+      {(lowStock + outOfStock) > 0 && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 flex items-center gap-2">
+          <AlertTriangle size={14} className="text-amber-400 shrink-0"/>
+          <span className="text-xs text-amber-300">
+            <strong>{outOfStock}</strong> SKUs out of stock · <strong>{lowStock}</strong> running low — review and restock
+          </span>
+        </div>
+      )}
+
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <h3 className="text-xs font-semibold text-slate-300">Inventory Levels</h3>
+          <div className="flex gap-1 ml-2">
+            {[['all','All'],['out','Out of Stock'],['low','Low Stock'],['ok','In Stock']].map(([k,l]) => (
+              <button key={k} onClick={() => setFilter(k)}
+                className={clsx('px-2 py-0.5 rounded text-[10px] font-semibold transition-all',
+                  filter === k ? 'bg-brand-600/30 text-brand-300' : 'text-slate-500 hover:text-slate-300')}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <div className="ml-auto">
+            <SearchBar value={search} onChange={setSearch} placeholder="SKU or product name…"/>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs min-w-[700px]">
+            <thead>
+              <tr className="border-b border-gray-700">
+                {['SKU','Product','Available','Committed','On Hand','Safety Stock','Status','Notes'].map(h => (
+                  <th key={h} className="px-2 py-2 text-left text-[10px] text-slate-500 font-semibold uppercase tracking-wider first:pl-0">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(item => {
+                const avail  = item.available ?? item.quantity ?? 0;
+                const commit = item.committed ?? 0;
+                const onHand = item.on_hand ?? (avail + commit);
+                const ov     = overrides[`wh_${item.sku}`] || {};
+                const safety = parseInt(ov.safetyStock) || 5;
+                const statusColor = avail <= 0 ? '#ef4444' : avail <= safety ? '#f59e0b' : '#22c55e';
+                const statusLabel = avail <= 0 ? 'Out' : avail <= safety ? 'Low' : 'OK';
+                return (
+                  <tr key={item.sku} className={clsx(
+                    'border-b border-gray-800/40 hover:bg-gray-800/20 transition-colors',
+                    avail <= 0 && 'bg-red-950/10',
+                  )}>
+                    <td className="px-0 py-2 font-mono text-[10px] text-slate-300">{item.sku}</td>
+                    <td className="px-2 py-2 text-slate-200 max-w-[160px] truncate">{item.title || item.variant_title || '—'}</td>
+                    <td className="px-2 py-2 font-semibold tabular-nums" style={{ color: statusColor }}>{num(avail)}</td>
+                    <td className="px-2 py-2 tabular-nums text-slate-400">{num(commit)}</td>
+                    <td className="px-2 py-2 tabular-nums text-slate-400">{num(onHand)}</td>
+                    <td className="px-2 py-2">
+                      <InlineEdit value={String(safety)}
+                        onSave={v => saveOverride(item.sku, { safetyStock: v })}
+                        className="font-mono text-amber-400"/>
+                    </td>
+                    <td className="px-2 py-2">
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold"
+                        style={{ background: statusColor + '20', color: statusColor }}>
+                        {statusLabel}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2 max-w-[140px]">
+                      <InlineEdit value={ov.notes} placeholder="Add note…"
+                        onSave={v => saveOverride(item.sku, { notes: v })}/>
+                    </td>
+                  </tr>
+                );
+              })}
+              {rows.length === 0 && (
+                <tr><td colSpan={8} className="py-10 text-center text-slate-600 text-xs">No inventory matches filter</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   TAB 3 — SUPPORT (CUSTOMER CARE)
+═══════════════════════════════════════════════════════════════════ */
+const BLANK_TICKET = { orderId: '', type: 'Other', status: 'Open', description: '', assignedTo: '' };
+
+function SupportTab({ orders, tickets, setTickets }) {
+  const [showForm, setShowForm]   = useState(false);
+  const [form, setForm]           = useState(BLANK_TICKET);
+  const [search, setSearch]       = useState('');
+  const [filterStatus, setFilterStatus] = useState('all');
+
+  const saveTickets = useCallback(t => { lsSet(LS_TICKETS, t); setTickets(t); }, [setTickets]);
+
+  const addTicket = () => {
+    if (!form.description.trim()) return;
+    const t = { ...form, id: `T${Date.now()}`, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    saveTickets([t, ...tickets]);
+    setForm(BLANK_TICKET);
+    setShowForm(false);
+  };
+
+  const updateTicket = useCallback((id, patch) => {
+    saveTickets(tickets.map(t => t.id === id ? { ...t, ...patch, updatedAt: new Date().toISOString() } : t));
+  }, [tickets, saveTickets]);
+
+  const deleteTicket = useCallback(id => {
+    if (window.confirm('Delete this ticket?')) saveTickets(tickets.filter(t => t.id !== id));
+  }, [tickets, saveTickets]);
+
+  const openCount      = tickets.filter(t => t.status === 'Open').length;
+  const escalatedCount = tickets.filter(t => t.status === 'Escalated').length;
+  const resolvedToday  = tickets.filter(t => {
+    if (t.status !== 'Resolved' && t.status !== 'Closed') return false;
+    return (Date.now() - new Date(t.updatedAt).getTime()) < 86400000;
+  }).length;
+  const avgResH = (() => {
+    const resolved = tickets.filter(t => (t.status === 'Resolved' || t.status === 'Closed') && t.createdAt && t.updatedAt);
+    if (!resolved.length) return null;
+    return resolved.reduce((s, t) => s + (new Date(t.updatedAt) - new Date(t.createdAt)), 0) / resolved.length / 3600000;
+  })();
+
+  const filteredTickets = useMemo(() => {
+    let list = [...tickets];
+    if (filterStatus !== 'all') list = list.filter(t => t.status === filterStatus);
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter(t =>
+        (t.orderId || '').toLowerCase().includes(q) ||
+        (t.description || '').toLowerCase().includes(q) ||
+        (t.assignedTo || '').toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [tickets, filterStatus, search]);
+
+  return (
+    <div className="space-y-5">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <KPI label="Open Tickets"    value={num(openCount)}     color="#3b82f6" icon={Clipboard}/>
+        <KPI label="Escalated"       value={num(escalatedCount)} color="#ef4444" icon={AlertTriangle}/>
+        <KPI label="Resolved Today"  value={num(resolvedToday)} color="#22c55e" icon={CheckCircle}/>
+        <KPI label="Avg Resolution"  value={avgResH != null ? hrs(avgResH) : '—'} color="#a78bfa" icon={Clock}/>
+      </div>
+
+      {escalatedCount > 0 && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-3 flex items-center gap-2">
+          <AlertTriangle size={14} className="text-red-400 shrink-0"/>
+          <span className="text-xs text-red-300"><strong>{escalatedCount}</strong> escalated ticket{escalatedCount > 1 ? 's' : ''} need immediate attention</span>
+        </div>
+      )}
+
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <h3 className="text-xs font-semibold text-slate-300">Support Tickets</h3>
+          <div className="flex gap-1 ml-2 flex-wrap">
+            {['all', ...TICKET_STATUSES].map(s => (
+              <button key={s} onClick={() => setFilterStatus(s)}
+                className={clsx('px-2 py-0.5 rounded text-[10px] font-semibold transition-all',
+                  filterStatus === s ? 'bg-brand-600/30 text-brand-300' : 'text-slate-500 hover:text-slate-300')}>
+                {s === 'all' ? 'All' : s}
+              </button>
+            ))}
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <SearchBar value={search} onChange={setSearch} placeholder="Order # / description…"/>
+            <button onClick={() => setShowForm(o => !o)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-600/20 border border-brand-500/40 rounded-lg text-xs text-brand-300 hover:bg-brand-600/30 transition-colors">
+              <Plus size={12}/> New Ticket
+            </button>
+          </div>
+        </div>
+
+        {/* New ticket form */}
+        <AnimatePresence>
+          {showForm && (
+            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }}
+              className="overflow-hidden">
+              <div className="bg-gray-800/60 border border-gray-700 rounded-xl p-4 mb-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="text-[10px] text-slate-500 uppercase font-semibold">Order #</label>
+                  <input value={form.orderId} onChange={e => setForm(f => ({ ...f, orderId: e.target.value }))}
+                    placeholder="#1234" className="mt-1 w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-brand-500"/>
+                </div>
+                <div>
+                  <label className="text-[10px] text-slate-500 uppercase font-semibold">Type</label>
+                  <select value={form.type} onChange={e => setForm(f => ({ ...f, type: e.target.value }))}
+                    className="mt-1 w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-slate-200 focus:outline-none">
+                    {TICKET_TYPES.map(t => <option key={t}>{t}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] text-slate-500 uppercase font-semibold">Assigned To</label>
+                  <input value={form.assignedTo} onChange={e => setForm(f => ({ ...f, assignedTo: e.target.value }))}
+                    placeholder="Agent name" className="mt-1 w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-brand-500"/>
+                </div>
+                <div>
+                  <label className="text-[10px] text-slate-500 uppercase font-semibold">Status</label>
+                  <select value={form.status} onChange={e => setForm(f => ({ ...f, status: e.target.value }))}
+                    className="mt-1 w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-slate-200 focus:outline-none">
+                    {TICKET_STATUSES.map(s => <option key={s}>{s}</option>)}
+                  </select>
+                </div>
+                <div className="col-span-2 sm:col-span-3">
+                  <label className="text-[10px] text-slate-500 uppercase font-semibold">Description *</label>
+                  <textarea value={form.description} onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
+                    rows={2} placeholder="Describe the issue…"
+                    className="mt-1 w-full px-2 py-1.5 bg-gray-900 border border-gray-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none"/>
+                </div>
+                <div className="flex items-end gap-2">
+                  <button onClick={addTicket}
+                    className="flex-1 py-2 bg-brand-600 hover:bg-brand-500 rounded-lg text-xs text-white font-semibold transition-colors">
+                    Create
+                  </button>
+                  <button onClick={() => setShowForm(false)}
+                    className="flex-1 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-xs text-slate-300 transition-colors">
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs min-w-[800px]">
+            <thead>
+              <tr className="border-b border-gray-700">
+                {['Ticket ID','Order #','Type','Description','Status','Assigned To','Created','Actions'].map(h => (
+                  <th key={h} className="px-2 py-2 text-left text-[10px] text-slate-500 font-semibold uppercase tracking-wider first:pl-0">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filteredTickets.map(t => (
+                <tr key={t.id} className="border-b border-gray-800/40 hover:bg-gray-800/20 transition-colors">
+                  <td className="px-0 py-2 font-mono text-[10px] text-slate-400">{t.id}</td>
+                  <td className="px-2 py-2 font-mono text-slate-300">
+                    <InlineEdit value={t.orderId} placeholder="—" onSave={v => updateTicket(t.id, { orderId: v })}/>
+                  </td>
+                  <td className="px-2 py-2 text-slate-400">{t.type}</td>
+                  <td className="px-2 py-2 max-w-[200px]">
+                    <InlineEdit value={t.description} placeholder="—" multiline
+                      onSave={v => updateTicket(t.id, { description: v })}
+                      className="text-slate-300"/>
+                  </td>
+                  <td className="px-2 py-2">
+                    <PillSelect value={t.status} options={TICKET_STATUSES} colorMap={TICKET_STATUS_COLORS}
+                      onSave={v => updateTicket(t.id, { status: v })}/>
+                  </td>
+                  <td className="px-2 py-2 max-w-[100px]">
+                    <InlineEdit value={t.assignedTo} placeholder="Assign…"
+                      onSave={v => updateTicket(t.id, { assignedTo: v })}/>
+                  </td>
+                  <td className="px-2 py-2 text-slate-500 whitespace-nowrap tabular-nums">{ago(t.createdAt)}</td>
+                  <td className="px-2 py-2">
+                    <button onClick={() => deleteTicket(t.id)} className="text-slate-600 hover:text-red-400 transition-colors">
+                      <Trash2 size={12}/>
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {filteredTickets.length === 0 && (
+                <tr><td colSpan={8} className="py-10 text-center text-slate-600 text-xs">
+                  {tickets.length === 0 ? 'No tickets yet — create one above' : 'No tickets match filter'}
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   TAB 4 — RETURNS
+═══════════════════════════════════════════════════════════════════ */
+function ReturnsTab({ orders, overrides, setOverrides }) {
+  const [search, setSearch]   = useState('');
+  const [filter, setFilter]   = useState('all');
+
+  const saveOverride = useCallback((orderId, patch) => {
+    const key = `ret_${orderId}`;
+    const updated = { ...overrides, [key]: { ...(overrides[key] || {}), ...patch } };
+    lsSet(LS_OVERRIDES, updated);
+    setOverrides(updated);
+  }, [overrides, setOverrides]);
+
+  // Orders with refunds or return tags
+  const returnOrders = useMemo(() => orders.filter(o => {
+    if (o.cancelled_at) return false;
+    const hasRefund = o.refunds?.length > 0;
+    const hasReturnTag = String(o.tags || '').toLowerCase().includes('return');
+    return hasRefund || hasReturnTag;
+  }), [orders]);
+
+  const totalRefundAmt   = returnOrders.reduce((s, o) => {
+    const r = o.refunds?.reduce((rs, ref) => rs + p(ref.transactions?.reduce((ts, t) => ts + p(t.amount), 0) || 0), 0) || 0;
+    return s + r;
+  }, 0);
+  const refundPending    = returnOrders.filter(o => {
+    const ov = overrides[`ret_${o.id}`];
+    return !ov?.returnStatus || ov.returnStatus === 'Pending' || ov.returnStatus === 'Pickup Scheduled' || ov.returnStatus === 'Received';
+  }).length;
+  const refundDone       = returnOrders.filter(o => overrides[`ret_${o.id}`]?.returnStatus === 'Refund Done').length;
+
+  // Returns by type (tag-based)
+  const typeData = useMemo(() => {
+    const map = {};
+    returnOrders.forEach(o => {
+      const tags = String(o.tags || '').split(',').map(t => t.trim()).filter(t => t.toLowerCase().includes('return') || t.toLowerCase().includes('exchange'));
+      if (!tags.length) { map['Untagged Return'] = (map['Untagged Return'] || 0) + 1; }
+      else tags.forEach(t => { map[t] = (map[t] || 0) + 1; });
+    });
+    return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value).slice(0, 8);
+  }, [returnOrders]);
+
+  const rows = useMemo(() => {
+    let list = [...returnOrders];
+    if (filter !== 'all') {
+      list = list.filter(o => {
+        const ov = overrides[`ret_${o.id}`];
+        return (ov?.returnStatus || 'Pending') === filter;
+      });
+    }
+    if (search) {
+      const q = search.toLowerCase();
+      list = list.filter(o =>
+        (o.name || '').toLowerCase().includes(q) ||
+        (o.email || '').toLowerCase().includes(q)
+      );
+    }
+    return list.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  }, [returnOrders, filter, search, overrides]);
+
+  const RETURN_COLORS = ['#ef4444','#f59e0b','#a78bfa','#3b82f6','#22c55e','#34d399','#f472b6','#64748b'];
+
+  return (
+    <div className="space-y-5">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <KPI label="Return / Refund Orders" value={num(returnOrders.length)} color="#f59e0b" icon={RotateCcw}/>
+        <KPI label="Total Refund Amount"    value={cur(totalRefundAmt)}      color="#ef4444" icon={DollarSign}/>
+        <KPI label="Pending Resolution"     value={num(refundPending)}       color="#3b82f6" icon={Clock}/>
+        <KPI label="Refunds Completed"      value={num(refundDone)}          color="#22c55e" icon={CheckCircle}/>
+      </div>
+
+      {/* Return type chart */}
+      {typeData.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+          <h3 className="text-xs font-semibold text-slate-300 mb-3">Returns by Tag / Type</h3>
+          <div className="space-y-2">
+            {typeData.map((t, i) => {
+              const max = typeData[0].value;
+              return (
+                <div key={t.name}>
+                  <div className="flex justify-between text-[11px] mb-0.5">
+                    <span className="text-slate-300 truncate max-w-[200px]">{t.name}</span>
+                    <span className="text-slate-500 tabular-nums">{t.value}</span>
+                  </div>
+                  <div className="h-1.5 bg-gray-800 rounded-full">
+                    <div className="h-full rounded-full" style={{ width: `${t.value / max * 100}%`, background: RETURN_COLORS[i % RETURN_COLORS.length] }}/>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Returns table */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+        <div className="flex flex-wrap items-center gap-2 mb-4">
+          <h3 className="text-xs font-semibold text-slate-300">Return Tracker</h3>
+          <div className="flex gap-1 ml-2 flex-wrap">
+            {[['all','All'], ...RETURN_STATUSES.map(s => [s, s])].map(([k,l]) => (
+              <button key={k} onClick={() => setFilter(k)}
+                className={clsx('px-2 py-0.5 rounded text-[10px] font-semibold transition-all',
+                  filter === k ? 'bg-brand-600/30 text-brand-300' : 'text-slate-500 hover:text-slate-300')}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <SearchBar value={search} onChange={setSearch} placeholder="Order # / email…"/>
+            <button onClick={() => exportCSV('returns.csv', rows, [
+              { key: 'name', label: 'Order' },
+              { key: 'email', label: 'Email' },
+              { key: 'total_price', label: 'Amount' },
+              { fn: r => overrides[`ret_${r.id}`]?.returnStatus || 'Pending', label: 'Return Status' },
+              { fn: r => overrides[`ret_${r.id}`]?.notes || '', label: 'Notes' },
+            ])} className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-slate-400 hover:text-slate-200 transition-colors">
+              <Download size={11}/> Export
+            </button>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs min-w-[820px]">
+            <thead>
+              <tr className="border-b border-gray-700">
+                {['Order #','Date','Customer','Amount','Order Tags','Refund Amt','Return Status','Notes'].map(h => (
+                  <th key={h} className="px-2 py-2 text-left text-[10px] text-slate-500 font-semibold uppercase tracking-wider first:pl-0">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(o => {
+                const ov = overrides[`ret_${o.id}`] || {};
+                const returnStatus = ov.returnStatus || 'Pending';
+                const refundTotal  = o.refunds?.reduce((s, r) => s + p(r.transactions?.reduce((ts, t) => ts + p(t.amount), 0) || 0), 0) || 0;
+                return (
+                  <tr key={o.id} className="border-b border-gray-800/40 hover:bg-gray-800/20 transition-colors">
+                    <td className="px-0 py-2 font-mono font-semibold text-slate-200">{o.name}</td>
+                    <td className="px-2 py-2 text-slate-400 tabular-nums whitespace-nowrap">{ago(o.created_at)}</td>
+                    <td className="px-2 py-2 text-slate-300 max-w-[120px] truncate">{o.email}</td>
+                    <td className="px-2 py-2 tabular-nums text-slate-300 font-semibold">{cur(o.total_price)}</td>
+                    <td className="px-2 py-2 max-w-[120px]">
+                      <div className="flex flex-wrap gap-1">
+                        {String(o.tags || '').split(',').filter(Boolean).slice(0, 3).map(t => (
+                          <span key={t} className="px-1 py-0.5 bg-gray-800 rounded text-[9px] text-slate-500">{t.trim()}</span>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="px-2 py-2 tabular-nums font-semibold" style={{ color: refundTotal > 0 ? '#ef4444' : '#475569' }}>
+                      {refundTotal > 0 ? cur(refundTotal) : '—'}
+                    </td>
+                    <td className="px-2 py-2">
+                      <PillSelect value={returnStatus} options={RETURN_STATUSES} colorMap={RETURN_STATUS_COLORS}
+                        onSave={v => saveOverride(o.id, { returnStatus: v })}/>
+                    </td>
+                    <td className="px-2 py-2 max-w-[160px]">
+                      <InlineEdit value={ov.notes} placeholder="Add note…"
+                        onSave={v => saveOverride(o.id, { notes: v })}/>
+                    </td>
+                  </tr>
+                );
+              })}
+              {rows.length === 0 && (
+                <tr><td colSpan={8} className="py-10 text-center text-slate-600 text-xs">
+                  {returnOrders.length === 0 ? 'No return / refund orders found' : 'No orders match filter'}
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   MAIN PAGE
+═══════════════════════════════════════════════════════════════════ */
+const DEPT_TABS = [
+  { id: 'dispatch',  label: 'Dispatch',      icon: Truck    },
+  { id: 'warehouse', label: 'Warehouse',      icon: Package  },
+  { id: 'support',   label: 'Customer Care',  icon: Users    },
+  { id: 'returns',   label: 'Returns',        icon: RotateCcw },
+];
+
 export default function ShopifyOps() {
-  const { brands, shopifyOrders, brandData } = useStore();
+  const { brands, shopifyOrders, brandData, activeBrandIds } = useStore();
 
   const shopifyBrands = (brands || []).filter(b => b.shopify?.shop);
   const [viewBrandId, setViewBrandId] = useState('all');
-  const [selectedTags, setSelectedTags]    = useState([]);
-  const [activeWh, setActiveWh]            = useState(null); // null = combined view
-  const [chartMetric, setChartMetric]      = useState('orders');
+  const [activeTab, setActiveTab]     = useState('dispatch');
+  const [shift, setShift]             = useState(getCurrentShift());
+  const [now, setNow]                 = useState(new Date());
 
-  // Orders to analyze: filter by brand if selected
+  const [overrides, setOverrides] = useState(() => lsGet(LS_OVERRIDES, {}));
+  const [tickets, setTickets]     = useState(() => lsGet(LS_TICKETS, []));
+
+  // Tick clock every minute
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 60000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Filter orders by brand
   const rawOrders = useMemo(() => {
     if (!shopifyOrders.length) return [];
     if (viewBrandId === 'all') return shopifyOrders;
     return shopifyOrders.filter(o => o._brandId === viewBrandId);
   }, [shopifyOrders, viewBrandId]);
 
-  // Build ops geo data
-  const ops = useMemo(() => buildOpsGeo(rawOrders, selectedTags), [rawOrders, selectedTags]);
+  // Active brand name for title
+  const activeBrand = viewBrandId === 'all'
+    ? (brands?.length > 1 ? null : brands?.[0])
+    : brands?.find(b => b.id === viewBrandId);
 
-  const { warehouses, tagList } = ops;
+  const brandName = activeBrand?.name || (viewBrandId === 'all' ? 'All Brands' : '—');
+  const shiftInfo = SHIFTS.find(s => s.id === shift) || SHIFTS[0];
+  const ShiftIcon = shiftInfo.icon;
 
-  // The "active" warehouse: if user clicked one, show its states; else show all combined
-  const viewWh = activeWh ? warehouses.find(w => w.tag === activeWh) : null;
-
-  // Combined states across all (or just the selected) warehouses
-  const combinedStates = useMemo(() => {
-    const source = viewWh ? [viewWh] : warehouses;
-    const stateMap = {};
-    source.forEach(wh => {
-      (wh.states || []).forEach(s => {
-        if (!stateMap[s.state]) stateMap[s.state] = { ...s, cities: {} };
-        else {
-          stateMap[s.state].orders   += s.orders;
-          stateMap[s.state].revenue  += s.revenue;
-        }
-        // merge cities
-        s.cities.forEach(c => {
-          const ck = c.city;
-          if (!stateMap[s.state].cities[ck]) {
-            stateMap[s.state].cities[ck] = { ...c, pincodes: {} };
-          } else {
-            stateMap[s.state].cities[ck].orders  += c.orders;
-            stateMap[s.state].cities[ck].revenue += c.revenue;
-          }
-          c.pincodes.forEach(pp => {
-            const pk = pp.pincode;
-            const target = stateMap[s.state].cities[ck].pincodes;
-            if (!target[pk]) target[pk] = { ...pp };
-            else {
-              target[pk].orders  += pp.orders;
-              target[pk].revenue += pp.revenue;
-            }
-          });
-        });
-      });
-    });
-    return Object.values(stateMap).map(s => ({
-      ...s,
-      aov: s.orders ? s.revenue / s.orders : 0,
-      cities: Object.values(s.cities).map(c => ({
-        ...c,
-        aov: c.orders ? c.revenue / c.orders : 0,
-        pincodes: Object.values(c.pincodes || {}).map(pp => ({
-          ...pp,
-          aov: pp.orders ? pp.revenue / pp.orders : 0,
-        })).sort((a, b) => b.orders - a.orders),
-      })).sort((a, b) => b.orders - a.orders),
-    })).sort((a, b) => b.orders - a.orders);
-  }, [viewWh, warehouses]);
-
-  const totalOrders  = combinedStates.reduce((s, st) => s + st.orders, 0);
-  const totalRevenue = combinedStates.reduce((s, st) => s + st.revenue, 0);
-
-  // KPIs from raw active orders (fast)
-  const totalActive = rawOrders.filter(o => !o.cancelled_at).length;
-  const uniqueStates = new Set(
-    rawOrders.filter(o => !o.cancelled_at).map(o => o.shipping_address?.province || o.billing_address?.province || 'Unknown')
-  ).size;
-  const uniquePins = new Set(
-    rawOrders.filter(o => !o.cancelled_at).map(o => o.shipping_address?.zip || o.billing_address?.zip || '').filter(Boolean)
-  ).size;
-
-  // Chart data: top 15 states
-  const chartData = combinedStates.slice(0, 15).map(s => ({
-    state: s.state.length > 12 ? s.state.slice(0, 12) + '…' : s.state,
-    orders: s.orders,
-    revenue: s.revenue,
-  }));
-
-  // Tag toggle
-  const toggleTag = tag => {
-    setSelectedTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]);
-    setActiveWh(null);
-  };
-
-  const hasData = rawOrders.length > 0;
+  // Tab badge counts
+  const badgeCounts = useMemo(() => {
+    const active = rawOrders.filter(o => !o.cancelled_at);
+    return {
+      dispatch:  active.filter(o => o.fulfillment_status === 'unfulfilled' || !o.fulfillment_status).length,
+      warehouse: 0,
+      support:   tickets.filter(t => t.status === 'Open' || t.status === 'Escalated').length,
+      returns:   active.filter(o => o.refunds?.length > 0 || String(o.tags || '').toLowerCase().includes('return')).length,
+    };
+  }, [rawOrders, tickets]);
 
   if (!shopifyBrands.length) return (
     <div className="flex flex-col items-center justify-center h-64 gap-3 text-slate-500">
-      <Truck size={36} className="opacity-30" />
+      <Truck size={36} className="opacity-30"/>
       <p className="text-sm">No Shopify brands configured — add credentials in Study Manual.</p>
     </div>
   );
 
-  if (!hasData) return (
+  if (!shopifyOrders.length) return (
     <div className="flex flex-col items-center justify-center h-64 gap-3 text-slate-500">
-      <Package size={36} className="opacity-30" />
+      <Package size={36} className="opacity-30"/>
       <p className="text-sm">No order data — fetch orders in Shopify Orders first.</p>
-      <p className="text-xs text-slate-600">Orders are shared across both pages.</p>
     </div>
   );
 
   return (
     <div className="space-y-5">
-      {/* ── Header ─────────────────────────────────────────────────── */}
+      {/* ── HEADER ─────────────────────────────────────────────────── */}
       <div className="flex flex-wrap items-start gap-3">
-        <div className="flex items-center gap-2">
-          <div className="p-2.5 rounded-xl bg-emerald-500/20">
-            <Truck size={18} className="text-emerald-400"/>
+        <div className="flex items-start gap-3">
+          <div className="p-2.5 rounded-xl" style={{ background: shiftInfo.color + '20' }}>
+            <ShiftIcon size={20} style={{ color: shiftInfo.color }}/>
           </div>
           <div>
-            <h1 className="text-xl font-bold text-white">Shopify Ops</h1>
-            <p className="text-[11px] text-slate-500">
-              {num(totalActive)} active orders · {uniqueStates} states · {num(uniquePins)} pincodes
-              {viewWh && <span className="ml-2 text-brand-400 font-semibold">→ {activeWh}</span>}
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl font-bold text-white">
+                {activeBrand ? `${brandName} Ops` : 'Operations'}
+              </h1>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border"
+                style={{ background: shiftInfo.color + '15', borderColor: shiftInfo.color + '40', color: shiftInfo.color }}>
+                {shiftInfo.label} Shift · {shiftInfo.range}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              {now.toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short' })}
+              &nbsp;·&nbsp;{now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+              &nbsp;·&nbsp;{num(rawOrders.filter(o => !o.cancelled_at).length)} active orders
             </p>
           </div>
         </div>
 
         <div className="ml-auto flex items-center gap-2 flex-wrap">
-          {shopifyBrands.length > 1 && (
-            <select value={viewBrandId} onChange={e => setViewBrandId(e.target.value)}
-              className="px-2 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500">
-              <option value="all">All brands</option>
-              {shopifyBrands.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-            </select>
-          )}
-          <button
-            onClick={() => exportCSV('shopify-ops-geo.csv', combinedStates.flatMap(s =>
-              s.cities.flatMap(c => c.pincodes.map(pp => ({
-                state: s.state, city: c.city, pincode: pp.pincode,
-                orders: pp.orders, revenue: pp.revenue, aov: pp.aov,
-              })))
-            ), [
-              { key: 'state',   label: 'State' },
-              { key: 'city',    label: 'City' },
-              { key: 'pincode', label: 'Pincode' },
-              { key: 'orders',  label: 'Orders' },
-              { key: 'revenue', label: 'Revenue', fn: r => dec(r.revenue, 0) },
-              { key: 'aov',     label: 'AOV',     fn: r => dec(r.aov, 0) },
-            ])}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-slate-400 hover:text-slate-200 transition-colors">
-            <Download size={11}/> Export Geo CSV
-          </button>
-        </div>
-      </div>
-
-      {/* ── KPIs ───────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        {[
-          { label: 'Active Orders',    value: num(totalOrders),      icon: Package,      color: '#3b82f6' },
-          { label: 'Total Revenue',    value: cur(totalRevenue),     icon: CheckCircle,  color: '#22c55e' },
-          { label: 'States Reached',   value: num(uniqueStates),     icon: MapPin,       color: '#a78bfa' },
-          { label: 'Unique Pincodes',  value: num(uniquePins),       icon: Hash,         color: '#f59e0b' },
-        ].map(({ label, value, icon: Icon, color }) => (
-          <div key={label} className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-            <div className="flex items-center gap-2 mb-1">
-              <Icon size={13} style={{ color }}/>
-              <span className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider">{label}</span>
-            </div>
-            <div className="text-lg font-bold text-white">{value}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* ── Warehouse filter pills ──────────────────────────────────── */}
-      {tagList.length > 0 && (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <Truck size={13} className="text-slate-400"/>
-            <span className="text-xs font-semibold text-slate-300">Warehouse / Tag Filter</span>
-            <span className="text-[10px] text-slate-600 ml-1">— select one to drill in, or view all combined</span>
-            {selectedTags.length > 0 && (
-              <button onClick={() => { setSelectedTags([]); setActiveWh(null); }}
-                className="ml-auto text-[10px] text-slate-500 hover:text-slate-300 underline">
-                Clear
-              </button>
-            )}
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {tagList.map(tag => {
-              const wh  = warehouses.find(w => w.tag === tag);
-              const sel = selectedTags.includes(tag);
-              const act = activeWh === tag;
+          {/* Shift selector */}
+          <div className="flex gap-1 p-1 bg-gray-900 border border-gray-800 rounded-lg">
+            {SHIFTS.map(s => {
+              const SIcon = s.icon;
               return (
-                <button key={tag}
-                  onClick={() => toggleTag(tag)}
-                  onDoubleClick={() => setActiveWh(prev => prev === tag ? null : tag)}
-                  title={`Click to filter · Double-click to drill into "${tag}"`}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all ${
-                    act
-                      ? 'bg-brand-600/30 border-brand-500/60 text-brand-200'
-                      : sel
-                        ? 'bg-emerald-600/20 border-emerald-500/40 text-emerald-300'
-                        : 'bg-gray-800 border-gray-700 text-slate-400 hover:text-slate-200'
-                  }`}>
-                  <Truck size={9}/>
-                  {tag}
-                  {wh && <span className="text-[9px] opacity-60 ml-0.5">·{num(wh.orders)}</span>}
+                <button key={s.id} onClick={() => setShift(s.id)}
+                  className={clsx('flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-semibold transition-all',
+                    shift === s.id
+                      ? 'text-white'
+                      : 'text-slate-500 hover:text-slate-300')}
+                  style={shift === s.id ? { background: s.color + '25', color: s.color } : {}}>
+                  <SIcon size={11}/> {s.label}
                 </button>
               );
             })}
           </div>
-          {warehouses.length > 0 && (
-            <div className="mt-3 flex items-center gap-2 flex-wrap">
-              <span className="text-[10px] text-slate-600">Drill into:</span>
-              {warehouses.slice(0, 10).map(wh => (
-                <button key={wh.tag}
-                  onClick={() => setActiveWh(prev => prev === wh.tag ? null : wh.tag)}
-                  className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-all border ${
-                    activeWh === wh.tag
-                      ? 'bg-brand-600/30 border-brand-500/50 text-brand-300'
-                      : 'border-gray-700 text-slate-500 hover:text-slate-300'
-                  }`}>
-                  {wh.tag} ({num(wh.orders)})
-                </button>
-              ))}
-              {warehouses.length > 10 && <span className="text-[10px] text-slate-600">+{warehouses.length - 10} more</span>}
-            </div>
+
+          {/* Brand selector */}
+          {shopifyBrands.length > 1 && (
+            <select value={viewBrandId} onChange={e => setViewBrandId(e.target.value)}
+              className="px-2 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-brand-500">
+              <option value="all">All Brands</option>
+              {shopifyBrands.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </select>
           )}
         </div>
-      )}
-
-      {/* ── Warehouse summary table ─────────────────────────────────── */}
-      {warehouses.length > 0 && !activeWh && (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-          <h2 className="text-xs font-semibold text-slate-300 mb-3">Warehouse Summary</h2>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs min-w-[500px]">
-              <thead>
-                <tr className="border-b border-gray-700">
-                  {['Warehouse / Tag','Orders','Revenue','AOV','Avg Fulfillment','SLA <24h'].map(h => (
-                    <th key={h} className="px-2 py-2 text-left text-[10px] text-slate-500 font-semibold uppercase tracking-wider first:pl-0">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {warehouses.map(wh => {
-                  const totalWh = warehouses.reduce((s, w) => s + w.orders, 0) || 1;
-                  return (
-                    <tr key={wh.tag}
-                      className="border-b border-gray-800/40 cursor-pointer hover:bg-gray-800/30 transition-colors"
-                      onClick={() => setActiveWh(prev => prev === wh.tag ? null : wh.tag)}>
-                      <td className="px-0 py-2 font-semibold text-slate-200 flex items-center gap-1.5">
-                        <Truck size={11} className="text-slate-500 shrink-0"/>
-                        {wh.tag}
-                      </td>
-                      <td className="px-2 py-2">
-                        <div className="flex items-center gap-1.5">
-                          <div className="w-14 h-1 bg-gray-800 rounded-full overflow-hidden">
-                            <div className="h-full rounded-full bg-brand-500/70" style={{ width: `${wh.orders / totalWh * 100}%` }}/>
-                          </div>
-                          <span className="font-semibold text-slate-200 tabular-nums">{num(wh.orders)}</span>
-                        </div>
-                      </td>
-                      <td className="px-2 py-2 tabular-nums text-emerald-400 font-semibold">{cur(wh.revenue)}</td>
-                      <td className="px-2 py-2 tabular-nums text-slate-400">{cur(wh.revenue / (wh.orders || 1))}</td>
-                      <td className="px-2 py-2 text-slate-400">{wh.fulfillStats ? hrs(wh.fulfillStats.avg) : '—'}</td>
-                      <td className="px-2 py-2"><SLA stats={wh.fulfillStats}/></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* ── Geo bar chart ───────────────────────────────────────────── */}
-      {chartData.length > 0 && (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-xs font-semibold text-slate-300">
-              Orders by State{activeWh ? ` — ${activeWh}` : ''}
-            </h2>
-            <div className="flex gap-1">
-              {[['orders','Orders'],['revenue','Revenue']].map(([k,l]) => (
-                <button key={k} onClick={() => setChartMetric(k)}
-                  className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-all ${
-                    chartMetric === k ? 'bg-brand-600/30 text-brand-300' : 'text-slate-500 hover:text-slate-300'
-                  }`}>{l}</button>
-              ))}
-            </div>
-          </div>
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={chartData} layout="vertical" margin={{ left: 0, right: 16, top: 0, bottom: 0 }}>
-              <XAxis type="number" tick={{ fill: '#475569', fontSize: 10 }} axisLine={false} tickLine={false}
-                tickFormatter={chartMetric === 'revenue' ? v => `₹${(v/1000).toFixed(0)}k` : undefined}/>
-              <YAxis type="category" dataKey="state" width={90} tick={{ fill: '#94a3b8', fontSize: 10 }} axisLine={false} tickLine={false}/>
-              <Tooltip
-                formatter={(v, n) => [chartMetric === 'revenue' ? cur(v) : num(v), n]}
-                contentStyle={{ background: '#111827', border: '1px solid #374151', borderRadius: 8, fontSize: 11 }}
-              />
-              <Bar dataKey={chartMetric} name={chartMetric === 'orders' ? 'Orders' : 'Revenue'} radius={[0, 3, 3, 0]} maxBarSize={18}>
-                {chartData.map((_, i) => (
-                  <Cell key={i} fill={`hsl(${210 + i * 8}, 70%, ${55 - i * 1.5}%)`}/>
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      )}
-
-      {/* ── State → City → Pincode drill-down table ────────────────── */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-          <h2 className="text-xs font-semibold text-slate-300">
-            {activeWh
-              ? `State → City → Pincode — ${activeWh}`
-              : selectedTags.length
-                ? `State → City → Pincode — ${selectedTags.join(', ')}`
-                : 'State → City → Pincode — All Warehouses Combined'}
-          </h2>
-          <div className="flex items-center gap-2 text-[10px] text-slate-600">
-            <span>Click state to expand cities · click city to expand pincodes</span>
-          </div>
-        </div>
-        <GeoTable states={combinedStates} totalOrders={totalOrders}/>
       </div>
+
+      {/* ── DEPARTMENT TABS ────────────────────────────────────────── */}
+      <div className="flex gap-1 border-b border-gray-800">
+        {DEPT_TABS.map(tab => {
+          const Icon  = tab.icon;
+          const badge = badgeCounts[tab.id];
+          const active = activeTab === tab.id;
+          return (
+            <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+              className={clsx(
+                'relative flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-all border-b-2 -mb-px',
+                active
+                  ? 'text-brand-300 border-brand-500'
+                  : 'text-slate-500 border-transparent hover:text-slate-300 hover:border-gray-600'
+              )}>
+              <Icon size={14}/>
+              {tab.label}
+              {badge > 0 && (
+                <span className={clsx(
+                  'flex items-center justify-center min-w-[16px] h-4 px-1 rounded-full text-[9px] font-bold',
+                  tab.id === 'support' && badgeCounts.support > 0
+                    ? 'bg-red-500/20 text-red-400'
+                    : 'bg-brand-600/20 text-brand-400'
+                )}>
+                  {badge > 99 ? '99+' : badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ── TAB CONTENT ────────────────────────────────────────────── */}
+      <AnimatePresence mode="wait">
+        <motion.div key={activeTab}
+          initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6 }}
+          transition={{ duration: 0.15 }}>
+          {activeTab === 'dispatch'  && <DispatchTab  orders={rawOrders} overrides={overrides} setOverrides={setOverrides}/>}
+          {activeTab === 'warehouse' && <WarehouseTab brandData={brandData} activeBrandId={viewBrandId} overrides={overrides} setOverrides={setOverrides}/>}
+          {activeTab === 'support'   && <SupportTab   orders={rawOrders} tickets={tickets} setTickets={setTickets}/>}
+          {activeTab === 'returns'   && <ReturnsTab   orders={rawOrders} overrides={overrides} setOverrides={setOverrides}/>}
+        </motion.div>
+      </AnimatePresence>
     </div>
   );
 }
