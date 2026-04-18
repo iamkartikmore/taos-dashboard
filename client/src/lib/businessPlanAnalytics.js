@@ -1628,97 +1628,222 @@ export function buildContributionStack({ plan, pva }) {
    Y-axis: MoM revenue growth rate
    Quadrants split at medians. Labels: Star/Cash Cow/Question Mark/Dog
    ────────────────────────────────────────────────────────────── */
-export function buildBCGMatrix({ plan, allOrders, enrichedRows }) {
-  const months = plan?.months || [];
-  const collectionAlloc = plan?.collectionAlloc || { plants: 0.35, seeds: 0.20, allMix: 0.45 };
-  const collectionRoas  = plan?.collectionRoas  || { plants: 4.53, seeds: 3.58, allMix: 4.83 };
-  const aov = plan?.aov || 340;
-  const collections = ['plants', 'seeds', 'allMix'];
-  const collLabel   = { plants: 'Plants', seeds: 'Seeds', allMix: 'All Mix' };
-  const COLL_COLORS = { plants: '#22c55e', seeds: '#f59e0b', allMix: '#818cf8' };
+const BCG_PALETTE = ['#22c55e','#f59e0b','#818cf8','#06b6d4','#f97316','#ec4899','#84cc16','#a855f7','#14b8a6','#ef4444'];
 
-  // Build monthly revenue per collection
-  const collMonthly = {};
-  collections.forEach(c => { collMonthly[c] = []; });
+function _bcgQuadrant(p, medianShare, medianGrowth) {
+  const hs = p.shareX >= medianShare, hg = p.growthY >= medianGrowth;
+  if (hs && hg)   return { name: 'Star',          color: '#22c55e', action: 'Invest aggressively — double ad budget, expand SKUs' };
+  if (hs && !hg)  return { name: 'Cash Cow',      color: '#f59e0b', action: 'Milk margins — reduce CAC, maintain SKU depth' };
+  if (!hs && hg)  return { name: 'Question Mark', color: '#818cf8', action: 'Selective invest — test 2x budget for 60 days; if ROAS holds → Star' };
+  return                  { name: 'Dog',           color: '#ef4444', action: 'Harvest or drop — minimal ad spend, clear inventory' };
+}
 
-  months.forEach(m => {
-    const totalRev = m.ordersPerDay * 30 * (m.aov || aov);
-    collections.forEach(c => {
-      collMonthly[c].push(totalRev * (collectionAlloc[c] || 0));
+function _buildBCGFromOrders({ allOrders, enrichedRows, inventoryMap }) {
+  const pN = v => parseFloat(v) || 0;
+  // Build collection revenue by month from real Shopify orders
+  const collMonthly = {}; // collName → { [YYYY-MM]: revenue }
+  const collTotal   = {}; // collName → total revenue
+  const collOrders  = {}; // collName → order count
+
+  (allOrders || []).filter(o => !o.cancelled_at).forEach(o => {
+    const date = o.created_at?.slice(0, 10);
+    if (!date) return;
+    const mk = date.slice(0, 7);
+    const seen = new Set();
+    (o.line_items || []).forEach(li => {
+      const sku  = (li.sku || '').trim().toUpperCase() || `pid_${li.product_id}`;
+      const net  = pN(li.price) * (li.quantity || 1) - pN(li.total_discount);
+      const inv  = (inventoryMap || {})[sku] || {};
+      const col  = (inv.collections?.length > 0 ? inv.collections[0] : null)
+                || inv.collectionLabel || inv.productType || li.product_type || 'Uncollected';
+      if (!collMonthly[col]) collMonthly[col] = {};
+      collMonthly[col][mk] = (collMonthly[col][mk] || 0) + net;
+      collTotal[col]  = (collTotal[col] || 0) + net;
+      if (!seen.has(col)) { collOrders[col] = (collOrders[col] || 0) + 1; seen.add(col); }
     });
   });
 
-  // Current snapshot: last month
+  const allMonths = [...new Set(Object.values(collMonthly).flatMap(m => Object.keys(m)))].sort();
+  const lastMk  = allMonths[allMonths.length - 1];
+  const prevMk  = allMonths[allMonths.length - 2];
+  const totalRevLast = Object.values(collMonthly).reduce((s, m) => s + (m[lastMk] || 0), 0);
+
+  // Meta spend+revenue per collection label
+  const metaSpend = {}, metaRev = {};
+  (enrichedRows || []).forEach(r => {
+    const col = (r.collection || '').trim(); if (!col) return;
+    metaSpend[col] = (metaSpend[col] || 0) + pN(r.spend);
+    metaRev[col]   = (metaRev[col]   || 0) + pN(r.revenue);
+  });
+
+  const sorted = Object.keys(collTotal).sort((a, b) => collTotal[b] - collTotal[a]);
+  const points = sorted.map((col, i) => {
+    const revLast = collMonthly[col]?.[lastMk] || 0;
+    const revPrev = collMonthly[col]?.[prevMk] || 0;
+    const shareX  = totalRevLast > 0 ? revLast / totalRevLast : 0;
+    const growthY = revPrev > 0 ? (revLast - revPrev) / revPrev : 0;
+    const spend   = metaSpend[col] || 0;
+    const roas    = spend > 0 ? +(( metaRev[col] || 0) / spend).toFixed(2) : 0;
+    const totalOrd = collOrders[col] || 0;
+    const totalRev = collTotal[col] || 0;
+    return {
+      collection: col, label: col,
+      color:      BCG_PALETTE[i % BCG_PALETTE.length],
+      shareX:     +(shareX * 100).toFixed(1),
+      growthY:    +(growthY * 100).toFixed(1),
+      roas, alloc: +(shareX * 100).toFixed(0),
+      revLast: Math.round(revLast), revTotal: Math.round(totalRev),
+      orders: totalOrd,
+      contribPct: totalRevLast > 0 ? +((revLast / totalRevLast) * 100).toFixed(1) : 0,
+    };
+  });
+
+  if (!points.length) return { matrix: [], medianShare: 0, medianGrowth: 0, recommendations: [], fromShopify: true };
+
+  const sortedShares  = [...points.map(p => p.shareX)].sort((a,b) => a-b);
+  const sortedGrowths = [...points.map(p => p.growthY)].sort((a,b) => a-b);
+  const medianShare   = sortedShares[Math.floor(sortedShares.length / 2)];
+  const medianGrowth  = sortedGrowths[Math.floor(sortedGrowths.length / 2)];
+
+  const matrix = points.map(p => ({ ...p, quadrant: _bcgQuadrant(p, medianShare, medianGrowth) }));
+  const recommendations = matrix.map(m => ({
+    collection: m.label, quadrant: m.quadrant.name, color: m.quadrant.color,
+    action: m.quadrant.action,
+    budgetSignal: m.quadrant.name === 'Star' ? '+30%' : m.quadrant.name === 'Cash Cow' ? 'Maintain' : m.quadrant.name === 'Question Mark' ? 'Test +20%' : '-50%',
+  }));
+  return { matrix, medianShare, medianGrowth, recommendations, axisLabels: { x: 'Revenue Share (%)', y: 'MoM Growth (%)' }, fromShopify: true };
+}
+
+function _buildBCGFromPlan({ plan, enrichedRows }) {
+  const months = plan?.months || [];
+  const collectionAlloc = plan?.collectionAlloc || {};
+  const collectionRoas  = plan?.collectionRoas  || {};
+  const aov = plan?.aov || 340;
+  const collections = Object.keys(collectionAlloc);
+  if (!collections.length) return { matrix: [], medianShare: 0, medianGrowth: 0, recommendations: [] };
+
+  const collMonthly = {};
+  collections.forEach(c => { collMonthly[c] = []; });
+  months.forEach(m => {
+    const totalRev = m.ordersPerDay * 30 * (m.aov || aov);
+    collections.forEach(c => { collMonthly[c].push(totalRev * (collectionAlloc[c] || 0)); });
+  });
   const lastIdx = months.length - 1;
   const prevIdx = Math.max(0, lastIdx - 1);
   const totalRevLast = collections.reduce((s, c) => s + (collMonthly[c][lastIdx] || 0), 0);
+  const metaSpend = {}, metaRev = {};
+  (enrichedRows || []).forEach(r => {
+    const col = (r.collection || '').trim(); if (!col) return;
+    metaSpend[col] = (metaSpend[col] || 0) + parseFloat(r.spend || 0);
+    metaRev[col]   = (metaRev[col]   || 0) + parseFloat(r.revenue || 0);
+  });
 
-  const points = collections.map(c => {
+  const points = collections.map((c, i) => {
     const revLast = collMonthly[c][lastIdx] || 0;
     const revPrev = collMonthly[c][prevIdx] || 0;
     const shareX  = totalRevLast > 0 ? revLast / totalRevLast : 0;
     const growthY = revPrev > 0 ? (revLast - revPrev) / revPrev : 0;
-
-    // Monthly growth trajectory (all months)
-    const growthSeries = collMonthly[c].map((rev, i) => {
-      if (i === 0) return 0;
-      const prev = collMonthly[c][i-1] || 0;
-      return prev > 0 ? (rev - prev) / prev : 0;
-    });
-
+    const spend   = metaSpend[c] || 0;
+    const roas    = spend > 0 ? +((metaRev[c] || 0) / spend).toFixed(2) : (collectionRoas[c] || 0);
     return {
-      collection: c,
-      label:      collLabel[c],
-      color:      COLL_COLORS[c],
-      shareX:     +(shareX * 100).toFixed(1),      // % of total revenue
-      growthY:    +(growthY * 100).toFixed(1),      // % MoM growth
-      roas:       collectionRoas[c] || 4,
-      alloc:      +(( collectionAlloc[c] || 0) * 100).toFixed(0),
-      growthSeries,
-      revLast:    Math.round(revLast),
+      collection: c, label: c,
+      color:      BCG_PALETTE[i % BCG_PALETTE.length],
+      shareX:     +(shareX * 100).toFixed(1),
+      growthY:    +(growthY * 100).toFixed(1),
+      roas, alloc: +((collectionAlloc[c] || 0) * 100).toFixed(0),
+      revLast: Math.round(revLast), revTotal: Math.round(revLast),
+      contribPct: +(shareX * 100).toFixed(1),
     };
   });
 
-  // Median split for quadrant boundaries
-  const shares  = points.map(p => p.shareX).sort((a,b)=>a-b);
-  const growths = points.map(p => p.growthY).sort((a,b)=>a-b);
-  const medianShare  = shares[Math.floor(shares.length / 2)];
-  const medianGrowth = growths[Math.floor(growths.length / 2)];
-
-  const quadrantOf = (p) => {
-    const highShare  = p.shareX  >= medianShare;
-    const highGrowth = p.growthY >= medianGrowth;
-    if (highShare && highGrowth)   return { name: 'Star',          icon: '⭐', color: '#22c55e', action: 'Invest aggressively — double ad budget, expand SKUs' };
-    if (highShare && !highGrowth)  return { name: 'Cash Cow',      icon: '🐄', color: '#f59e0b', action: 'Milk margins — reduce CAC, maintain SKU depth' };
-    if (!highShare && highGrowth)  return { name: 'Question Mark', icon: '❓', color: '#818cf8', action: 'Selective invest — test 2x budget for 60 days; if ROAS holds → Star' };
-    return                                 { name: 'Dog',           icon: '🐕', color: '#ef4444', action: 'Harvest or drop — minimal ad spend, clear inventory' };
-  };
-
-  const matrix = points.map(p => ({
-    ...p,
-    quadrant: quadrantOf(p),
-  }));
-
-  // Strategic recommendations based on quadrant
+  const sortedShares  = [...points.map(p => p.shareX)].sort((a,b) => a-b);
+  const sortedGrowths = [...points.map(p => p.growthY)].sort((a,b) => a-b);
+  const medianShare   = sortedShares[Math.floor(sortedShares.length / 2)];
+  const medianGrowth  = sortedGrowths[Math.floor(sortedGrowths.length / 2)];
+  const matrix = points.map(p => ({ ...p, quadrant: _bcgQuadrant(p, medianShare, medianGrowth) }));
   const recommendations = matrix.map(m => ({
-    collection: m.label,
-    quadrant:   m.quadrant.name,
-    icon:       m.quadrant.icon,
-    color:      m.quadrant.color,
-    action:     m.quadrant.action,
-    budgetSignal: m.quadrant.name === 'Star' ? '+30% budget'
-                : m.quadrant.name === 'Cash Cow' ? 'Maintain'
-                : m.quadrant.name === 'Question Mark' ? 'Test +20%'
-                : '-50% budget',
+    collection: m.label, quadrant: m.quadrant.name, color: m.quadrant.color,
+    action: m.quadrant.action,
+    budgetSignal: m.quadrant.name === 'Star' ? '+30%' : m.quadrant.name === 'Cash Cow' ? 'Maintain' : m.quadrant.name === 'Question Mark' ? 'Test +20%' : '-50%',
   }));
+  return { matrix, medianShare, medianGrowth, recommendations, axisLabels: { x: 'Revenue Share (%)', y: 'MoM Growth Rate (%)' } };
+}
 
-  return {
-    matrix,
-    medianShare,
-    medianGrowth,
-    recommendations,
-    axisLabels: { x: 'Revenue Share (%)', y: 'MoM Growth Rate (%)' },
-  };
+export function buildBCGMatrix({ plan, allOrders, enrichedRows, inventoryMap }) {
+  // Use real Shopify collections when inventory data is available
+  if (inventoryMap && Object.keys(inventoryMap).length > 0 && allOrders?.length > 0) {
+    return _buildBCGFromOrders({ allOrders, enrichedRows, inventoryMap });
+  }
+  return _buildBCGFromPlan({ plan, enrichedRows });
+}
+
+/* Build collection revenue contribution for analytics (product-wise + collection-wise) */
+export function buildCollectionContrib({ allOrders, inventoryMap, plan }) {
+  const pN = v => parseFloat(v) || 0;
+  const collData = {}; // col → { rev, orders, units, rev30, revByMonth }
+  const now = Date.now();
+  const t30 = new Date(now - 30 * 86400000).toISOString().slice(0, 10);
+
+  (allOrders || []).filter(o => !o.cancelled_at).forEach(o => {
+    const date = o.created_at?.slice(0, 10);
+    if (!date) return;
+    const mk = date.slice(0, 7);
+    (o.line_items || []).forEach(li => {
+      const sku = (li.sku || '').trim().toUpperCase() || `pid_${li.product_id}`;
+      const net = pN(li.price) * (li.quantity || 1) - pN(li.total_discount);
+      const qty = li.quantity || 1;
+      const inv = (inventoryMap || {})[sku] || {};
+      const col = (inv.collections?.length > 0 ? inv.collections[0] : null)
+               || inv.collectionLabel || inv.productType || li.product_type || 'Uncollected';
+      if (!collData[col]) collData[col] = { name: col, rev: 0, orders: 0, units: 0, rev30: 0, revByMonth: {} };
+      const c = collData[col];
+      c.rev += net; c.units += qty;
+      if (date >= t30) c.rev30 += net;
+      c.revByMonth[mk] = (c.revByMonth[mk] || 0) + net;
+    });
+    // count order for primary collection
+    const firstSku = (o.line_items?.[0]?.sku || '').trim().toUpperCase() || `pid_${o.line_items?.[0]?.product_id}`;
+    const inv0 = (inventoryMap || {})[firstSku] || {};
+    const primaryCol = (inv0.collections?.length > 0 ? inv0.collections[0] : null)
+                    || inv0.collectionLabel || inv0.productType || o.line_items?.[0]?.product_type || 'Uncollected';
+    if (collData[primaryCol]) collData[primaryCol].orders++;
+  });
+
+  const total30 = Object.values(collData).reduce((s, c) => s + c.rev30, 0);
+  const totalRev = Object.values(collData).reduce((s, c) => s + c.rev, 0);
+
+  // Monthly plan revenue for target comparison
+  const planByMonth = {};
+  (plan?.months || []).forEach(m => {
+    const key = m.key || m.label;
+    const rev = (m.ordersPerDay || 0) * 30 * (m.aov || plan?.aov || 340);
+    planByMonth[key] = rev;
+  });
+
+  const results = Object.values(collData)
+    .sort((a, b) => b.rev30 - a.rev30)
+    .map((c, i) => {
+      const months = Object.entries(c.revByMonth).sort(([a],[b]) => a.localeCompare(b));
+      const lastTwo = months.slice(-2);
+      const momGrowth = lastTwo.length === 2 && lastTwo[0][1] > 0
+        ? ((lastTwo[1][1] - lastTwo[0][1]) / lastTwo[0][1] * 100).toFixed(1)
+        : null;
+      return {
+        name: c.name,
+        color: BCG_PALETTE[i % BCG_PALETTE.length],
+        rev: Math.round(c.rev),
+        rev30: Math.round(c.rev30),
+        orders: c.orders,
+        units: c.units,
+        contribPct30: total30 > 0 ? +((c.rev30 / total30) * 100).toFixed(1) : 0,
+        contribPctAll: totalRev > 0 ? +((c.rev / totalRev) * 100).toFixed(1) : 0,
+        momGrowth: momGrowth !== null ? parseFloat(momGrowth) : null,
+        aov: c.orders > 0 ? Math.round(c.rev30 / c.orders) : 0,
+        revByMonth: c.revByMonth,
+      };
+    });
+
+  return { collections: results, total30: Math.round(total30), totalRev: Math.round(totalRev) };
 }
 
 /* ──────────────────────────────────────────────────────────────

@@ -4,7 +4,7 @@ import {
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell,
 } from 'recharts';
 import {
-  Zap, TrendingUp, Target, Package, Building2, Wallet,
+  Zap, TrendingUp, Target, Package, Building2, Wallet, Settings,
   Plus, Trash2, Edit2, Check, X, AlertTriangle, CheckCircle,
   ArrowUp, ArrowDown, Minus, RefreshCw, ChevronRight, Upload,
 } from 'lucide-react';
@@ -17,6 +17,7 @@ import {
   buildPredictions, parseOrdersCsv, fmtRs, fmtK,
   buildCurrentConstraint, buildBreakingPoints, buildRTOModel,
   buildContributionStack, buildBCGMatrix, buildGrowthAdjustedInventory,
+  buildCollectionContrib,
   buildWeeklyMarketingTracker, buildMonthlyMarketingActuals,
   buildCreativeHealth, buildLTVCAC, buildMcKinseyDecomp,
   parseWarehouseTags,
@@ -135,6 +136,7 @@ const TABS = [
   { id: 'inventory', label: 'Inventory Intel',icon: Package },
   { id: 'warehouse', label: 'Warehouses',     icon: Building2 },
   { id: 'capital',   label: 'Working Capital',icon: Wallet },
+  { id: 'targets',   label: 'Targets',        icon: Settings },
 ];
 
 function ChartTip({ active, payload, label }) {
@@ -1605,6 +1607,257 @@ function TabCapital({ plan, wc, cmStack, rtoModel }) {
   );
 }
 
+/* ─── TAB: TARGETS ────────────────────────────────────────────────── */
+function TabTargets({ plan, pva, savePlan, collContrib, brand, ordersCount }) {
+  const [editing, setEditing] = useState(null);
+  const [collEditing, setCollEditing] = useState(null);
+
+  const startEdit = (idx, field, val) => setEditing({ idx, field, value: String(val) });
+  const commitEdit = () => {
+    if (!editing) return;
+    const { idx, field, value } = editing;
+    const parsed = parseFloat(value);
+    if (isNaN(parsed) || parsed <= 0) { setEditing(null); return; }
+    const months = plan.months.map((m, i) => i === idx ? { ...m, [field]: Math.round(parsed) } : m);
+    savePlan({ months });
+    setEditing(null);
+  };
+
+  const startCollEdit = (field, subfield, val) => setCollEditing({ field, subfield, value: String(val) });
+  const commitCollEdit = () => {
+    if (!collEditing) return;
+    const { field, subfield, value } = collEditing;
+    const parsed = parseFloat(value);
+    if (isNaN(parsed) || parsed < 0) { setCollEditing(null); return; }
+    const current = { ...(plan[field] || {}) };
+    current[subfield] = field === 'collectionAlloc' ? parsed / 100 : parsed;
+    savePlan({ [field]: current });
+    setCollEditing(null);
+  };
+
+  function EditCell({ idx, field, value, display }) {
+    if (editing?.idx === idx && editing?.field === field) {
+      return (
+        <div className="flex items-center gap-1">
+          <input autoFocus className="w-24 bg-gray-800 border border-brand-500 rounded px-1.5 py-0.5 text-white text-xs"
+            value={editing.value} onChange={e => setEditing(p => ({ ...p, value: e.target.value }))}
+            onKeyDown={e => { if (e.key === 'Enter') commitEdit(); if (e.key === 'Escape') setEditing(null); }}/>
+          <button onClick={commitEdit}><Check size={12} className="text-emerald-400"/></button>
+          <button onClick={() => setEditing(null)}><X size={12} className="text-red-400"/></button>
+        </div>
+      );
+    }
+    return (
+      <button onClick={() => startEdit(idx, field, value)} className="group flex items-center gap-1 hover:text-white transition-colors">
+        {display}
+        <Edit2 size={10} className="opacity-0 group-hover:opacity-50 transition-opacity"/>
+      </button>
+    );
+  }
+
+  const totalPlanRev = pva.reduce((s, m) => s + m.planRevenue, 0);
+  const totalActual  = pva.reduce((s, m) => s + m.actualRevenue, 0);
+  const allCollKeys  = Object.keys(plan.collectionAlloc || {});
+
+  return (
+    <div className="space-y-5">
+      {/* Brand context */}
+      <div className="flex items-center gap-3">
+        <span className="text-sm font-bold text-white">{brand?.name || 'Brand'} — All Targets</span>
+        <span className="text-xs text-slate-500">Edit inline. Changes save automatically per brand.</span>
+      </div>
+
+      {/* Year KPIs */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <KpiCard label="Year Revenue Target" value={fmtRs(totalPlanRev)} sub={`${plan.months[0]?.label} – ${plan.months[plan.months.length-1]?.label}`}/>
+        <KpiCard label="Actual Revenue" value={fmtRs(totalActual)} cls="text-emerald-400" sub="loaded period"/>
+        <KpiCard label="Peak Orders/Day" value={`${Math.max(...plan.months.map(m => m.ordersPerDay || 0))}/day`} sub="target peak"/>
+        <KpiCard label="Total Ad Budget" value={fmtRs(plan.months.reduce((s, m) => s + ((m.adBudgetPerDay || 0) * 30), 0))} sub="sum of monthly plan"/>
+      </div>
+
+      {/* Month-by-month target table */}
+      <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-5">
+        <div className="text-sm font-semibold text-slate-200 mb-4">Monthly Targets — click any value to edit</div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-gray-800/50">
+                {['Month','Orders/Day','AOV (₹)','Revenue','Ad Budget/Day','Target ROAS'].map(h => (
+                  <th key={h} className="px-3 py-2 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {plan.months.map((m, idx) => {
+                const pvaRow = pva.find(p => p.key === m.key);
+                const rev = (m.ordersPerDay || 0) * 30 * (m.aov || plan.aov || 340);
+                return (
+                  <tr key={m.key} className="border-b border-gray-800/25 hover:bg-gray-800/20 transition-colors">
+                    <td className="px-3 py-2.5 font-semibold text-white whitespace-nowrap">
+                      {m.label}
+                      {pvaRow && (
+                        <span className={clsx('ml-2 text-[9px] px-1.5 py-0.5 rounded font-bold', STATUS_STYLE[pvaRow.status]?.pill)}>
+                          {STATUS_STYLE[pvaRow.status]?.label}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-300">
+                      <EditCell idx={idx} field="ordersPerDay" value={m.ordersPerDay} display={m.ordersPerDay?.toLocaleString()}/>
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-300">
+                      <EditCell idx={idx} field="aov" value={m.aov || plan.aov || 340} display={`₹${(m.aov || plan.aov || 340).toLocaleString()}`}/>
+                    </td>
+                    <td className="px-3 py-2.5 text-white font-semibold">{fmtRs(rev)}</td>
+                    <td className="px-3 py-2.5 text-slate-300">
+                      <EditCell idx={idx} field="adBudgetPerDay" value={m.adBudgetPerDay || 0} display={m.adBudgetPerDay ? fmtRs(m.adBudgetPerDay) : '—'}/>
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-300">
+                      <EditCell idx={idx} field="blendedRoas" value={m.blendedRoas || plan.blendedRoas || 4} display={`${(m.blendedRoas || plan.blendedRoas || 4)}x`}/>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Collection targets */}
+      {allCollKeys.length > 0 && (
+        <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-5">
+          <div className="text-sm font-semibold text-slate-200 mb-1">Collection Allocation & ROAS Targets</div>
+          <div className="text-xs text-slate-500 mb-4">Plan-based allocation used when no Shopify data is loaded.</div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {allCollKeys.map((key, i) => {
+              const liveCol = collContrib?.collections?.find(c => c.name?.toLowerCase() === key.toLowerCase());
+              const allocPct = ((plan.collectionAlloc?.[key] || 0) * 100).toFixed(0);
+              const roas     = plan.collectionRoas?.[key] || 0;
+              return (
+                <div key={key} className="bg-gray-800/40 rounded-xl p-4 border border-gray-700/30">
+                  <div className="flex items-center gap-2 mb-3">
+                    <div className="w-2.5 h-2.5 rounded-full" style={{ background: ['#22c55e','#f59e0b','#818cf8','#06b6d4'][i % 4] }}/>
+                    <span className="text-sm font-bold text-white capitalize">{key}</span>
+                    {liveCol && <span className="ml-auto text-xs text-emerald-400 font-semibold">{liveCol.contribPct30}% live</span>}
+                  </div>
+                  <div className="space-y-2 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500">Plan Alloc</span>
+                      {collEditing?.field === 'collectionAlloc' && collEditing?.subfield === key ? (
+                        <div className="flex items-center gap-1">
+                          <input autoFocus className="w-16 bg-gray-700 border border-brand-500 rounded px-1.5 py-0.5 text-white text-xs"
+                            value={collEditing.value} onChange={e => setCollEditing(p => ({ ...p, value: e.target.value }))}
+                            onKeyDown={e => { if (e.key === 'Enter') commitCollEdit(); if (e.key === 'Escape') setCollEditing(null); }}/>
+                          <button onClick={commitCollEdit}><Check size={10} className="text-emerald-400"/></button>
+                        </div>
+                      ) : (
+                        <button onClick={() => startCollEdit('collectionAlloc', key, allocPct)}
+                          className="group flex items-center gap-1 text-white font-semibold hover:text-brand-300">
+                          {allocPct}%<Edit2 size={9} className="opacity-0 group-hover:opacity-50"/>
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-500">Target ROAS</span>
+                      {collEditing?.field === 'collectionRoas' && collEditing?.subfield === key ? (
+                        <div className="flex items-center gap-1">
+                          <input autoFocus className="w-16 bg-gray-700 border border-brand-500 rounded px-1.5 py-0.5 text-white text-xs"
+                            value={collEditing.value} onChange={e => setCollEditing(p => ({ ...p, value: e.target.value }))}
+                            onKeyDown={e => { if (e.key === 'Enter') commitCollEdit(); if (e.key === 'Escape') setCollEditing(null); }}/>
+                          <button onClick={commitCollEdit}><Check size={10} className="text-emerald-400"/></button>
+                        </div>
+                      ) : (
+                        <button onClick={() => startCollEdit('collectionRoas', key, roas)}
+                          className="group flex items-center gap-1 text-white font-semibold hover:text-brand-300">
+                          {roas}x<Edit2 size={9} className="opacity-0 group-hover:opacity-50"/>
+                        </button>
+                      )}
+                    </div>
+                    {liveCol && (
+                      <div className="pt-1.5 border-t border-gray-700/40 flex justify-between">
+                        <span className="text-slate-500">Live Rev (30d)</span>
+                        <span className="text-white">{fmtRs(liveCol.rev30)}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Live collection contribution */}
+      {collContrib?.collections?.length > 0 && (
+        <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-5">
+          <div className="text-sm font-semibold text-slate-200 mb-1">Live Collection Contribution</div>
+          <div className="text-xs text-slate-500 mb-4">
+            From {ordersCount > 0 ? `${ordersCount.toLocaleString()} Shopify orders loaded` : 'no orders loaded — pull first'}. Primary collection per order line item.
+          </div>
+          <div className="space-y-2.5">
+            {collContrib.collections.slice(0, 12).map(col => (
+              <div key={col.name} className="flex items-center gap-3">
+                <div className="w-2 h-2 rounded-full shrink-0" style={{ background: col.color }}/>
+                <div className="text-xs text-slate-300 w-40 truncate shrink-0">{col.name}</div>
+                <div className="flex-1 h-2 bg-gray-800/60 rounded-full overflow-hidden">
+                  <div className="h-full rounded-full" style={{ width: `${Math.min(col.contribPct30, 100)}%`, background: col.color, opacity: 0.8 }}/>
+                </div>
+                <div className="text-xs font-bold text-white w-10 text-right shrink-0">{col.contribPct30}%</div>
+                <div className="text-xs text-slate-500 w-24 text-right shrink-0">{fmtRs(col.rev30)} · {col.orders} ord</div>
+                {col.momGrowth !== null && (
+                  <div className={clsx('text-xs font-semibold w-14 text-right shrink-0', col.momGrowth >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                    {col.momGrowth >= 0 ? '+' : ''}{col.momGrowth}%
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 pt-3 border-t border-gray-800/40 flex justify-between text-xs">
+            <span className="text-slate-500">Total 30d revenue (all collections)</span>
+            <span className="text-white font-bold">{fmtRs(collContrib.total30)}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Global plan settings */}
+      <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-5">
+        <div className="text-sm font-semibold text-slate-200 mb-4">Global Plan Settings</div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+          {[
+            { label: 'Default AOV', field: 'aov', val: plan.aov || 340, fmt: v => `₹${v}` },
+            { label: 'COD %', field: 'codPct', val: plan.codPct || 72, fmt: v => `${v}%` },
+            { label: 'Target CPR', field: 'cpr', val: plan.cpr || 55, fmt: v => `₹${v}` },
+            { label: 'Blended ROAS', field: 'blendedRoas', val: plan.blendedRoas || 4.47, fmt: v => `${v}x` },
+          ].map(({ label, field, val, fmt }) => (
+            <div key={field} className="bg-gray-800/40 rounded-xl p-3 border border-gray-700/30">
+              <div className="text-slate-500 mb-1 uppercase tracking-wide text-[10px]">{label}</div>
+              {editing?.field === `global_${field}` ? (
+                <div className="flex items-center gap-1">
+                  <input autoFocus className="w-20 bg-gray-700 border border-brand-500 rounded px-1.5 py-0.5 text-white text-xs"
+                    value={editing.value} onChange={e => setEditing(p => ({ ...p, value: e.target.value }))}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        const p = parseFloat(editing.value);
+                        if (!isNaN(p) && p > 0) savePlan({ [field]: p });
+                        setEditing(null);
+                      }
+                      if (e.key === 'Escape') setEditing(null);
+                    }}/>
+                  <button onClick={() => { const p = parseFloat(editing.value); if (!isNaN(p) && p > 0) savePlan({ [field]: p }); setEditing(null); }}><Check size={11} className="text-emerald-400"/></button>
+                </div>
+              ) : (
+                <button onClick={() => setEditing({ idx: -1, field: `global_${field}`, value: String(val) })}
+                  className="group flex items-center gap-1 text-lg font-bold text-white hover:text-brand-300">
+                  {fmt(val)}<Edit2 size={10} className="opacity-0 group-hover:opacity-50"/>
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── LIVE PULL PANEL ────────────────────────────────────────────────── */
 function PullPanel({ isPulling, pullLog, pullProgress, onPull, lastPullAt, stats, onUpload, pullPeriod, onPeriodChange }) {
   const fileRef = useRef();
@@ -1823,15 +2076,17 @@ export default function BusinessPlan() {
   const breaking   = useMemo(() => buildBreakingPoints({ plan, predictions, inventoryNeeds: invNeeds, pva }), [plan, predictions, invNeeds, pva]);
   const rtoModel   = useMemo(() => buildRTOModel({ plan, predictions }), [plan, predictions]);
   const cmStack    = useMemo(() => buildContributionStack({ plan, pva }), [plan, pva]);
-  const bcgMatrix  = useMemo(() => buildBCGMatrix({ plan, allOrders, enrichedRows }), [plan, allOrders, enrichedRows]);
+  const bcgMatrix  = useMemo(() => buildBCGMatrix({ plan, allOrders, enrichedRows, inventoryMap }), [plan, allOrders, enrichedRows, inventoryMap]);
+  const collContrib = useMemo(() => buildCollectionContrib({ allOrders, inventoryMap, plan }), [allOrders, inventoryMap, plan]);
 
-  // Multi-brand combined BCG
+  // Multi-brand combined BCG — filter orders by brand so collections don't bleed across brands
   const combinedBCG = useMemo(() => {
     if (activeBrandIds.length <= 1) return bcgMatrix;
     const allPoints = activeBrandIds.flatMap(id => {
       const b = brands.find(br => br.id === id);
       const bp = hydrate(lsGet(id), b?.name);
-      const m  = buildBCGMatrix({ plan: bp, allOrders, enrichedRows });
+      const brandOrders = allOrders.filter(o => o._brandId === id);
+      const m  = buildBCGMatrix({ plan: bp, allOrders: brandOrders, enrichedRows, inventoryMap });
       const prefix = b?.name?.split(' ')[0] || id;
       return m.matrix.map(item => ({
         ...item,
@@ -1908,10 +2163,11 @@ export default function BusinessPlan() {
 
       {tab === 'command'   && <TabCommand   plan={plan} pva={pva} predictions={predictions} allOrders={allOrders} constraint={constraint} breaking={breaking} bcgMatrix={combinedBCG}/>}
       {tab === 'revenue'   && <TabRevenue   plan={plan} pva={pva} savePlan={savePlan} allOrders={allOrders}/>}
-      {tab === 'marketing' && <TabMarketing plan={plan} pva={pva} savePlan={savePlan} bcgMatrix={combinedBCG} allOrders={allOrders} enrichedRows={enrichedRows}/>}
+      {tab === 'marketing' && <TabMarketing plan={plan} pva={pva} savePlan={savePlan} bcgMatrix={combinedBCG} allOrders={allOrders} enrichedRows={enrichedRows} collContrib={collContrib}/>}
       {tab === 'inventory' && <TabInventory inventoryMap={inventoryMap} allOrders={allOrders} growthInv={growthInv}/>}
       {tab === 'warehouse' && <TabWarehouses plan={plan} savePlan={savePlan} warehouseTags={warehouseTags} allOrders={allOrders}/>}
       {tab === 'capital'   && <TabCapital   plan={plan} wc={wc} cmStack={cmStack} rtoModel={rtoModel}/>}
+      {tab === 'targets'   && <TabTargets   plan={plan} pva={pva} savePlan={savePlan} collContrib={collContrib} brand={brand} ordersCount={allOrders.length}/>}
     </div>
   );
 }
