@@ -418,6 +418,21 @@ function TabCommand({ plan, pva, predictions, allOrders, constraint, breaking, b
   );
 }
 
+/* ─── SHARED: growth helpers ─────────────────────────────────────────── */
+function momPct(curr, prev) {
+  if (!prev || prev === 0) return null;
+  return +((curr - prev) / prev * 100).toFixed(1);
+}
+
+function GrowthBadge({ pct }) {
+  if (pct === null || pct === undefined) return <span className="text-slate-700 text-[10px]">—</span>;
+  return (
+    <span className={clsx('text-[10px] font-semibold', pct > 0 ? 'text-emerald-400' : pct < 0 ? 'text-red-400' : 'text-slate-500')}>
+      {pct > 0 ? '+' : ''}{pct}%
+    </span>
+  );
+}
+
 /* ─── TAB: REVENUE PLAN ──────────────────────────────────────────────── */
 function TabRevenue({ plan, pva, savePlan, allOrders }) {
   const [editing, setEditing] = useState(null);
@@ -430,6 +445,17 @@ function TabRevenue({ plan, pva, savePlan, allOrders }) {
     const parsed = parseFloat(value);
     if (isNaN(parsed) || parsed <= 0) { setEditing(null); return; }
     const months = plan.months.map((m, i) => i === idx ? { ...m, [field]: Math.round(parsed) } : m);
+    savePlan({ months });
+    setEditing(null);
+  };
+
+  // Commit a growth-% edit: recalculate this month's value from previous month
+  const commitGrowth = (idx, field, pctStr) => {
+    const pct = parseFloat(pctStr);
+    if (isNaN(pct) || idx === 0) { setEditing(null); return; }
+    const prevVal = plan.months[idx - 1]?.[field] || plan.months[idx - 1]?.aov || plan.aov || 340;
+    const newVal  = Math.max(1, Math.round(prevVal * (1 + pct / 100)));
+    const months  = plan.months.map((m, i) => i === idx ? { ...m, [field]: newVal } : m);
     savePlan({ months });
     setEditing(null);
   };
@@ -480,7 +506,7 @@ function TabRevenue({ plan, pva, savePlan, allOrders }) {
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b border-gray-800/50">
-              {['Month','Orders/Day','AOV (₹)','Budget/Day','Plan Revenue','Actual Revenue','Status',''].map(h => (
+              {['Month','Orders/Day','Δ Orders','AOV (₹)','Δ AOV','Budget/Day','Plan Revenue','Actual Revenue','Status',''].map(h => (
                 <th key={h} className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
               ))}
             </tr>
@@ -488,6 +514,9 @@ function TabRevenue({ plan, pva, savePlan, allOrders }) {
           <tbody>
             {pva.map((m, idx) => {
               const isExp = expanded === idx;
+              const prev  = plan.months[idx - 1];
+              const ordGrowth = prev ? momPct(m.ordersPerDay, prev.ordersPerDay) : null;
+              const aovGrowth = prev ? momPct(m.aov || plan.aov || 340, prev.aov || plan.aov || 340) : null;
               return (
                 <>
                   <tr key={m.key} className={clsx('border-b border-gray-800/30 hover:bg-gray-800/20 transition-colors', m.isCurrentMonth && 'bg-brand-600/5')}>
@@ -499,7 +528,45 @@ function TabRevenue({ plan, pva, savePlan, allOrders }) {
                       <EditCell idx={idx} field="ordersPerDay" value={m.ordersPerDay} display={m.ordersPerDay.toLocaleString()}/>
                     </td>
                     <td className="px-3 py-2.5">
+                      {idx === 0 ? <span className="text-slate-700 text-[10px]">base</span> : (
+                        editing?.idx === idx && editing?.field === 'growth_ord' ? (
+                          <div className="flex items-center gap-1">
+                            <input autoFocus className="w-14 bg-gray-800 border border-brand-500 rounded px-1.5 py-0.5 text-white text-[10px]"
+                              value={editing.value} placeholder="e.g. 20"
+                              onChange={e => setEditing(p => ({ ...p, value: e.target.value }))}
+                              onKeyDown={e => { if (e.key === 'Enter') commitGrowth(idx, 'ordersPerDay', editing.value); if (e.key === 'Escape') setEditing(null); }}/>
+                            <button onClick={() => commitGrowth(idx, 'ordersPerDay', editing.value)}><Check size={10} className="text-emerald-400"/></button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setEditing({ idx, field: 'growth_ord', value: String(ordGrowth ?? '') })}
+                            className="group flex items-center gap-1">
+                            <GrowthBadge pct={ordGrowth}/>
+                            <Edit2 size={9} className="text-slate-700 opacity-0 group-hover:opacity-100"/>
+                          </button>
+                        )
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5">
                       <EditCell idx={idx} field="aov" value={m.aov} display={`₹${m.aov}`}/>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {idx === 0 ? <span className="text-slate-700 text-[10px]">base</span> : (
+                        editing?.idx === idx && editing?.field === 'growth_aov' ? (
+                          <div className="flex items-center gap-1">
+                            <input autoFocus className="w-14 bg-gray-800 border border-brand-500 rounded px-1.5 py-0.5 text-white text-[10px]"
+                              value={editing.value} placeholder="e.g. 2"
+                              onChange={e => setEditing(p => ({ ...p, value: e.target.value }))}
+                              onKeyDown={e => { if (e.key === 'Enter') commitGrowth(idx, 'aov', editing.value); if (e.key === 'Escape') setEditing(null); }}/>
+                            <button onClick={() => commitGrowth(idx, 'aov', editing.value)}><Check size={10} className="text-emerald-400"/></button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setEditing({ idx, field: 'growth_aov', value: String(aovGrowth ?? '') })}
+                            className="group flex items-center gap-1">
+                            <GrowthBadge pct={aovGrowth}/>
+                            <Edit2 size={9} className="text-slate-700 opacity-0 group-hover:opacity-100"/>
+                          </button>
+                        )
+                      )}
                     </td>
                     <td className="px-3 py-2.5">
                       <EditCell idx={idx} field="adBudgetPerDay" value={m.adBudgetPerDay} display={fmtRs(m.adBudgetPerDay)}/>
@@ -1624,6 +1691,19 @@ function TabTargets({ plan, pva, savePlan, collContrib, brand, ordersCount }) {
     setEditing(null);
   };
 
+  const commitGrowth = (idx, field, pctStr) => {
+    const pct = parseFloat(pctStr);
+    if (isNaN(pct) || idx === 0) { setEditing(null); return; }
+    const defaultAov = plan.aov || 340;
+    const prevVal = field === 'aov'
+      ? (plan.months[idx - 1]?.aov || defaultAov)
+      : (plan.months[idx - 1]?.[field] || 1);
+    const newVal = Math.max(1, Math.round(prevVal * (1 + pct / 100)));
+    const months = plan.months.map((m, i) => i === idx ? { ...m, [field]: newVal } : m);
+    savePlan({ months });
+    setEditing(null);
+  };
+
   const startCollEdit = (field, subfield, val) => setCollEditing({ field, subfield, value: String(val) });
   const commitCollEdit = () => {
     if (!collEditing) return;
@@ -1678,20 +1758,28 @@ function TabTargets({ plan, pva, savePlan, collContrib, brand, ordersCount }) {
 
       {/* Month-by-month target table */}
       <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-5">
-        <div className="text-sm font-semibold text-slate-200 mb-4">Monthly Targets — click any value to edit</div>
+        <div className="flex items-center justify-between mb-4">
+          <div className="text-sm font-semibold text-slate-200">Monthly Targets</div>
+          <div className="text-[10px] text-slate-500">Click any value or Δ% to edit. Editing Δ% recalculates that month from the previous.</div>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
               <tr className="border-b border-gray-800/50">
-                {['Month','Orders/Day','AOV (₹)','Revenue','Ad Budget/Day','Target ROAS'].map(h => (
+                {['Month','Orders/Day','Δ Ord%','AOV (₹)','Δ AOV%','Revenue','Budget/Day','ROAS'].map(h => (
                   <th key={h} className="px-3 py-2 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {plan.months.map((m, idx) => {
-                const pvaRow = pva.find(p => p.key === m.key);
-                const rev = (m.ordersPerDay || 0) * 30 * (m.aov || plan.aov || 340);
+                const pvaRow  = pva.find(p => p.key === m.key);
+                const prev    = plan.months[idx - 1];
+                const aov     = m.aov || plan.aov || 340;
+                const prevAov = prev ? (prev.aov || plan.aov || 340) : null;
+                const ordGrowth = prev ? momPct(m.ordersPerDay, prev.ordersPerDay) : null;
+                const aovGrowth = prev ? momPct(aov, prevAov) : null;
+                const rev = (m.ordersPerDay || 0) * 30 * aov;
                 return (
                   <tr key={m.key} className="border-b border-gray-800/25 hover:bg-gray-800/20 transition-colors">
                     <td className="px-3 py-2.5 font-semibold text-white whitespace-nowrap">
@@ -1705,8 +1793,46 @@ function TabTargets({ plan, pva, savePlan, collContrib, brand, ordersCount }) {
                     <td className="px-3 py-2.5 text-slate-300">
                       <EditCell idx={idx} field="ordersPerDay" value={m.ordersPerDay} display={m.ordersPerDay?.toLocaleString()}/>
                     </td>
+                    <td className="px-3 py-2.5">
+                      {idx === 0 ? <span className="text-slate-700 text-[10px]">base</span> : (
+                        editing?.idx === idx && editing?.field === 'growth_ord' ? (
+                          <div className="flex items-center gap-1">
+                            <input autoFocus className="w-14 bg-gray-800 border border-brand-500 rounded px-1.5 py-0.5 text-white text-[10px]"
+                              value={editing.value} placeholder="%"
+                              onChange={e => setEditing(p => ({ ...p, value: e.target.value }))}
+                              onKeyDown={e => { if (e.key === 'Enter') commitGrowth(idx, 'ordersPerDay', editing.value); if (e.key === 'Escape') setEditing(null); }}/>
+                            <button onClick={() => commitGrowth(idx, 'ordersPerDay', editing.value)}><Check size={10} className="text-emerald-400"/></button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setEditing({ idx, field: 'growth_ord', value: String(ordGrowth ?? '') })}
+                            className="group flex items-center gap-1">
+                            <GrowthBadge pct={ordGrowth}/>
+                            <Edit2 size={9} className="text-slate-700 opacity-0 group-hover:opacity-100"/>
+                          </button>
+                        )
+                      )}
+                    </td>
                     <td className="px-3 py-2.5 text-slate-300">
-                      <EditCell idx={idx} field="aov" value={m.aov || plan.aov || 340} display={`₹${(m.aov || plan.aov || 340).toLocaleString()}`}/>
+                      <EditCell idx={idx} field="aov" value={aov} display={`₹${aov.toLocaleString()}`}/>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {idx === 0 ? <span className="text-slate-700 text-[10px]">base</span> : (
+                        editing?.idx === idx && editing?.field === 'growth_aov' ? (
+                          <div className="flex items-center gap-1">
+                            <input autoFocus className="w-14 bg-gray-800 border border-brand-500 rounded px-1.5 py-0.5 text-white text-[10px]"
+                              value={editing.value} placeholder="%"
+                              onChange={e => setEditing(p => ({ ...p, value: e.target.value }))}
+                              onKeyDown={e => { if (e.key === 'Enter') commitGrowth(idx, 'aov', editing.value); if (e.key === 'Escape') setEditing(null); }}/>
+                            <button onClick={() => commitGrowth(idx, 'aov', editing.value)}><Check size={10} className="text-emerald-400"/></button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setEditing({ idx, field: 'growth_aov', value: String(aovGrowth ?? '') })}
+                            className="group flex items-center gap-1">
+                            <GrowthBadge pct={aovGrowth}/>
+                            <Edit2 size={9} className="text-slate-700 opacity-0 group-hover:opacity-100"/>
+                          </button>
+                        )
+                      )}
                     </td>
                     <td className="px-3 py-2.5 text-white font-semibold">{fmtRs(rev)}</td>
                     <td className="px-3 py-2.5 text-slate-300">
