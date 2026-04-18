@@ -69,8 +69,101 @@ function loadAuthConfig() {
 }
 
 function resolveModules(userConfig, roles) {
-  return userConfig.modules || roles[userConfig.role] || [];
+  const mods = userConfig.modules;
+  if (mods && mods.length > 0) return mods;
+  return roles[userConfig.role] || [];
 }
+
+function saveAuthConfig(config) {
+  fs.writeFileSync(path.join(__dirname, 'auth-config.json'), JSON.stringify(config, null, 2));
+}
+
+/* ─── USAGE LOGGING (in-memory ring buffer) ────────────────────── */
+
+const usageLogs = [];
+const MAX_LOGS  = 2000;
+function pushLog(entry) {
+  usageLogs.push({ ...entry, ts: Date.now() });
+  if (usageLogs.length > MAX_LOGS) usageLogs.shift();
+}
+
+// POST /api/admin/log — any authenticated user pings this on page nav
+app.post('/api/admin/log', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) return res.status(401).end();
+  try {
+    const user = jwt.verify(authHeader.slice(7), JWT_SECRET);
+    pushLog({ type: 'page', email: user.email, name: user.name, ...req.body });
+    res.json({ ok: true });
+  } catch { res.status(401).end(); }
+});
+
+/* ─── ADMIN MIDDLEWARE ───────────────────────────────────────────── */
+
+function requireAdmin(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ error: 'Not authenticated' });
+  try {
+    const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET);
+    if (decoded.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    req.adminUser = decoded;
+    next();
+  } catch { res.status(401).json({ error: 'Invalid token' }); }
+}
+
+// GET /api/admin/users
+app.get('/api/admin/users', requireAdmin, (req, res) => {
+  const { users } = loadAuthConfig();
+  res.json(users);
+});
+
+// POST /api/admin/users
+app.post('/api/admin/users', requireAdmin, (req, res) => {
+  const config = loadAuthConfig();
+  const { email, name, role, modules, brands } = req.body;
+  if (!email || !name || !role) return res.status(400).json({ error: 'email, name, role required' });
+  if (config.users.find(u => u.email.toLowerCase() === email.toLowerCase()))
+    return res.status(409).json({ error: 'User already exists' });
+  config.users.push({ email: email.toLowerCase(), name, role, modules: modules || [], brands: brands || ['*'] });
+  saveAuthConfig(config);
+  pushLog({ type: 'admin', action: 'add_user', email: req.adminUser.email, target: email });
+  res.json({ ok: true });
+});
+
+// PUT /api/admin/users/:email
+app.put('/api/admin/users/:email', requireAdmin, (req, res) => {
+  const config = loadAuthConfig();
+  const idx = config.users.findIndex(u => u.email.toLowerCase() === req.params.email.toLowerCase());
+  if (idx === -1) return res.status(404).json({ error: 'User not found' });
+  const { name, role, modules, brands } = req.body;
+  config.users[idx] = { ...config.users[idx], name, role, modules: modules || [], brands: brands || ['*'] };
+  saveAuthConfig(config);
+  pushLog({ type: 'admin', action: 'update_user', email: req.adminUser.email, target: req.params.email });
+  res.json({ ok: true });
+});
+
+// DELETE /api/admin/users/:email
+app.delete('/api/admin/users/:email', requireAdmin, (req, res) => {
+  const config = loadAuthConfig();
+  const before = config.users.length;
+  config.users = config.users.filter(u => u.email.toLowerCase() !== req.params.email.toLowerCase());
+  if (config.users.length === before) return res.status(404).json({ error: 'User not found' });
+  saveAuthConfig(config);
+  pushLog({ type: 'admin', action: 'delete_user', email: req.adminUser.email, target: req.params.email });
+  res.json({ ok: true });
+});
+
+// GET /api/admin/logs
+app.get('/api/admin/logs', requireAdmin, (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 500, 2000);
+  res.json([...usageLogs].reverse().slice(0, limit));
+});
+
+// GET /api/admin/roles — expose role→modules map to client
+app.get('/api/admin/roles', requireAdmin, (req, res) => {
+  const { roles } = loadAuthConfig();
+  res.json(roles);
+});
 
 // POST /api/auth/verify — exchange Google id_token for app JWT
 app.post('/api/auth/verify', async (req, res) => {
@@ -87,8 +180,10 @@ app.post('/api/auth/verify', async (req, res) => {
     const userConfig = users.find(u => u.email.toLowerCase() === email);
     if (!userConfig) return res.status(403).json({ error: 'Access denied — your email is not authorised.' });
     const modules = resolveModules(userConfig, roles);
-    const user = { email, name: payload.name || userConfig.name, picture: payload.picture, role: userConfig.role, modules };
+    const brands  = userConfig.brands || ['*'];
+    const user = { email, name: payload.name || userConfig.name, picture: payload.picture, role: userConfig.role, modules, brands };
     const token = jwt.sign(user, JWT_SECRET, { expiresIn: '7d' });
+    pushLog({ type: 'login', email, name: user.name });
     res.json({ token, user });
   } catch (err) {
     res.status(401).json({ error: 'Invalid credential: ' + err.message });
@@ -105,7 +200,8 @@ app.get('/api/auth/me', (req, res) => {
     const userConfig = users.find(u => u.email.toLowerCase() === decoded.email);
     if (!userConfig) return res.status(403).json({ error: 'Access revoked' });
     const modules = resolveModules(userConfig, roles);
-    res.json({ email: decoded.email, name: decoded.name, picture: decoded.picture, role: userConfig.role, modules });
+    const brands  = userConfig.brands || ['*'];
+    res.json({ email: decoded.email, name: decoded.name, picture: decoded.picture, role: userConfig.role, modules, brands });
   } catch {
     res.status(401).json({ error: 'Invalid or expired token' });
   }

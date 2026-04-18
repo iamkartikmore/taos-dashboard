@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
   Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck, ClipboardList,
-  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, LogOut,
+  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, LogOut, ShieldCheck,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -37,6 +37,7 @@ const NAV = [
   { to: '/shopify-ops',      icon: Truck,       label: 'Shopify Ops',        group: 'shopify',  moduleKey: 'shopify-ops' },
   { to: '/procurement',      icon: ClipboardList, label: 'Procurement',      group: 'shopify',  moduleKey: 'procurement' },
   { to: '/ga',               icon: Activity,    label: 'GA Analytics',       group: 'shopify',  moduleKey: 'ga' },
+  { to: '/admin',            icon: ShieldCheck, label: 'User Management',    group: 'admin',    moduleKey: 'admin' },
 ];
 
 const GROUP_LABELS = {
@@ -47,14 +48,17 @@ const GROUP_LABELS = {
   advanced: 'AI Intelligence',
   plan:     'Business Plan',
   shopify:  'Commerce & Ops',
+  admin:    'Admin',
 };
 
 export default function Sidebar() {
   const { fetchStatus, lastFetchAt, enrichedRows, brands } = useStore();
   const { user, canAccess, logout } = useAuth();
 
-  // Only show nav items the user has permission for; deduplicate by group
-  const visibleNav = NAV.filter(n => canAccess(n.moduleKey));
+  // Only show nav items the user has permission for; admin group only for role:admin
+  const visibleNav = NAV.filter(n =>
+    n.moduleKey === 'admin' ? user?.role === 'admin' : canAccess(n.moduleKey)
+  );
   const groups = [...new Set(visibleNav.map(n => n.group))];
 
   return (

@@ -29,6 +29,7 @@ const OrderAnalysis      = lazy(() => import('./pages/OrderAnalysis'));
 const CollectionSpend    = lazy(() => import('./pages/CollectionSpend'));
 const AOVAnalysis        = lazy(() => import('./pages/AOVAnalysis'));
 const BusinessPlan       = lazy(() => import('./pages/BusinessPlan'));
+const Admin              = lazy(() => import('./pages/Admin'));
 
 function PageFallback() {
   return (
@@ -57,8 +58,10 @@ function RequireAuth({ children }) {
 
 // Render children only if user can access moduleKey; otherwise show locked message
 function ModuleGuard({ moduleKey, children }) {
-  const { canAccess } = useAuth();
-  if (!canAccess(moduleKey)) {
+  const { canAccess, user } = useAuth();
+  // 'admin' key = only role:admin users
+  const allowed = moduleKey === 'admin' ? user?.role === 'admin' : canAccess(moduleKey);
+  if (!allowed) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-3 text-center">
         <div className="text-5xl select-none">🔒</div>
@@ -151,6 +154,7 @@ export default function App() {
               <Route path="/shopify-ops"      element={M(ShopifyOps,      'shopify-ops')} />
               <Route path="/procurement"      element={M(Procurement,     'procurement')} />
               <Route path="/ga"               element={M(GAInsights,      'ga')} />
+              <Route path="/admin"            element={<ModuleGuard moduleKey="admin"><Admin /></ModuleGuard>} />
               <Route path="*"                 element={<Navigate to="/" replace />} />
             </Route>
           </Routes>

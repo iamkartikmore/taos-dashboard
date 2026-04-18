@@ -3,9 +3,11 @@ import BrandSelector from './BrandSelector';
 import PageErrorBoundary from './PageErrorBoundary';
 import { Outlet, useLocation } from 'react-router-dom';
 import { useAutoLoad } from '../hooks/useAutoLoad';
+import { usePageLog } from '../hooks/usePageLog';
 
 export default function Layout() {
   useAutoLoad();
+  usePageLog();
   const { pathname } = useLocation();
 
   return (

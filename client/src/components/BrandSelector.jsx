@@ -1,18 +1,23 @@
 import { useStore } from '../store';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function BrandSelector() {
   const { brands, activeBrandIds, brandData, toggleBrandActive, setAllBrandsActive, setNoBrandsActive } = useStore();
+  const { canAccessBrand } = useAuth();
 
-  if (!brands || brands.length <= 1) return null;
+  // Filter to brands the logged-in user is allowed to see
+  const allowedBrands = (brands || []).filter(b => canAccessBrand(b.id));
 
-  const allActive  = brands.every(b => activeBrandIds.includes(b.id));
-  const noneActive = brands.every(b => !activeBrandIds.includes(b.id));
+  if (!allowedBrands || allowedBrands.length <= 1) return null;
+
+  const allActive  = allowedBrands.every(b => activeBrandIds.includes(b.id));
+  const noneActive = allowedBrands.every(b => !activeBrandIds.includes(b.id));
 
   return (
     <div className="flex items-center gap-2 px-6 py-2 border-b border-gray-800/60 bg-gray-950/80 backdrop-blur-sm sticky top-0 z-10 flex-wrap">
       <span className="text-[10px] font-bold uppercase tracking-widest text-slate-600 shrink-0">Brands</span>
 
-      {brands.map(brand => {
+      {allowedBrands.map(brand => {
         const active   = activeBrandIds.includes(brand.id);
         const status   = brandData?.[brand.id]?.metaStatus;
         const loading  = active && status === 'loading';
@@ -32,7 +37,6 @@ export default function BrandSelector() {
               color: '#64748b',
             }}
           >
-            {/* Dot: pulse when loading, dim when active but no data */}
             <span
               className={`w-1.5 h-1.5 rounded-full shrink-0 ${loading ? 'animate-pulse' : ''}`}
               style={{ background: active ? (noData ? '#6b7280' : brand.color) : '#374151' }}
