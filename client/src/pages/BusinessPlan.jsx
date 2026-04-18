@@ -1936,10 +1936,22 @@ export default function BusinessPlan() {
   const { brandData, manualMap, brands, activeBrandIds,
     setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders } = useStore();
 
-  const primaryBrandId = activeBrandIds[0] || 'default';
-  const prevBrandId    = useRef(primaryBrandId);
+  // ── viewingBrandId: which brand this page is showing — independent of global selector ──
+  // Defaults to the first brand in brands config (alphabetical order, not activeBrandIds order)
+  const defaultViewId = brands.find(b => activeBrandIds.includes(b.id))?.id || activeBrandIds[0] || 'default';
+  const [viewingBrandId, setViewingBrandId] = useState(defaultViewId);
+  const prevViewId = useRef(viewingBrandId);
 
-  // ── Per-brand data — Business Plan always shows the PRIMARY brand only ──
+  // If active brands change and the viewed brand is no longer active, switch to the first active brand
+  useEffect(() => {
+    if (activeBrandIds.length > 0 && !activeBrandIds.includes(viewingBrandId)) {
+      setViewingBrandId(activeBrandIds[0]);
+    }
+  }, [activeBrandIds, viewingBrandId]);
+
+  const primaryBrandId = viewingBrandId; // alias used throughout
+
+  // ── Per-brand data — strictly isolated to viewingBrandId ──
   const bData        = brandData?.[primaryBrandId] || {};
   const inventoryMap = useMemo(() => bData.inventoryMap || {}, [bData]);
   const shopifyOrders= useMemo(() => bData.orders || [], [bData]);
@@ -1961,18 +1973,18 @@ export default function BusinessPlan() {
   const [pullPeriod, setPullPeriod]        = useState('90d');
 
   const [plan, setPlan] = useState(() => {
-    const b = brands.find(br => br.id === (activeBrandIds[0] || 'default'));
-    return hydrate(lsGet(activeBrandIds[0] || 'default'), b?.name);
+    const b = brands.find(br => br.id === defaultViewId);
+    return hydrate(lsGet(defaultViewId), b?.name);
   });
 
   useEffect(() => {
-    if (primaryBrandId !== prevBrandId.current) {
-      prevBrandId.current = primaryBrandId;
-      const b = brands.find(br => br.id === primaryBrandId);
-      setPlan(hydrate(lsGet(primaryBrandId), b?.name));
+    if (viewingBrandId !== prevViewId.current) {
+      prevViewId.current = viewingBrandId;
+      const b = brands.find(br => br.id === viewingBrandId);
+      setPlan(hydrate(lsGet(viewingBrandId), b?.name));
       setUploadedOrders([]);
     }
-  }, [primaryBrandId, brands]);
+  }, [viewingBrandId, brands]);
 
   const savePlan = useCallback(updates => {
     setPlan(prev => {
@@ -2135,17 +2147,31 @@ export default function BusinessPlan() {
   return (
     <div className="p-6 space-y-5">
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-xl font-bold text-white">
-            {brand?.name || 'TAOS'} — Business Plan
-          </h1>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <div className="flex items-center gap-3 flex-wrap mb-1">
+            <h1 className="text-xl font-bold text-white">Business Plan</h1>
+            {/* Brand switcher — pick which brand's plan to view */}
+            <div className="flex items-center gap-1.5 bg-gray-800/80 rounded-xl p-1 border border-gray-700/40">
+              {brands.filter(b => activeBrandIds.includes(b.id)).map(b => (
+                <button key={b.id} onClick={() => setViewingBrandId(b.id)}
+                  className={clsx('flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap',
+                    viewingBrandId === b.id
+                      ? 'bg-brand-600 text-white shadow shadow-brand-900/50'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-gray-700/60')}>
+                  <span className={clsx('w-2 h-2 rounded-full shrink-0',
+                    viewingBrandId === b.id ? 'bg-white' : 'bg-slate-600')}/>
+                  {b.name}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="text-xs text-slate-500">
             {plan.months[0]?.label} – {plan.months[plan.months.length - 1]?.label} · Live plan vs actual · Predictions · Inventory · Working capital
           </p>
         </div>
         <button onClick={() => { if (confirm('Reset plan to defaults?')) { const seed = hydrate(null, brand?.name); lsSet(primaryBrandId, seed); setPlan(seed); } }}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 text-slate-400 rounded-lg text-xs hover:bg-gray-700 hover:text-slate-300 border border-gray-700">
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 text-slate-400 rounded-lg text-xs hover:bg-gray-700 hover:text-slate-300 border border-gray-700 shrink-0">
           <RefreshCw size={12}/>Reset
         </button>
       </div>
