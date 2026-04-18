@@ -88,6 +88,9 @@ app.post('/api/meta/insights-range', async (req, res) => {
 app.post('/api/shopify/inventory', async (req, res) => {
   const { shop, clientId, clientSecret } = req.body;
   if (!shop || !clientId || !clientSecret) return res.status(400).json({ error: 'shop, clientId and clientSecret required' });
+  const START_MS = Date.now();
+  const BUDGET_MS = 25000; // bail out before Render's 30s hard kill
+  const timeLeft = () => BUDGET_MS - (Date.now() - START_MS);
   try {
     const shopDomain = shop.replace(/\.myshopify\.com$/, '');
     const accessToken = await shopifyToken(shopDomain, clientId, clientSecret);
@@ -155,71 +158,79 @@ app.post('/api/shopify/inventory', async (req, res) => {
       }
     }
 
-    // Step 4: Fetch collections + product memberships
+    // Step 4: Fetch collections + product memberships — skip if budget is low to avoid truncated JSON
     let allCollections = [];
     const productCollections = {}; // productId → [collectionTitle, ...]
-    try {
-      const customColls = [];
-      let ccUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/custom_collections.json?limit=250&fields=id,title,handle`;
-      while (ccUrl) {
-        const r = await withRetry(() => axios.get(ccUrl, { headers, timeout: 20000 }));
-        customColls.push(...(r.data.custom_collections || []));
-        const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
-        ccUrl = m ? m[1] : null;
-      }
+    if (timeLeft() > 8000) {
+      try {
+        const collTimeout = Math.min(timeLeft() - 4000, 18000); // leave 4s for response write
 
-      const smartColls = [];
-      let scUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/smart_collections.json?limit=250&fields=id,title,handle`;
-      while (scUrl) {
-        const r = await withRetry(() => axios.get(scUrl, { headers, timeout: 20000 }));
-        smartColls.push(...(r.data.smart_collections || []));
-        const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
-        scUrl = m ? m[1] : null;
-      }
-
-      allCollections = [
-        ...customColls.map(c => ({ id: String(c.id), title: c.title, handle: c.handle, type: 'custom' })),
-        ...smartColls.map(c => ({ id: String(c.id), title: c.title, handle: c.handle, type: 'smart'  })),
-      ];
-
-      const collById = Object.fromEntries(allCollections.map(c => [c.id, c.title]));
-
-      let collectsUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/collects.json?limit=250&fields=collection_id,product_id`;
-      while (collectsUrl) {
-        const r = await withRetry(() => axios.get(collectsUrl, { headers, timeout: 20000 }));
-        for (const c of (r.data.collects || [])) {
-          const pid   = String(c.product_id);
-          const title = collById[String(c.collection_id)];
-          if (!title) continue;
-          if (!productCollections[pid]) productCollections[pid] = [];
-          if (!productCollections[pid].includes(title)) productCollections[pid].push(title);
+        const customColls = [];
+        let ccUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/custom_collections.json?limit=250&fields=id,title,handle`;
+        while (ccUrl && timeLeft() > 6000) {
+          const r = await withRetry(() => axios.get(ccUrl, { headers, timeout: Math.min(collTimeout, 15000) }));
+          customColls.push(...(r.data.custom_collections || []));
+          const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
+          ccUrl = m ? m[1] : null;
         }
-        const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
-        collectsUrl = m ? m[1] : null;
-      }
 
-      // Batch smart-collection product lookups — 5 at a time to avoid memory spikes
-      const smartToCheck = smartColls.slice(0, 50);
-      const SC_BATCH = 5;
-      for (let i = 0; i < smartToCheck.length; i += SC_BATCH) {
-        await Promise.all(smartToCheck.slice(i, i + SC_BATCH).map(async sc => {
-          try {
-            let spUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/collections/${sc.id}/products.json?limit=250&fields=id`;
-            while (spUrl) {
-              const r = await withRetry(() => axios.get(spUrl, { headers, timeout: 20000 }));
-              for (const p of (r.data.products || [])) {
-                const pid = String(p.id);
-                if (!productCollections[pid]) productCollections[pid] = [];
-                if (!productCollections[pid].includes(sc.title)) productCollections[pid].push(sc.title);
-              }
-              const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
-              spUrl = m ? m[1] : null;
-            }
-          } catch (_) {}
-        }));
+        const smartColls = [];
+        let scUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/smart_collections.json?limit=250&fields=id,title,handle`;
+        while (scUrl && timeLeft() > 6000) {
+          const r = await withRetry(() => axios.get(scUrl, { headers, timeout: Math.min(collTimeout, 15000) }));
+          smartColls.push(...(r.data.smart_collections || []));
+          const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
+          scUrl = m ? m[1] : null;
+        }
+
+        allCollections = [
+          ...customColls.map(c => ({ id: String(c.id), title: c.title, handle: c.handle, type: 'custom' })),
+          ...smartColls.map(c => ({ id: String(c.id), title: c.title, handle: c.handle, type: 'smart'  })),
+        ];
+
+        const collById = Object.fromEntries(allCollections.map(c => [c.id, c.title]));
+
+        let collectsUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/collects.json?limit=250&fields=collection_id,product_id`;
+        while (collectsUrl && timeLeft() > 6000) {
+          const r = await withRetry(() => axios.get(collectsUrl, { headers, timeout: Math.min(collTimeout, 15000) }));
+          for (const c of (r.data.collects || [])) {
+            const pid   = String(c.product_id);
+            const title = collById[String(c.collection_id)];
+            if (!title) continue;
+            if (!productCollections[pid]) productCollections[pid] = [];
+            if (!productCollections[pid].includes(title)) productCollections[pid].push(title);
+          }
+          const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
+          collectsUrl = m ? m[1] : null;
+        }
+
+        // Smart-collection product lookups — only if time allows
+        if (timeLeft() > 7000) {
+          const smartToCheck = smartColls.slice(0, 30); // cap at 30 to stay within budget
+          const SC_BATCH = 5;
+          for (let i = 0; i < smartToCheck.length && timeLeft() > 6000; i += SC_BATCH) {
+            await Promise.all(smartToCheck.slice(i, i + SC_BATCH).map(async sc => {
+              try {
+                let spUrl = `https://${shopDomain}.myshopify.com/admin/api/2024-01/collections/${sc.id}/products.json?limit=250&fields=id`;
+                while (spUrl && timeLeft() > 5000) {
+                  const r = await withRetry(() => axios.get(spUrl, { headers, timeout: 12000 }));
+                  for (const p of (r.data.products || [])) {
+                    const pid = String(p.id);
+                    if (!productCollections[pid]) productCollections[pid] = [];
+                    if (!productCollections[pid].includes(sc.title)) productCollections[pid].push(sc.title);
+                  }
+                  const m = (r.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
+                  spUrl = m ? m[1] : null;
+                }
+              } catch (_) {}
+            }));
+          }
+        }
+      } catch (collErr) {
+        console.warn('[inventory] collections fetch failed (non-fatal):', collErr.message);
       }
-    } catch (collErr) {
-      console.warn('[inventory] collections fetch failed (non-fatal):', collErr.message);
+    } else {
+      console.warn('[inventory] skipping collections — budget exhausted after products+inventory');
     }
 
     // Step 5: Build inventory map server-side — send pre-computed map, NOT raw products.
@@ -247,7 +258,7 @@ app.post('/api/shopify/inventory', async (req, res) => {
       }
     }
 
-    res.json({ map, locations, skuToItemId, collections: allCollections });
+    res.json({ map, locations, skuToItemId, collections: allCollections, elapsedMs: Date.now() - START_MS });
   } catch (err) {
     const status = err.response?.status || 500;
     res.status(status).json({ error: err.response?.data?.errors || err.message });

@@ -2013,48 +2013,78 @@ export default function BusinessPlan() {
 
       const { shop, clientId, clientSecret } = brand.shopify || {};
       if (shop && clientId && clientSecret) {
-        // Inventory
+        // Inventory — retry up to 2 extra times on failure (server has 25s budget; this gives it ~3 attempts)
         setPullLog(prev => [...prev, { msg: `Shopify inventory…`, status: 'loading', ts: ts() }]);
-        try {
-          const { map, locations, skuToItemId, collections } = await fetchShopifyInventory(shop, clientId, clientSecret);
-          setBrandInventory(brand.id, map, locations, null, skuToItemId, collections);
-          setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory: ${Object.keys(map).length} SKUs`, count: Object.keys(map).length, status: 'done', ts: ts() }]);
-        } catch (e) {
-          setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory failed: ${e.message}`, status: 'error', ts: ts() }]);
+        let invDone = false;
+        for (let invAttempt = 0; invAttempt < 3 && !invDone; invAttempt++) {
+          if (invAttempt > 0) {
+            await new Promise(r => setTimeout(r, 3000));
+            setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory retry ${invAttempt}/2…`, status: 'loading', ts: ts() }]);
+          }
+          try {
+            const { map, locations, skuToItemId, collections } = await fetchShopifyInventory(shop, clientId, clientSecret);
+            setBrandInventory(brand.id, map, locations, null, skuToItemId, collections);
+            const skuCount = Object.keys(map).length;
+            setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory: ${skuCount} SKUs${collections?.length ? `, ${collections.length} collections` : ''}`, count: skuCount, status: 'done', ts: ts() }]);
+            invDone = true;
+          } catch (e) {
+            if (invAttempt >= 2) {
+              setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory failed after 3 tries: ${e.message}`, status: 'error', ts: ts() }]);
+            }
+          }
         }
         tick();
 
-        // Orders — chunked to avoid Shopify timeouts on long periods
+        // Orders — chunked with per-chunk retry (up to 2 retries per chunk)
         let allFetched = [];
         if (isChunked) {
           setPullLog(prev => [...prev, { msg: `Orders (${pullPeriod}, ${chunks.length} chunks)…`, status: 'loading', ts: ts() }]);
           let chunkErrors = 0;
           for (let ci = 0; ci < chunks.length; ci++) {
             const [cStart, cEnd] = chunks[ci];
-            setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders chunk ${ci+1}/${chunks.length}…`, status: 'loading', ts: ts() }]);
-            try {
-              const res = await fetchShopifyOrders(shop, clientId, clientSecret, cStart, cEnd);
-              allFetched = [...allFetched, ...(res.orders || [])];
-              tick();
-            } catch (e) {
-              chunkErrors++;
-              setPullLog(prev => [...prev.slice(0, -1), { msg: `Chunk ${ci+1} failed: ${e.message}`, status: 'error', ts: ts() }]);
-              tick();
+            let chunkDone = false;
+            for (let attempt = 0; attempt < 3 && !chunkDone; attempt++) {
+              if (attempt > 0) await new Promise(r => setTimeout(r, 4000 * attempt));
+              setPullLog(prev => [...prev.slice(0, -1), {
+                msg: `Orders chunk ${ci+1}/${chunks.length}${attempt > 0 ? ` (retry ${attempt})` : ''}…`,
+                status: 'loading', ts: ts(),
+              }]);
+              try {
+                const res = await fetchShopifyOrders(shop, clientId, clientSecret, cStart, cEnd);
+                allFetched = [...allFetched, ...(res.orders || [])];
+                chunkDone = true;
+              } catch (e) {
+                if (attempt >= 2) {
+                  chunkErrors++;
+                  setPullLog(prev => [...prev.slice(0, -1), { msg: `Chunk ${ci+1} failed (3 tries): ${e.message}`, status: 'error', ts: ts() }]);
+                }
+              }
             }
+            tick();
           }
           setPullLog(prev => [...prev.slice(0, -1), {
             msg: `Orders: ${allFetched.length} (${pullPeriod}${chunkErrors ? `, ${chunkErrors} chunk errors` : ''})`,
             count: allFetched.length, status: chunkErrors > 0 ? 'error' : 'done', ts: ts(),
           }]);
         } else {
-          // Single chunk (≤ 30d)
+          // Single chunk (≤ 30d) — still retry on failure
+          let singleDone = false;
           setPullLog(prev => [...prev, { msg: `Orders (${pullPeriod})…`, status: 'loading', ts: ts() }]);
-          try {
-            const res = await fetchShopifyOrders(shop, clientId, clientSecret, chunks[0][0], chunks[0][1]);
-            allFetched = res.orders || [];
-            setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders: ${allFetched.length} (${pullPeriod})`, count: allFetched.length, status: 'done', ts: ts() }]);
-          } catch (e) {
-            setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders failed: ${e.message}`, status: 'error', ts: ts() }]);
+          for (let attempt = 0; attempt < 3 && !singleDone; attempt++) {
+            if (attempt > 0) {
+              await new Promise(r => setTimeout(r, 4000 * attempt));
+              setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders retry ${attempt}/2…`, status: 'loading', ts: ts() }]);
+            }
+            try {
+              const res = await fetchShopifyOrders(shop, clientId, clientSecret, chunks[0][0], chunks[0][1]);
+              allFetched = res.orders || [];
+              setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders: ${allFetched.length} (${pullPeriod})`, count: allFetched.length, status: 'done', ts: ts() }]);
+              singleDone = true;
+            } catch (e) {
+              if (attempt >= 2) {
+                setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders failed after 3 tries: ${e.message}`, status: 'error', ts: ts() }]);
+              }
+            }
           }
           tick();
         }
