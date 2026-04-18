@@ -1,0 +1,31 @@
+{
+  "users": [
+    {
+      "email": "kartik@theaffordableorganicstore.com",
+      "name": "Kartik",
+      "role": "admin",
+      "modules": ["*"]
+    }
+  ],
+  "roles": {
+    "admin": ["*"],
+    "marketing": [
+      "overview", "decisions", "boards",
+      "patterns", "scorecard", "video", "sku", "flat", "breakdowns",
+      "creative-intel", "attribution", "momentum", "inactive", "daily",
+      "collection-spend", "aov"
+    ],
+    "commerce": [
+      "overview",
+      "shopify", "shopify-insights", "shopify-ops", "procurement", "ga",
+      "sku", "analysis"
+    ],
+    "analyst": [
+      "overview", "patterns", "scorecard",
+      "analysis", "aov", "collection-spend", "ga", "business-plan"
+    ],
+    "operations": [
+      "overview", "shopify", "shopify-ops", "procurement"
+    ]
+  }
+}

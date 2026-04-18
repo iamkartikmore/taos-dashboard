@@ -1,8 +1,10 @@
 import { lazy, Suspense, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import Layout from './components/Layout';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 
 // Heavy pages — code-split so only the active page's JS is parsed
+const Login           = lazy(() => import('./pages/Login'));
 const Setup          = lazy(() => import('./pages/Setup'));
 const Overview       = lazy(() => import('./pages/Overview'));
 const DecisionQueue  = lazy(() => import('./pages/DecisionQueue'));
@@ -34,6 +36,40 @@ function PageFallback() {
       <div className="w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
     </div>
   );
+}
+
+function FullscreenSpinner() {
+  return (
+    <div className="flex items-center justify-center min-h-screen bg-gray-950">
+      <div className="w-7 h-7 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+    </div>
+  );
+}
+
+// Require the user to be logged in; if not, send to /login preserving intended destination
+function RequireAuth({ children }) {
+  const { user, loading } = useAuth();
+  const location = useLocation();
+  if (loading) return <FullscreenSpinner />;
+  if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
+  return children;
+}
+
+// Render children only if user can access moduleKey; otherwise show locked message
+function ModuleGuard({ moduleKey, children }) {
+  const { canAccess } = useAuth();
+  if (!canAccess(moduleKey)) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-3 text-center">
+        <div className="text-5xl select-none">🔒</div>
+        <p className="text-base font-semibold text-slate-300">Access Restricted</p>
+        <p className="text-sm text-slate-500 max-w-xs">
+          You don't have permission to view this module. Ask an admin to grant access.
+        </p>
+      </div>
+    );
+  }
+  return children;
 }
 
 function PrefetchAllPages() {
@@ -69,44 +105,57 @@ function PrefetchAllPages() {
   return null;
 }
 
+// Helper: wrap a page component with a module access check
+const M = (Component, key) => (
+  <ModuleGuard moduleKey={key}>
+    <Component />
+  </ModuleGuard>
+);
+
 export default function App() {
   return (
-    <BrowserRouter>
-      <PrefetchAllPages />
-      <Suspense fallback={<PageFallback />}>
-        <Routes>
-          <Route element={<Layout />}>
-            <Route path="/"                 element={<Overview />} />
-            <Route path="/setup"            element={<Setup />} />
-            <Route path="/decisions"        element={<DecisionQueue />} />
-            <Route path="/scale"            element={<Board />} />
-            <Route path="/fix"              element={<Board />} />
-            <Route path="/defend"           element={<Board />} />
-            <Route path="/kill"             element={<Board />} />
-            <Route path="/patterns"         element={<Patterns />} />
-            <Route path="/scorecard"        element={<Scorecard />} />
-            <Route path="/video"            element={<VideoInsights />} />
-            <Route path="/sku"              element={<SkuInsights />} />
-            <Route path="/flat"             element={<FlatData />} />
-            <Route path="/breakdowns"       element={<Breakdowns />} />
-            <Route path="/shopify"          element={<ShopifyOrders />} />
-            <Route path="/shopify-insights" element={<ShopifyInsights />} />
-            <Route path="/shopify-ops"      element={<ShopifyOps />} />
-            <Route path="/ga"               element={<GAInsights />} />
-            <Route path="/procurement"      element={<Procurement />} />
-            <Route path="/creative-intel"   element={<CreativeIntel />} />
-            <Route path="/attribution"      element={<Attribution />} />
-            <Route path="/momentum"         element={<Momentum />} />
-            <Route path="/inactive"         element={<InactiveAds />} />
-            <Route path="/daily"            element={<DailyBriefing />} />
-            <Route path="/analysis"           element={<OrderAnalysis />} />
-            <Route path="/collection-spend" element={<CollectionSpend />} />
-            <Route path="/aov"              element={<AOVAnalysis />} />
-            <Route path="/business-plan"    element={<BusinessPlan />} />
-            <Route path="*"                 element={<Navigate to="/" replace />} />
-          </Route>
-        </Routes>
-      </Suspense>
-    </BrowserRouter>
+    <AuthProvider>
+      <BrowserRouter>
+        <PrefetchAllPages />
+        <Suspense fallback={<PageFallback />}>
+          <Routes>
+            {/* Public */}
+            <Route path="/login" element={<Login />} />
+
+            {/* All other routes require auth */}
+            <Route element={<RequireAuth><Layout /></RequireAuth>}>
+              <Route path="/"                 element={M(Overview,        'overview')} />
+              <Route path="/setup"            element={M(Setup,           'setup')} />
+              <Route path="/decisions"        element={M(DecisionQueue,   'decisions')} />
+              <Route path="/scale"            element={M(Board,           'boards')} />
+              <Route path="/fix"              element={M(Board,           'boards')} />
+              <Route path="/defend"           element={M(Board,           'boards')} />
+              <Route path="/kill"             element={M(Board,           'boards')} />
+              <Route path="/patterns"         element={M(Patterns,        'patterns')} />
+              <Route path="/scorecard"        element={M(Scorecard,       'scorecard')} />
+              <Route path="/video"            element={M(VideoInsights,   'video')} />
+              <Route path="/sku"              element={M(SkuInsights,     'sku')} />
+              <Route path="/flat"             element={M(FlatData,        'flat')} />
+              <Route path="/breakdowns"       element={M(Breakdowns,      'breakdowns')} />
+              <Route path="/creative-intel"   element={M(CreativeIntel,   'creative-intel')} />
+              <Route path="/attribution"      element={M(Attribution,     'attribution')} />
+              <Route path="/momentum"         element={M(Momentum,        'momentum')} />
+              <Route path="/inactive"         element={M(InactiveAds,     'inactive')} />
+              <Route path="/daily"            element={M(DailyBriefing,   'daily')} />
+              <Route path="/analysis"         element={M(OrderAnalysis,   'analysis')} />
+              <Route path="/collection-spend" element={M(CollectionSpend, 'collection-spend')} />
+              <Route path="/aov"              element={M(AOVAnalysis,     'aov')} />
+              <Route path="/business-plan"    element={M(BusinessPlan,    'business-plan')} />
+              <Route path="/shopify"          element={M(ShopifyOrders,   'shopify')} />
+              <Route path="/shopify-insights" element={M(ShopifyInsights, 'shopify-insights')} />
+              <Route path="/shopify-ops"      element={M(ShopifyOps,      'shopify-ops')} />
+              <Route path="/procurement"      element={M(Procurement,     'procurement')} />
+              <Route path="/ga"               element={M(GAInsights,      'ga')} />
+              <Route path="*"                 element={<Navigate to="/" replace />} />
+            </Route>
+          </Routes>
+        </Suspense>
+      </BrowserRouter>
+    </AuthProvider>
   );
 }

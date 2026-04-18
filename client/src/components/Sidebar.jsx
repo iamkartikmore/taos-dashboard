@@ -2,39 +2,41 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
   Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck, ClipboardList,
-  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen,
+  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, LogOut,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
+import { useAuth } from '../contexts/AuthContext';
 
+// moduleKey must match a key defined in auth-config.json roles
 const NAV = [
-  { to: '/setup',       icon: Settings,       label: 'Study Manual',      group: 'config' },
-  { to: '/',            icon: LayoutDashboard, label: 'Overview',          group: 'dash',  end: true },
-  { to: '/decisions',   icon: ListChecks,      label: 'Decision Queue',    group: 'dash' },
-  { to: '/scale',       icon: TrendingUp,      label: 'Scale Board',       group: 'boards' },
-  { to: '/fix',         icon: Wrench,          label: 'Fix Board',         group: 'boards' },
-  { to: '/defend',      icon: Shield,          label: 'Defend Board',      group: 'boards' },
-  { to: '/kill',        icon: Skull,           label: 'Kill Board',        group: 'boards' },
-  { to: '/patterns',      icon: Layers,          label: 'Pattern Analysis',   group: 'intel' },
-  { to: '/scorecard',    icon: Trophy,          label: 'Scorecard',          group: 'intel' },
-  { to: '/video',        icon: Play,            label: 'Video Insights',     group: 'intel' },
-  { to: '/sku',          icon: Package,         label: 'SKU Intelligence',   group: 'intel' },
-  { to: '/flat',         icon: Database,        label: 'Raw Flat Data',      group: 'intel' },
-  { to: '/breakdowns',   icon: BarChart2,       label: 'Breakdown Analytics',group: 'intel' },
-  { to: '/creative-intel', icon: Flame,         label: 'Creative Intel',     group: 'advanced' },
-  { to: '/attribution',  icon: GitMerge,        label: 'Attribution',        group: 'advanced' },
-  { to: '/momentum',     icon: TrendingUp,      label: 'Momentum',           group: 'advanced' },
-  { to: '/inactive',     icon: PauseCircle,     label: 'Inactive Ads',       group: 'advanced' },
-  { to: '/daily',        icon: CalendarSearch,  label: 'Daily Briefing',     group: 'advanced' },
-  { to: '/analysis',          icon: LineChart,       label: 'Order Analysis',     group: 'advanced' },
-  { to: '/collection-spend',  icon: BarChart3,       label: 'Collection Spend',   group: 'advanced' },
-  { to: '/aov',               icon: TrendingDown,    label: 'AOV Analysis',       group: 'advanced' },
-  { to: '/business-plan',    icon: BookOpen,    label: 'Business Plan',    group: 'plan' },
-  { to: '/shopify',          icon: ShoppingBag, label: 'Shopify Orders',   group: 'shopify' },
-  { to: '/shopify-insights', icon: BarChart3,   label: 'Shopify Analytics',group: 'shopify' },
-  { to: '/shopify-ops',      icon: Truck,       label: 'Shopify Ops',      group: 'shopify' },
-  { to: '/procurement',      icon: ClipboardList, label: 'Procurement',    group: 'shopify' },
-  { to: '/ga',               icon: Activity,    label: 'GA Analytics',     group: 'shopify' },
+  { to: '/setup',       icon: Settings,       label: 'Study Manual',       group: 'config',   moduleKey: 'setup' },
+  { to: '/',            icon: LayoutDashboard, label: 'Overview',           group: 'dash',     moduleKey: 'overview',  end: true },
+  { to: '/decisions',   icon: ListChecks,      label: 'Decision Queue',     group: 'dash',     moduleKey: 'decisions' },
+  { to: '/scale',       icon: TrendingUp,      label: 'Scale Board',        group: 'boards',   moduleKey: 'boards' },
+  { to: '/fix',         icon: Wrench,          label: 'Fix Board',          group: 'boards',   moduleKey: 'boards' },
+  { to: '/defend',      icon: Shield,          label: 'Defend Board',       group: 'boards',   moduleKey: 'boards' },
+  { to: '/kill',        icon: Skull,           label: 'Kill Board',         group: 'boards',   moduleKey: 'boards' },
+  { to: '/patterns',      icon: Layers,          label: 'Pattern Analysis',   group: 'intel',    moduleKey: 'patterns' },
+  { to: '/scorecard',    icon: Trophy,          label: 'Scorecard',          group: 'intel',    moduleKey: 'scorecard' },
+  { to: '/video',        icon: Play,            label: 'Video Insights',     group: 'intel',    moduleKey: 'video' },
+  { to: '/sku',          icon: Package,         label: 'SKU Intelligence',   group: 'intel',    moduleKey: 'sku' },
+  { to: '/flat',         icon: Database,        label: 'Raw Flat Data',      group: 'intel',    moduleKey: 'flat' },
+  { to: '/breakdowns',   icon: BarChart2,       label: 'Breakdown Analytics',group: 'intel',    moduleKey: 'breakdowns' },
+  { to: '/creative-intel', icon: Flame,         label: 'Creative Intel',     group: 'advanced', moduleKey: 'creative-intel' },
+  { to: '/attribution',  icon: GitMerge,        label: 'Attribution',        group: 'advanced', moduleKey: 'attribution' },
+  { to: '/momentum',     icon: TrendingUp,      label: 'Momentum',           group: 'advanced', moduleKey: 'momentum' },
+  { to: '/inactive',     icon: PauseCircle,     label: 'Inactive Ads',       group: 'advanced', moduleKey: 'inactive' },
+  { to: '/daily',        icon: CalendarSearch,  label: 'Daily Briefing',     group: 'advanced', moduleKey: 'daily' },
+  { to: '/analysis',     icon: LineChart,       label: 'Order Analysis',     group: 'advanced', moduleKey: 'analysis' },
+  { to: '/collection-spend', icon: BarChart3,   label: 'Collection Spend',   group: 'advanced', moduleKey: 'collection-spend' },
+  { to: '/aov',          icon: TrendingDown,    label: 'AOV Analysis',       group: 'advanced', moduleKey: 'aov' },
+  { to: '/business-plan', icon: BookOpen,       label: 'Business Plan',      group: 'plan',     moduleKey: 'business-plan' },
+  { to: '/shopify',          icon: ShoppingBag, label: 'Shopify Orders',     group: 'shopify',  moduleKey: 'shopify' },
+  { to: '/shopify-insights', icon: BarChart3,   label: 'Shopify Analytics',  group: 'shopify',  moduleKey: 'shopify-insights' },
+  { to: '/shopify-ops',      icon: Truck,       label: 'Shopify Ops',        group: 'shopify',  moduleKey: 'shopify-ops' },
+  { to: '/procurement',      icon: ClipboardList, label: 'Procurement',      group: 'shopify',  moduleKey: 'procurement' },
+  { to: '/ga',               icon: Activity,    label: 'GA Analytics',       group: 'shopify',  moduleKey: 'ga' },
 ];
 
 const GROUP_LABELS = {
@@ -49,7 +51,11 @@ const GROUP_LABELS = {
 
 export default function Sidebar() {
   const { fetchStatus, lastFetchAt, enrichedRows, brands } = useStore();
-  const groups = [...new Set(NAV.map(n => n.group))];
+  const { user, canAccess, logout } = useAuth();
+
+  // Only show nav items the user has permission for; deduplicate by group
+  const visibleNav = NAV.filter(n => canAccess(n.moduleKey));
+  const groups = [...new Set(visibleNav.map(n => n.group))];
 
   return (
     <aside className="w-56 shrink-0 flex flex-col bg-gray-950 border-r border-gray-800/60 h-screen sticky top-0 overflow-y-auto">
@@ -101,7 +107,7 @@ export default function Sidebar() {
             <div className="px-2 mb-1 text-[9px] font-bold uppercase tracking-widest text-slate-600">
               {GROUP_LABELS[group]}
             </div>
-            {NAV.filter(n => n.group === group).map(({ to, icon: Icon, label, end }) => (
+            {visibleNav.filter(n => n.group === group).map(({ to, icon: Icon, label, end }) => (
               <NavLink
                 key={to}
                 to={to}
@@ -121,10 +127,34 @@ export default function Sidebar() {
         ))}
       </nav>
 
-      {/* Accounts count */}
+      {/* Brands count */}
       {brands?.length > 0 && (
-        <div className="px-4 py-3 border-t border-gray-800/40 text-[10px] text-slate-600">
+        <div className="px-4 pt-2 text-[10px] text-slate-600">
           {brands.length} brand{brands.length > 1 ? 's' : ''} configured
+        </div>
+      )}
+
+      {/* User info + logout */}
+      {user && (
+        <div className="px-3 py-3 border-t border-gray-800/40 flex items-center gap-2">
+          {user.picture ? (
+            <img src={user.picture} alt={user.name} className="w-7 h-7 rounded-full shrink-0" referrerPolicy="no-referrer" />
+          ) : (
+            <div className="w-7 h-7 rounded-full bg-brand-700 flex items-center justify-center shrink-0">
+              <span className="text-xs font-bold text-white">{user.name?.[0]?.toUpperCase() || '?'}</span>
+            </div>
+          )}
+          <div className="flex-1 min-w-0">
+            <div className="text-xs font-medium text-slate-300 truncate">{user.name}</div>
+            <div className="text-[10px] text-slate-500 capitalize">{user.role}</div>
+          </div>
+          <button
+            onClick={logout}
+            title="Sign out"
+            className="p-1.5 rounded-md text-slate-500 hover:text-red-400 hover:bg-gray-800 transition-colors"
+          >
+            <LogOut size={13} />
+          </button>
         </div>
       )}
     </aside>

@@ -3,6 +3,9 @@ const cors = require('cors');
 const axios = require('axios');
 const path = require('path');
 const compression = require('compression');
+const jwt = require('jsonwebtoken');
+const fs = require('fs');
+const { OAuth2Client } = require('google-auth-library');
 
 const app = express();
 
@@ -52,6 +55,61 @@ async function shopifyToken(shopDomain, clientId, clientSecret) {
   if (!token) throw new Error('Failed to obtain Shopify access token — check client_id / client_secret');
   return token;
 }
+
+/* ─── AUTH ────────────────────────────────────────────────────────── */
+
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-prod';
+const googleAuthClient = new OAuth2Client(GOOGLE_CLIENT_ID);
+
+function loadAuthConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, 'auth-config.json'), 'utf8'));
+  } catch { return { users: [], roles: {} }; }
+}
+
+function resolveModules(userConfig, roles) {
+  return userConfig.modules || roles[userConfig.role] || [];
+}
+
+// POST /api/auth/verify — exchange Google id_token for app JWT
+app.post('/api/auth/verify', async (req, res) => {
+  const { credential } = req.body;
+  if (!credential) return res.status(400).json({ error: 'credential required' });
+  try {
+    const ticket = await googleAuthClient.verifyIdToken({
+      idToken: credential,
+      audience: GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    const email = payload.email?.toLowerCase();
+    const { users, roles } = loadAuthConfig();
+    const userConfig = users.find(u => u.email.toLowerCase() === email);
+    if (!userConfig) return res.status(403).json({ error: 'Access denied — your email is not authorised.' });
+    const modules = resolveModules(userConfig, roles);
+    const user = { email, name: payload.name || userConfig.name, picture: payload.picture, role: userConfig.role, modules };
+    const token = jwt.sign(user, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user });
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid credential: ' + err.message });
+  }
+});
+
+// GET /api/auth/me — validate existing JWT and refresh permissions from config
+app.get('/api/auth/me', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ error: 'Not authenticated' });
+  try {
+    const decoded = jwt.verify(authHeader.slice(7), JWT_SECRET);
+    const { users, roles } = loadAuthConfig();
+    const userConfig = users.find(u => u.email.toLowerCase() === decoded.email);
+    if (!userConfig) return res.status(403).json({ error: 'Access revoked' });
+    const modules = resolveModules(userConfig, roles);
+    res.json({ email: decoded.email, name: decoded.name, picture: decoded.picture, role: userConfig.role, modules });
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' });
+  }
+});
 
 /* ─── META PROXY ──────────────────────────────────────────────────── */
 
