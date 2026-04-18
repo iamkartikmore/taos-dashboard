@@ -152,6 +152,24 @@ export const DEFAULT_PLAN = {
   grossMarginPct:   0.50,
   opsCostPct:       0.12,
 
+  /* ── RTO model inputs ── */
+  codPct:            0.60,
+  rtoRateCOD:        0.28,
+  rtoRatePrepaid:    0.06,
+  forwardShipping:   65,
+  reverseLogistics:  60,
+  restockingCost:    25,
+  damageWriteoff:    20,
+
+  /* ── Contribution stack inputs ── */
+  gatewayFeePct:     0.029,
+  gatewayFeeFixed:   3,
+  pickPackCost:      15,
+  packagingCost:     8,
+
+  /* ── Inventory ── */
+  defaultLeadTimeDays: 45,
+
   collectionAlloc: { plants: 0.35, seeds: 0.20, allMix: 0.45 },
   collectionRoas:  { plants: 4.53, seeds: 3.58, allMix: 4.83 },
 
@@ -1093,4 +1111,669 @@ export function buildDecisionSignals({ plan, months, finPlan, whPlan, opsPlan, p
 
   const rank = {URGENT:0,HIGH:1,MEDIUM:2,LOW:3};
   return signals.sort((a,b)=>(rank[a.priority]||2)-(rank[b.priority]||2));
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PHASE 1 — MOLECULAR ANALYTICS ENGINE
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ──────────────────────────────────────────────────────────────
+   1. THEORY OF CONSTRAINTS — Current Bottleneck Scorer
+   ──────────────────────────────────────────────────────────────
+   Scores 5 constraints (marketing, ops, inventory, capital,
+   logistics) per month. Returns top bottleneck + 5-step plan.
+   ────────────────────────────────────────────────────────────── */
+export function buildCurrentConstraint({ plan, predictions, inventoryNeeds, pva, wc, creative }) {
+  const months = plan?.months || [];
+  if (!months.length) return null;
+
+  const results = months.map((m, i) => {
+    const pred = predictions?.[i] || {};
+    const wcm  = wc?.[i] || {};
+    const ordersDay = m.ordersPerDay || 0;
+    const revenue   = ordersDay * 30 * (m.aov || plan.aov || 340);
+
+    /* ── Score each constraint 0-100 (higher = more constrained) ── */
+
+    // MARKETING: CAC rising, ROAS dropping, or ad budget not keeping up with order targets
+    const requiredRoas  = ordersDay * (m.aov || 340) / (m.adBudgetPerDay || 1);
+    const marketingScore = Math.min(100, Math.max(0,
+      (requiredRoas > 5 ? 80 : requiredRoas > 4 ? 50 : requiredRoas > 3 ? 25 : 10)
+      + (i > 0 && months[i-1].adBudgetPerDay > 0
+          ? Math.max(0, (m.adBudgetPerDay / months[i-1].adBudgetPerDay - 1.25) * 200)
+          : 0)
+    ));
+
+    // OPS: single-shift capacity saturated (assume 1 shift = 1200 orders/day, 2 shifts = 2400)
+    const maxCapacitySingleShift = 1200;
+    const maxCapacityDoubleShift = 2400;
+    let opsScore = 0;
+    if (ordersDay > maxCapacityDoubleShift) opsScore = 90;
+    else if (ordersDay > maxCapacitySingleShift) opsScore = 60 + (ordersDay - maxCapacitySingleShift) / (maxCapacityDoubleShift - maxCapacitySingleShift) * 30;
+    else opsScore = ordersDay / maxCapacitySingleShift * 50;
+
+    // INVENTORY: OOS + critical SKUs weighted by revenue impact
+    const oosCritical = (inventoryNeeds || []).filter(s => s.status === 'oos' || s.status === 'critical').length;
+    const totalSkus   = (inventoryNeeds || []).length || 1;
+    const inventoryScore = Math.min(100, (oosCritical / totalSkus) * 200);
+
+    // CAPITAL: working capital gap as % of required capital
+    const capitalGap = wcm.capitalGap || 0;
+    const capitalNeeded = wcm.capitalNeeded || revenue * 0.35;
+    const capitalScore = Math.min(100, Math.max(0, capitalNeeded > 0 ? (capitalGap / capitalNeeded) * 100 : 0));
+
+    // LOGISTICS: RTO rate proxy — COD share × estimated RTO rate × 100
+    const codPct    = plan.codPct || 0.60;
+    const rtoCOD    = plan.rtoRateCOD || 0.28;
+    const rtoBlended = codPct * rtoCOD + (1 - codPct) * (plan.rtoRatePrepaid || 0.06);
+    const logisticsScore = Math.min(100, rtoBlended * 200);
+
+    const scores = {
+      marketing:  Math.round(marketingScore),
+      ops:        Math.round(opsScore),
+      inventory:  Math.round(inventoryScore),
+      capital:    Math.round(capitalScore),
+      logistics:  Math.round(logisticsScore),
+    };
+
+    const topConstraint = Object.entries(scores).sort((a,b) => b[1]-a[1])[0];
+
+    /* ── Goldratt's 5 Focusing Steps for the top constraint ── */
+    const focusingSteps = {
+      marketing: [
+        'IDENTIFY: Marketing efficiency (ROAS ' + requiredRoas.toFixed(1) + 'x required)',
+        'EXPLOIT: Reallocate budget to best-ROAS collection (All Mix currently leads)',
+        'SUBORDINATE: Pause brand campaigns; all spend → performance',
+        'ELEVATE: Expand Meta + Google audience; launch influencer pipeline',
+        'REASSESS: Monitor for 2 weeks; constraint may shift to ops at scale',
+      ],
+      ops: [
+        'IDENTIFY: Packing throughput at ' + ordersDay + '/day hitting shift ceiling',
+        'EXPLOIT: Optimize pick-path sequence; reduce avg pack time from 6→4 min',
+        'SUBORDINATE: Delay non-critical SKU additions; keep SKU count flat',
+        'ELEVATE: Add second shift by ' + m.label + '; hire 8 packing staff',
+        'REASSESS: Track DPMO and cycle time daily after shift addition',
+      ],
+      inventory: [
+        'IDENTIFY: ' + oosCritical + ' SKUs at OOS/Critical — revenue leaking daily',
+        'EXPLOIT: Prioritise reorder for top-revenue SKUs first',
+        'SUBORDINATE: Reduce promotions on low-stock SKUs immediately',
+        'ELEVATE: Place emergency PO; negotiate 2-week lead time with alternate supplier',
+        'REASSESS: Daily stock count; set alert at 15-day buffer going forward',
+      ],
+      capital: [
+        'IDENTIFY: Capital gap ₹' + fmtK(capitalGap) + ' — inventory + ad advance exceeds cash',
+        'EXPLOIT: Negotiate 30-day credit with top 3 suppliers',
+        'SUBORDINATE: Delay non-essential capex this month',
+        'ELEVATE: Draw on credit line; arrange invoice discounting for COD orders',
+        'REASSESS: Track CCC weekly — target <25 days by Q3',
+      ],
+      logistics: [
+        'IDENTIFY: Blended RTO ' + (rtoBlended*100).toFixed(1) + '% draining ₹' + fmtK(ordersDay*30*rtoBlended*(plan.reverseLogistics||60)) + '/month',
+        'EXPLOIT: Activate NDR management — target 72% rescue rate',
+        'SUBORDINATE: Shift 10% COD customers to prepaid via cashback offer',
+        'ELEVATE: Partner with 3PL for same-day NDR outreach automation',
+        'REASSESS: Track COD-to-prepaid ratio weekly; target <45% COD',
+      ],
+    };
+
+    return {
+      month: m.label,
+      key:   m.key,
+      ordersPerDay: ordersDay,
+      scores,
+      topConstraint: topConstraint[0],
+      topScore: topConstraint[1],
+      focusingSteps: focusingSteps[topConstraint[0]],
+      allScoresSorted: Object.entries(scores).sort((a,b)=>b[1]-a[1]),
+    };
+  });
+
+  return results;
+}
+
+/* ──────────────────────────────────────────────────────────────
+   2. BREAKING POINTS ENGINE — Cascade Action-By Date Timeline
+   ──────────────────────────────────────────────────────────────
+   For each department, returns the exact date (or month) at
+   which the current setup breaks, and the action needed before.
+   ────────────────────────────────────────────────────────────── */
+export function buildBreakingPoints({ plan, predictions, inventoryNeeds, pva, opsPlan, whPlan }) {
+  const months = plan?.months || [];
+  const breakpoints = [];
+
+  /* ── OPS: Single-shift capacity break ── */
+  const singleShiftMax = 1200;
+  const doubleShiftMax = 2400;
+  const shift2Month = months.find(m => m.ordersPerDay > singleShiftMax);
+  const shift3Month = months.find(m => m.ordersPerDay > doubleShiftMax);
+
+  if (shift2Month) {
+    const daysIntoMonth = Math.ceil((singleShiftMax / shift2Month.ordersPerDay) * 30);
+    breakpoints.push({
+      dept: 'Operations',
+      icon: '🏭',
+      severity: 'CRITICAL',
+      breakMonth: shift2Month.key,
+      breakLabel: shift2Month.label,
+      daysBuffer: daysIntoMonth,
+      actionByDate: shift2Month.key,
+      title: 'Single-shift packing capacity exhausted',
+      detail: `Orders reach ${shift2Month.ordersPerDay}/day — single shift handles ~${singleShiftMax}/day. Packing backlog starts.`,
+      action: 'Hire 8 packers + 2 supervisors. Start training 3 weeks prior.',
+      leadTimeDays: 21,
+    });
+  }
+
+  if (shift3Month) {
+    breakpoints.push({
+      dept: 'Operations',
+      icon: '🏭',
+      severity: 'HIGH',
+      breakMonth: shift3Month.key,
+      breakLabel: shift3Month.label,
+      daysBuffer: 0,
+      actionByDate: shift3Month.key,
+      title: 'Double-shift capacity exhausted — 3rd shift or new warehouse needed',
+      detail: `Orders reach ${shift3Month.ordersPerDay}/day — 2 shifts handle ~${doubleShiftMax}/day.`,
+      action: 'Activate Hyderabad WH or lease 3rd Pune facility. 45-day lead.',
+      leadTimeDays: 45,
+    });
+  }
+
+  /* ── INVENTORY: OOS / Critical SKUs ── */
+  const oosSkus = (inventoryNeeds || []).filter(s => s.status === 'oos' || s.status === 'critical');
+  oosSkus.slice(0, 5).forEach(sku => {
+    breakpoints.push({
+      dept: 'Inventory',
+      icon: '📦',
+      severity: sku.status === 'oos' ? 'CRITICAL' : 'HIGH',
+      breakMonth: sku.stockoutDate || 'Imminent',
+      breakLabel: sku.stockoutDate || 'Imminent',
+      daysBuffer: sku.daysOfStock || 0,
+      actionByDate: 'Place PO now',
+      title: `${sku.name} — ${sku.status === 'oos' ? 'OUT OF STOCK' : 'Critical: ' + (sku.daysOfStock || 0) + ' days left'}`,
+      detail: `At current velocity, stockout in ${sku.daysOfStock || 0} days. Revenue impact: ₹${fmtK((sku.velocity || 0) * (sku.aov || plan.aov || 340) * Math.max(0, 45 - (sku.daysOfStock || 0)))} over 45-day risk window.`,
+      action: 'Emergency reorder. MOQ negotiation with supplier for faster turnaround.',
+      leadTimeDays: plan.defaultLeadTimeDays || 45,
+    });
+  });
+
+  /* ── CAPITAL: Working capital gap months ── */
+  if (pva) {
+    pva.forEach((m, i) => {
+      const revenue = m.revenue || 0;
+      const capitalNeeded = revenue * 0.35;
+      const grossProfit   = revenue * (plan.grossMarginPct || 0.50);
+      if (capitalNeeded > grossProfit * 1.5) {
+        breakpoints.push({
+          dept: 'Capital',
+          icon: '💰',
+          severity: capitalNeeded > grossProfit * 2 ? 'CRITICAL' : 'HIGH',
+          breakMonth: m.key || m.label,
+          breakLabel: m.label,
+          daysBuffer: 30,
+          actionByDate: `2 weeks before ${m.label}`,
+          title: `Capital gap: ${fmtRs(capitalNeeded - grossProfit)} unfunded in ${m.label}`,
+          detail: `Need ${fmtRs(capitalNeeded)} for inventory + ad advance. Gross profit only ${fmtRs(grossProfit)}.`,
+          action: 'Arrange credit line or supplier credit 30 days before month start.',
+          leadTimeDays: 30,
+        });
+      }
+    });
+  }
+
+  /* ── MARKETING: ROAS stress points ── */
+  months.forEach((m, i) => {
+    const requiredRoas = m.ordersPerDay * (m.aov || plan.aov || 340) / ((m.adBudgetPerDay || 1));
+    if (requiredRoas > 5.5) {
+      breakpoints.push({
+        dept: 'Marketing',
+        icon: '📣',
+        severity: 'HIGH',
+        breakMonth: m.key,
+        breakLabel: m.label,
+        daysBuffer: 14,
+        actionByDate: `Start of ${m.label}`,
+        title: `ROAS target ${requiredRoas.toFixed(1)}x — above sustainable ceiling in ${m.label}`,
+        detail: `Budget ₹${fmtK(m.adBudgetPerDay * 30)}/month must yield ${requiredRoas.toFixed(1)}x to hit order targets. Meta avg ROAS ceiling ~5-5.5x.`,
+        action: 'Increase ad budget 15-20% OR reduce order target. Add new channels (Google Shopping, Affiliate).',
+        leadTimeDays: 14,
+      });
+    }
+  });
+
+  /* ── LOGISTICS: RTO cost break ── */
+  const blendedRTO = (plan.codPct || 0.60) * (plan.rtoRateCOD || 0.28) + (1 - (plan.codPct || 0.60)) * (plan.rtoRatePrepaid || 0.06);
+  const rtoFullCost = (plan.forwardShipping || 65) + (plan.reverseLogistics || 60) + (plan.restockingCost || 25) + (plan.damageWriteoff || 20);
+  months.forEach((m) => {
+    const dailyRTOCost = m.ordersPerDay * blendedRTO * rtoFullCost;
+    if (dailyRTOCost > 50000) {
+      breakpoints.push({
+        dept: 'Logistics',
+        icon: '🚚',
+        severity: dailyRTOCost > 100000 ? 'CRITICAL' : 'HIGH',
+        breakMonth: m.key,
+        breakLabel: m.label,
+        daysBuffer: 0,
+        actionByDate: `Before ${m.label}`,
+        title: `RTO cost ₹${fmtK(dailyRTOCost)}/day — logistics margin erosion in ${m.label}`,
+        detail: `${m.ordersPerDay}/day × ${(blendedRTO*100).toFixed(0)}% RTO × ₹${rtoFullCost}/RTO = ₹${fmtK(dailyRTOCost * 30)}/month drain.`,
+        action: 'Activate NDR automation. Target COD < 45%. Introduce prepaid cashback.',
+        leadTimeDays: 14,
+      });
+    }
+  });
+
+  /* ── WAREHOUSE: Capacity break ── */
+  const warehouses = plan.warehouses || [];
+  const activeCapacity = warehouses.filter(w => w.active).reduce((s, w) => s + (w.capacity || 0), 0);
+  const capacityBreakMonth = months.find(m => {
+    const estSkuCount = 200 + Math.floor(m.ordersPerDay / 10);
+    return estSkuCount > activeCapacity * 0.85;
+  });
+  if (capacityBreakMonth) {
+    breakpoints.push({
+      dept: 'Warehouse',
+      icon: '🏢',
+      severity: 'HIGH',
+      breakMonth: capacityBreakMonth.key,
+      breakLabel: capacityBreakMonth.label,
+      daysBuffer: 60,
+      actionByDate: `60 days before ${capacityBreakMonth.label}`,
+      title: `Warehouse capacity at 85% threshold in ${capacityBreakMonth.label}`,
+      detail: `Active capacity: ${activeCapacity} units. At ${capacityBreakMonth.ordersPerDay}/day, buffer margin drops below safe operating level.`,
+      action: 'Activate Hyderabad hub or expand Pune WH2. 60-day lead for fit-out.',
+      leadTimeDays: 60,
+    });
+  }
+
+  const severityRank = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+  return breakpoints.sort((a,b) => (severityRank[a.severity]||3) - (severityRank[b.severity]||3));
+}
+
+/* ──────────────────────────────────────────────────────────────
+   3. RTO MODEL — India D2C COD/Prepaid + NDR Funnel
+   ──────────────────────────────────────────────────────────────
+   Full cost model: forward + reverse + restock + damage +
+   margin loss. NDR funnel: 35% get NDR, 72% rescued.
+   ────────────────────────────────────────────────────────────── */
+export function buildRTOModel({ plan, predictions }) {
+  const months = plan?.months || [];
+  const {
+    codPct        = 0.60,
+    rtoRateCOD    = 0.28,
+    rtoRatePrepaid= 0.06,
+    forwardShipping  = 65,
+    reverseLogistics = 60,
+    restockingCost   = 25,
+    damageWriteoff   = 20,
+    aov: planAov     = 340,
+    grossMarginPct   = 0.50,
+  } = plan || {};
+
+  // NDR funnel constants (India D2C industry benchmarks)
+  const ndrRate       = 0.35;  // 35% of all orders get NDR
+  const ndrRescueRate = 0.72;  // 72% rescued with active NDR management
+  const unmanagedRTORateCOD = rtoRateCOD;            // 28% unmanaged
+  const managedRTORateCOD   = rtoRateCOD * (1 - ndrRate * ndrRescueRate); // ~18%
+
+  const rtoFullCostPerOrder = forwardShipping + reverseLogistics + restockingCost + damageWriteoff;
+  const marginLossPerRTO    = (planAov * grossMarginPct) * 0.05; // 5% margin lost on returned item handling
+
+  const monthly = months.map(m => {
+    const aov         = m.aov || planAov;
+    const totalOrders = m.ordersPerDay * 30;
+    const codOrders   = totalOrders * codPct;
+    const prepOrders  = totalOrders * (1 - codPct);
+
+    // Unmanaged scenario
+    const rtoUnmanaged = codOrders * unmanagedRTORateCOD + prepOrders * rtoRatePrepaid;
+    const costUnmanaged = rtoUnmanaged * (rtoFullCostPerOrder + marginLossPerRTO);
+
+    // Managed scenario (NDR active)
+    const rtoManaged = codOrders * managedRTORateCOD + prepOrders * rtoRatePrepaid;
+    const costManaged = rtoManaged * (rtoFullCostPerOrder + marginLossPerRTO);
+
+    const blendedRTOPctUnmanaged = rtoUnmanaged / totalOrders;
+    const blendedRTOPctManaged   = rtoManaged / totalOrders;
+
+    const ndrOrders   = totalOrders * ndrRate;
+    const ndrRescued  = ndrOrders * ndrRescueRate;
+    const savingsFromNDR = costUnmanaged - costManaged;
+
+    return {
+      month: m.label,
+      key:   m.key,
+      totalOrders,
+      codOrders:  Math.round(codOrders),
+      prepOrders: Math.round(prepOrders),
+      codPct,
+      rtoUnmanagedOrders: Math.round(rtoUnmanaged),
+      rtoManagedOrders:   Math.round(rtoManaged),
+      blendedRTOPctUnmanaged: +(blendedRTOPctUnmanaged * 100).toFixed(1),
+      blendedRTOPctManaged:   +(blendedRTOPctManaged * 100).toFixed(1),
+      costUnmanaged:   Math.round(costUnmanaged),
+      costManaged:     Math.round(costManaged),
+      savingsFromNDR:  Math.round(savingsFromNDR),
+      dailyCostUnmanaged: Math.round(costUnmanaged / 30),
+      dailyCostManaged:   Math.round(costManaged / 30),
+      ndrOrders:    Math.round(ndrOrders),
+      ndrRescued:   Math.round(ndrRescued),
+      rtoFullCostPerOrder: Math.round(rtoFullCostPerOrder + marginLossPerRTO),
+    };
+  });
+
+  const totalSavings = monthly.reduce((s, m) => s + m.savingsFromNDR, 0);
+  const totalCostUnmanaged = monthly.reduce((s, m) => s + m.costUnmanaged, 0);
+  const totalCostManaged   = monthly.reduce((s, m) => s + m.costManaged, 0);
+
+  return {
+    monthly,
+    summary: {
+      totalCostUnmanaged,
+      totalCostManaged,
+      totalSavings,
+      annualSavingsFromNDR: totalSavings,
+      blendedRTOUnmanaged: +(monthly.reduce((s,m)=>s+m.blendedRTOPctUnmanaged,0)/monthly.length).toFixed(1),
+      blendedRTOManaged:   +(monthly.reduce((s,m)=>s+m.blendedRTOPctManaged,0)/monthly.length).toFixed(1),
+      ndrRescueRate: ndrRescueRate * 100,
+      rtoFullCostPerOrder: Math.round(rtoFullCostPerOrder + marginLossPerRTO),
+    },
+    inputs: { codPct, rtoRateCOD, rtoRatePrepaid, ndrRate, ndrRescueRate, forwardShipping, reverseLogistics, restockingCost, damageWriteoff },
+  };
+}
+
+/* ──────────────────────────────────────────────────────────────
+   4. CONTRIBUTION STACK — CM1 / CM2 / CM3 per Month per Collection
+   ──────────────────────────────────────────────────────────────
+   CM1 = Revenue - COGS
+   CM2 = CM1 - Shipping - Gateway - PickPack - Packaging
+   CM3 = CM2 - CAC - RTO cost allocation
+   ────────────────────────────────────────────────────────────── */
+export function buildContributionStack({ plan, pva }) {
+  const months = plan?.months || [];
+  const {
+    grossMarginPct  = 0.50,
+    gatewayFeePct   = 0.029,
+    gatewayFeeFixed = 3,
+    forwardShipping = 65,
+    pickPackCost    = 15,
+    packagingCost   = 8,
+    codPct          = 0.60,
+    rtoRateCOD      = 0.28,
+    rtoRatePrepaid  = 0.06,
+    reverseLogistics= 60,
+    restockingCost  = 25,
+    damageWriteoff  = 20,
+    cpr             = 55,
+    collectionAlloc = { plants: 0.35, seeds: 0.20, allMix: 0.45 },
+    collectionRoas  = { plants: 4.53, seeds: 3.58, allMix: 4.83 },
+    aov: planAov    = 340,
+  } = plan || {};
+
+  const blendedRTO = codPct * rtoRateCOD + (1 - codPct) * rtoRatePrepaid;
+  const rtoFullCost = forwardShipping + reverseLogistics + restockingCost + damageWriteoff;
+
+  const collections = ['plants', 'seeds', 'allMix'];
+  const collLabel   = { plants: 'Plants', seeds: 'Seeds', allMix: 'All Mix' };
+
+  const monthly = months.map(m => {
+    const aov         = m.aov || planAov;
+    const totalOrders = m.ordersPerDay * 30;
+    const totalRev    = totalOrders * aov;
+    const adBudget    = m.adBudgetPerDay * 30;
+
+    const collectionData = collections.map(coll => {
+      const allocPct = (collectionAlloc[coll] || 0);
+      const roas     = (collectionRoas[coll]  || 4);
+      const orders   = totalOrders * allocPct;
+      const revenue  = orders * aov;
+      const cogs     = revenue * (1 - grossMarginPct);
+
+      // CM1
+      const cm1 = revenue - cogs;
+      const cm1Pct = revenue > 0 ? cm1 / revenue : 0;
+
+      // CM2 deductions per order
+      const shippingTotal  = orders * forwardShipping;
+      const gatewayTotal   = orders * (aov * gatewayFeePct + gatewayFeeFixed);
+      const pickPackTotal  = orders * pickPackCost;
+      const packagingTotal = orders * packagingCost;
+      const cm2 = cm1 - shippingTotal - gatewayTotal - pickPackTotal - packagingTotal;
+      const cm2Pct = revenue > 0 ? cm2 / revenue : 0;
+
+      // CM3 deductions: CAC + RTO
+      const collAdBudget = adBudget * allocPct;
+      const cac = orders > 0 ? collAdBudget / orders : cpr;
+      const rtoCost = orders * blendedRTO * rtoFullCost;
+      const cacTotal = collAdBudget;
+      const cm3 = cm2 - cacTotal - rtoCost;
+      const cm3Pct = revenue > 0 ? cm3 / revenue : 0;
+
+      return {
+        collection: coll,
+        label: collLabel[coll],
+        orders:    Math.round(orders),
+        revenue:   Math.round(revenue),
+        cogs:      Math.round(cogs),
+        cm1:       Math.round(cm1),       cm1Pct: +(cm1Pct*100).toFixed(1),
+        shippingTotal: Math.round(shippingTotal),
+        gatewayTotal:  Math.round(gatewayTotal),
+        pickPackTotal: Math.round(pickPackTotal),
+        packagingTotal:Math.round(packagingTotal),
+        cm2:       Math.round(cm2),       cm2Pct: +(cm2Pct*100).toFixed(1),
+        cacTotal:  Math.round(cacTotal),
+        cac:       Math.round(cac),
+        rtoCost:   Math.round(rtoCost),
+        cm3:       Math.round(cm3),       cm3Pct: +(cm3Pct*100).toFixed(1),
+      };
+    });
+
+    const totCm1 = collectionData.reduce((s,c)=>s+c.cm1,0);
+    const totCm2 = collectionData.reduce((s,c)=>s+c.cm2,0);
+    const totCm3 = collectionData.reduce((s,c)=>s+c.cm3,0);
+
+    return {
+      month:  m.label,
+      key:    m.key,
+      totalOrders,
+      totalRevenue: Math.round(totalRev),
+      collections:  collectionData,
+      totals: {
+        cm1: totCm1, cm1Pct: +(totCm1/totalRev*100).toFixed(1),
+        cm2: totCm2, cm2Pct: +(totCm2/totalRev*100).toFixed(1),
+        cm3: totCm3, cm3Pct: +(totCm3/totalRev*100).toFixed(1),
+      },
+    };
+  });
+
+  return monthly;
+}
+
+/* ──────────────────────────────────────────────────────────────
+   5. BCG MATRIX — Collection Quadrant (Internal Portfolio)
+   ──────────────────────────────────────────────────────────────
+   X-axis: revenue share (market share proxy)
+   Y-axis: MoM revenue growth rate
+   Quadrants split at medians. Labels: Star/Cash Cow/Question Mark/Dog
+   ────────────────────────────────────────────────────────────── */
+export function buildBCGMatrix({ plan, allOrders, enrichedRows }) {
+  const months = plan?.months || [];
+  const collectionAlloc = plan?.collectionAlloc || { plants: 0.35, seeds: 0.20, allMix: 0.45 };
+  const collectionRoas  = plan?.collectionRoas  || { plants: 4.53, seeds: 3.58, allMix: 4.83 };
+  const aov = plan?.aov || 340;
+  const collections = ['plants', 'seeds', 'allMix'];
+  const collLabel   = { plants: 'Plants', seeds: 'Seeds', allMix: 'All Mix' };
+  const COLL_COLORS = { plants: '#22c55e', seeds: '#f59e0b', allMix: '#818cf8' };
+
+  // Build monthly revenue per collection
+  const collMonthly = {};
+  collections.forEach(c => { collMonthly[c] = []; });
+
+  months.forEach(m => {
+    const totalRev = m.ordersPerDay * 30 * (m.aov || aov);
+    collections.forEach(c => {
+      collMonthly[c].push(totalRev * (collectionAlloc[c] || 0));
+    });
+  });
+
+  // Current snapshot: last month
+  const lastIdx = months.length - 1;
+  const prevIdx = Math.max(0, lastIdx - 1);
+  const totalRevLast = collections.reduce((s, c) => s + (collMonthly[c][lastIdx] || 0), 0);
+
+  const points = collections.map(c => {
+    const revLast = collMonthly[c][lastIdx] || 0;
+    const revPrev = collMonthly[c][prevIdx] || 0;
+    const shareX  = totalRevLast > 0 ? revLast / totalRevLast : 0;
+    const growthY = revPrev > 0 ? (revLast - revPrev) / revPrev : 0;
+
+    // Monthly growth trajectory (all months)
+    const growthSeries = collMonthly[c].map((rev, i) => {
+      if (i === 0) return 0;
+      const prev = collMonthly[c][i-1] || 0;
+      return prev > 0 ? (rev - prev) / prev : 0;
+    });
+
+    return {
+      collection: c,
+      label:      collLabel[c],
+      color:      COLL_COLORS[c],
+      shareX:     +(shareX * 100).toFixed(1),      // % of total revenue
+      growthY:    +(growthY * 100).toFixed(1),      // % MoM growth
+      roas:       collectionRoas[c] || 4,
+      alloc:      +(( collectionAlloc[c] || 0) * 100).toFixed(0),
+      growthSeries,
+      revLast:    Math.round(revLast),
+    };
+  });
+
+  // Median split for quadrant boundaries
+  const shares  = points.map(p => p.shareX).sort((a,b)=>a-b);
+  const growths = points.map(p => p.growthY).sort((a,b)=>a-b);
+  const medianShare  = shares[Math.floor(shares.length / 2)];
+  const medianGrowth = growths[Math.floor(growths.length / 2)];
+
+  const quadrantOf = (p) => {
+    const highShare  = p.shareX  >= medianShare;
+    const highGrowth = p.growthY >= medianGrowth;
+    if (highShare && highGrowth)   return { name: 'Star',          icon: '⭐', color: '#22c55e', action: 'Invest aggressively — double ad budget, expand SKUs' };
+    if (highShare && !highGrowth)  return { name: 'Cash Cow',      icon: '🐄', color: '#f59e0b', action: 'Milk margins — reduce CAC, maintain SKU depth' };
+    if (!highShare && highGrowth)  return { name: 'Question Mark', icon: '❓', color: '#818cf8', action: 'Selective invest — test 2x budget for 60 days; if ROAS holds → Star' };
+    return                                 { name: 'Dog',           icon: '🐕', color: '#ef4444', action: 'Harvest or drop — minimal ad spend, clear inventory' };
+  };
+
+  const matrix = points.map(p => ({
+    ...p,
+    quadrant: quadrantOf(p),
+  }));
+
+  // Strategic recommendations based on quadrant
+  const recommendations = matrix.map(m => ({
+    collection: m.label,
+    quadrant:   m.quadrant.name,
+    icon:       m.quadrant.icon,
+    color:      m.quadrant.color,
+    action:     m.quadrant.action,
+    budgetSignal: m.quadrant.name === 'Star' ? '+30% budget'
+                : m.quadrant.name === 'Cash Cow' ? 'Maintain'
+                : m.quadrant.name === 'Question Mark' ? 'Test +20%'
+                : '-50% budget',
+  }));
+
+  return {
+    matrix,
+    medianShare,
+    medianGrowth,
+    recommendations,
+    axisLabels: { x: 'Revenue Share (%)', y: 'MoM Growth Rate (%)' },
+  };
+}
+
+/* ──────────────────────────────────────────────────────────────
+   6. GROWTH-ADJUSTED INVENTORY — Quadratic Safety Stock + ROP
+   ──────────────────────────────────────────────────────────────
+   Standard stock/velocity wrong for accelerating demand.
+   Uses: effectiveDays = (-v + √(v²+2g×S)) / g
+   Safety stock adds acceleration term: (g × LT²) / 2
+   ────────────────────────────────────────────────────────────── */
+export function buildGrowthAdjustedInventory({ inventoryMap, allOrders, monthlyGrowthRate = 0.20 }) {
+  if (!inventoryMap || !inventoryMap.length) return [];
+
+  const g = monthlyGrowthRate / 30; // daily acceleration (orders/day/day)
+  const LT = 45;                    // lead time days (default — overridden per SKU if available)
+  const Z  = 1.65;                  // 95% service level
+
+  return inventoryMap.map(sku => {
+    const stock = sku.stock || 0;
+    const vel   = sku.velocity || 0;      // orders per day currently
+    const lt    = sku.leadTimeDays || LT;
+    const sigma = sku.demandStdDev || vel * 0.25; // fallback: 25% CV
+
+    // Effective days of stock (quadratic correction for accelerating demand)
+    let effectiveDays;
+    if (g > 0 && vel > 0) {
+      const discriminant = vel * vel + 2 * g * stock;
+      effectiveDays = discriminant >= 0
+        ? (-vel + Math.sqrt(discriminant)) / g
+        : 999;
+    } else if (vel > 0) {
+      effectiveDays = stock / vel;
+    } else {
+      effectiveDays = 999;
+    }
+    effectiveDays = Math.max(0, Math.round(effectiveDays));
+
+    // Naive days (what most dashboards show — always overstates)
+    const naiveDays = vel > 0 ? Math.round(stock / vel) : 999;
+
+    // Growth-adjusted safety stock
+    const safetyStock = Math.ceil(Z * sigma * Math.sqrt(lt) + (g * lt * lt) / 2);
+
+    // Reorder point
+    const rop = Math.ceil(vel * lt + (g * lt * lt) / 2 + safetyStock);
+
+    // Stockout date (from today, using effective days)
+    const today = new Date();
+    const stockoutDate = new Date(today);
+    stockoutDate.setDate(today.getDate() + effectiveDays);
+
+    // Order-by date: must place order `lt` days before stockout to arrive on time
+    const orderByDate = new Date(stockoutDate);
+    orderByDate.setDate(stockoutDate.getDate() - lt);
+
+    // Urgency: days until order-by date
+    const daysToOrderBy = Math.round((orderByDate - today) / (1000 * 60 * 60 * 24));
+
+    // Status
+    let status;
+    if (stock <= 0)               status = 'oos';
+    else if (effectiveDays <= 7)  status = 'critical';
+    else if (effectiveDays <= 14) status = 'low';
+    else if (stock <= rop)        status = 'reorder';
+    else                          status = 'ok';
+
+    // Recommended order quantity: 60-day forward coverage at accelerating velocity
+    const vel60 = vel + g * 30; // velocity at midpoint of 60-day window
+    const recommendedQty = Math.ceil(vel60 * 60 + safetyStock - stock);
+
+    return {
+      ...sku,
+      effectiveDays,
+      naiveDays,
+      overstatedDays: naiveDays - effectiveDays,
+      safetyStock,
+      rop,
+      stockoutDate:   stockoutDate.toISOString().slice(0, 10),
+      orderByDate:    orderByDate.toISOString().slice(0, 10),
+      daysToOrderBy,
+      recommendedQty: Math.max(0, recommendedQty),
+      status,
+      urgency: daysToOrderBy <= 0  ? 'OVERDUE'
+             : daysToOrderBy <= 7  ? 'URGENT'
+             : daysToOrderBy <= 14 ? 'SOON'
+             : 'OK',
+    };
+  });
 }

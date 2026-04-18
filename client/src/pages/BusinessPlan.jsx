@@ -15,6 +15,8 @@ import {
   DEFAULT_PLAN, buildPlanVsActual, buildWeeklyBreakdown,
   buildMarketingNeeds, buildInventoryNeeds, buildWorkingCapital,
   buildPredictions, parseOrdersCsv, fmtRs, fmtK,
+  buildCurrentConstraint, buildBreakingPoints, buildRTOModel,
+  buildContributionStack, buildBCGMatrix, buildGrowthAdjustedInventory,
 } from '../lib/businessPlanAnalytics';
 
 /* ─── BRAND-AWARE STORAGE ────────────────────────────────────────────── */
@@ -104,7 +106,7 @@ function ChartTip({ active, payload, label }) {
 }
 
 /* ─── TAB: COMMAND CENTER ─────────────────────────────────────────────── */
-function TabCommand({ plan, pva, predictions, allOrders }) {
+function TabCommand({ plan, pva, predictions, allOrders, constraint, breaking, bcgMatrix }) {
   const now = new Date();
   const currentKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   const current = pva.find(m => m.key === currentKey);
@@ -264,6 +266,100 @@ function TabCommand({ plan, pva, predictions, allOrders }) {
         <div className="bg-amber-900/20 border border-amber-800/40 rounded-xl p-4 text-xs text-amber-300">
           <AlertTriangle size={13} className="inline mr-1.5"/>
           No Shopify orders loaded — pull live data above or fetch orders from Setup page.
+        </div>
+      )}
+
+      {/* Theory of Constraints — Current Bottleneck */}
+      {constraint?.length > 0 && (() => {
+        const now = new Date();
+        const currentKey = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+        const cur = constraint.find(c => c.key === currentKey) || constraint[0];
+        const DEPT_COLORS = { marketing: '#f59e0b', ops: '#818cf8', inventory: '#ef4444', capital: '#06b6d4', logistics: '#f97316' };
+        return (
+          <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-xs font-bold text-slate-300">Theory of Constraints — {cur.month}</div>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-800/30 font-bold">
+                BOTTLENECK: {cur.topConstraint.toUpperCase()} ({cur.topScore})
+              </span>
+            </div>
+            <div className="grid grid-cols-5 gap-2 mb-4">
+              {cur.allScoresSorted.map(([dept, score]) => (
+                <div key={dept} className="text-center">
+                  <div className="text-[9px] text-slate-500 uppercase mb-1">{dept}</div>
+                  <div className="h-16 bg-gray-800/60 rounded-lg flex items-end overflow-hidden">
+                    <div className="w-full rounded-b-lg transition-all"
+                      style={{ height: `${score}%`, background: DEPT_COLORS[dept] || '#64748b', opacity: dept === cur.topConstraint ? 1 : 0.45 }}/>
+                  </div>
+                  <div className="text-[10px] font-bold mt-1" style={{ color: DEPT_COLORS[dept] }}>{score}</div>
+                </div>
+              ))}
+            </div>
+            <div className="bg-gray-800/40 rounded-lg p-3">
+              <div className="text-[10px] text-slate-500 mb-2 font-bold">5 Focusing Steps</div>
+              <div className="space-y-1">
+                {cur.focusingSteps.map((step, i) => (
+                  <div key={i} className="flex items-start gap-2 text-[10px]">
+                    <span className="text-brand-400 font-bold shrink-0">{i+1}.</span>
+                    <span className="text-slate-300">{step}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Breaking Points Timeline */}
+      {breaking?.length > 0 && (
+        <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-4">
+          <div className="text-xs font-bold text-slate-300 mb-3">Breaking Points Engine — Action Timeline</div>
+          <div className="space-y-2">
+            {breaking.slice(0, 8).map((bp, i) => (
+              <div key={i} className={clsx('flex items-start gap-3 p-3 rounded-lg border',
+                bp.severity === 'CRITICAL' ? 'bg-red-900/15 border-red-800/30' : 'bg-amber-900/10 border-amber-800/20')}>
+                <span className="text-base shrink-0">{bp.icon}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={clsx('text-[9px] px-1.5 py-0.5 rounded font-bold border shrink-0',
+                      bp.severity === 'CRITICAL' ? 'bg-red-500/20 text-red-400 border-red-700/40' : 'bg-amber-500/20 text-amber-400 border-amber-700/40')}>
+                      {bp.severity}
+                    </span>
+                    <span className="text-[10px] font-bold text-white">{bp.title}</span>
+                    <span className="text-[9px] text-slate-500 ml-auto shrink-0">{bp.dept} · {bp.breakLabel}</span>
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-0.5">{bp.detail}</div>
+                  <div className="text-[10px] text-brand-400 font-semibold mt-1">→ {bp.action}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* BCG Matrix Mini — Command Center preview */}
+      {bcgMatrix?.matrix?.length > 0 && (
+        <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-4">
+          <div className="text-xs font-bold text-slate-300 mb-3">BCG Portfolio — Collection Quadrants</div>
+          <div className="grid grid-cols-3 gap-3">
+            {bcgMatrix.matrix.map(p => (
+              <div key={p.collection} className="bg-gray-800/40 rounded-lg p-3 border border-gray-700/30">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-base">{p.quadrant.icon}</span>
+                  <div>
+                    <div className="text-xs font-bold" style={{ color: p.color }}>{p.label}</div>
+                    <div className="text-[9px] text-slate-500">{p.quadrant.name}</div>
+                  </div>
+                </div>
+                <div className="space-y-1 text-[10px]">
+                  <div className="flex justify-between"><span className="text-slate-500">Rev share</span><span className="text-white font-semibold">{p.shareX}%</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">MoM growth</span><span className="text-emerald-400 font-semibold">+{p.growthY}%</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">ROAS</span><span className="text-white font-semibold">{p.roas}x</span></div>
+                </div>
+                <div className="mt-2 pt-2 border-t border-gray-700/30 text-[9px] text-brand-400">{p.quadrant.action.split('—')[0]}</div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -431,7 +527,7 @@ function TabRevenue({ plan, pva, savePlan, allOrders }) {
 }
 
 /* ─── TAB: MARKETING ─────────────────────────────────────────────────── */
-function TabMarketing({ plan, pva, savePlan }) {
+function TabMarketing({ plan, pva, savePlan, bcgMatrix }) {
   const [editAlloc, setEditAlloc]       = useState(false);
   const [allocDraft, setAllocDraft]     = useState({ ...plan.collectionAlloc });
   const [editGlobals, setEditGlobals]   = useState(false);
@@ -461,6 +557,62 @@ function TabMarketing({ plan, pva, savePlan }) {
 
   return (
     <div className="space-y-5">
+      {/* BCG Matrix 2×2 */}
+      {bcgMatrix?.matrix?.length > 0 && (
+        <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-4">
+          <div className="text-xs font-bold text-slate-300 mb-1">BCG Portfolio Matrix — Budget Allocation Signal</div>
+          <div className="text-[10px] text-slate-500 mb-4">X = Revenue share · Y = MoM growth rate · Median split divides quadrants</div>
+          <div className="grid grid-cols-2 gap-2 max-w-lg">
+            {/* Top-left: Question Mark (low share, high growth) */}
+            {(() => {
+              const quadrantOrder = ['Question Mark','Star','Dog','Cash Cow'];
+              const gridPositions = { 'Question Mark':'col-start-1 row-start-1', 'Star':'col-start-2 row-start-1', 'Dog':'col-start-1 row-start-2', 'Cash Cow':'col-start-2 row-start-2' };
+              return (
+                <div className="grid grid-cols-2 grid-rows-2 gap-2 col-span-2">
+                  {quadrantOrder.map(qName => {
+                    const item = bcgMatrix.matrix.find(m => m.quadrant.name === qName);
+                    if (!item) return null;
+                    return (
+                      <div key={qName} className={clsx('rounded-xl border p-4', gridPositions[qName])}
+                        style={{ borderColor: item.color + '40', background: item.color + '10' }}>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-lg">{item.quadrant.icon}</span>
+                          <span className="text-[9px] font-bold px-2 py-0.5 rounded-full border"
+                            style={{ color: item.color, borderColor: item.color + '50', background: item.color + '15' }}>
+                            {item.quadrant.name}
+                          </span>
+                        </div>
+                        <div className="font-bold text-white text-sm mb-1">{item.label}</div>
+                        <div className="space-y-1 text-[10px] mb-3">
+                          <div className="flex justify-between"><span className="text-slate-500">Revenue share</span><span className="text-white font-semibold">{item.shareX}%</span></div>
+                          <div className="flex justify-between"><span className="text-slate-500">MoM growth</span><span style={{ color: item.color }} className="font-semibold">+{item.growthY}%</span></div>
+                          <div className="flex justify-between"><span className="text-slate-500">ROAS</span><span className="text-white font-semibold">{item.roas}x</span></div>
+                          <div className="flex justify-between"><span className="text-slate-500">Alloc</span><span className="text-white font-semibold">{item.alloc}%</span></div>
+                        </div>
+                        <div className="text-[9px] font-bold pt-2 border-t" style={{ color: item.color, borderColor: item.color + '30' }}>
+                          {item.quadrant.action}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+          </div>
+          <div className="mt-4 grid grid-cols-3 gap-2">
+            {bcgMatrix.recommendations.map(r => (
+              <div key={r.collection} className="bg-gray-800/40 rounded-lg px-3 py-2 flex items-center justify-between text-[10px]">
+                <span className="font-bold text-white">{r.collection}</span>
+                <span className="font-bold px-2 py-0.5 rounded"
+                  style={{ background: (r.color||'#64748b') + '25', color: r.color || '#64748b' }}>
+                  {r.budgetSignal}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Global settings */}
       <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-4">
         <div className="flex items-center justify-between mb-3">
@@ -573,9 +725,9 @@ function TabMarketing({ plan, pva, savePlan }) {
 }
 
 /* ─── TAB: INVENTORY INTEL ───────────────────────────────────────────── */
-function TabInventory({ inventoryMap, allOrders }) {
+function TabInventory({ inventoryMap, allOrders, growthInv }) {
   const [filter, setFilter] = useState('all');
-  const needs = useMemo(() => buildInventoryNeeds(inventoryMap, allOrders), [inventoryMap, allOrders]);
+  const needs = growthInv?.length > 0 ? growthInv : [];
 
   const counts = useMemo(() => {
     const c = { oos: 0, critical: 0, low: 0, watch: 0, ok: 0 };
@@ -617,45 +769,50 @@ function TabInventory({ inventoryMap, allOrders }) {
           <table className="w-full text-xs">
             <thead>
               <tr className="border-b border-gray-800/50">
-                {['SKU / Product','Status','Stock','Vel/Day','Days Left','30d Demand','60d Demand','Reorder Qty','Action'].map(h => (
+                {['SKU / Product','Status','Stock','Vel/Day','Eff. Days ▾','Naive Days','Overstate','Safety Stock','ROP','Stockout Date','Order By','Urgency','Rec. Qty'].map(h => (
                   <th key={h} className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filtered.map(r => {
-                const st = INV_STATUS[r.status];
+                const st = INV_STATUS[r.status] || INV_STATUS.ok;
+                const urgencyColor = r.urgency === 'OVERDUE' ? 'text-red-400 font-bold' : r.urgency === 'URGENT' ? 'text-red-400 font-semibold' : r.urgency === 'SOON' ? 'text-amber-400' : 'text-emerald-400';
                 return (
-                  <tr key={r.sku} className="border-b border-gray-800/30 hover:bg-gray-800/20">
+                  <tr key={r.sku || r.name} className="border-b border-gray-800/30 hover:bg-gray-800/20">
                     <td className="px-3 py-2.5">
-                      <div className="font-medium text-white truncate max-w-[160px]" title={r.name}>{r.name}</div>
+                      <div className="font-medium text-white truncate max-w-[140px]" title={r.name}>{r.name}</div>
                       <div className="text-[10px] text-slate-600 font-mono">{r.sku}</div>
                     </td>
                     <td className="px-3 py-2.5">
                       <span className={clsx('text-[10px] px-2 py-0.5 rounded-full border font-bold', st.pill)}>{st.label}</span>
                     </td>
-                    <td className="px-3 py-2.5 text-white font-semibold">{r.current?.toLocaleString()}</td>
-                    <td className="px-3 py-2.5 text-slate-300">{r.vel}/day</td>
+                    <td className="px-3 py-2.5 text-white font-semibold">{(r.current ?? r.stock)?.toLocaleString()}</td>
+                    <td className="px-3 py-2.5 text-slate-300">{(r.vel ?? r.velocity ?? 0).toFixed(1)}/d</td>
                     <td className="px-3 py-2.5">
-                      <span className={r.daysOfStock < 14 ? 'text-red-400 font-bold' : r.daysOfStock < 30 ? 'text-amber-400 font-semibold' : 'text-emerald-400'}>
-                        {r.daysOfStock > 500 ? '∞' : `${r.daysOfStock}d`}
+                      <span className={r.effectiveDays < 14 ? 'text-red-400 font-bold' : r.effectiveDays < 30 ? 'text-amber-400 font-semibold' : 'text-emerald-400'}>
+                        {r.effectiveDays > 500 ? '∞' : `${r.effectiveDays}d`}
                       </span>
                     </td>
-                    <td className="px-3 py-2.5 text-slate-300">{r.demandNext30?.toLocaleString()}</td>
-                    <td className="px-3 py-2.5 text-slate-300">{r.demandNext60?.toLocaleString()}</td>
+                    <td className="px-3 py-2.5 text-slate-500 line-through">{r.naiveDays > 500 ? '∞' : `${r.naiveDays}d`}</td>
                     <td className="px-3 py-2.5">
-                      {r.reorderQty > 0 ? <span className="text-amber-400 font-bold">{r.reorderQty?.toLocaleString()}</span> : <span className="text-slate-600">—</span>}
+                      {r.overstatedDays > 0 ? <span className="text-red-400 text-[10px] font-bold">-{r.overstatedDays}d</span> : <span className="text-slate-600">—</span>}
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-300">{r.safetyStock?.toLocaleString()}</td>
+                    <td className="px-3 py-2.5 text-slate-300">{r.rop?.toLocaleString()}</td>
+                    <td className="px-3 py-2.5 text-slate-400 whitespace-nowrap text-[10px]">{r.stockoutDate || '—'}</td>
+                    <td className="px-3 py-2.5 whitespace-nowrap text-[10px]">
+                      <span className={r.daysToOrderBy <= 7 ? 'text-red-400 font-bold' : r.daysToOrderBy <= 14 ? 'text-amber-400' : 'text-slate-400'}>
+                        {r.orderByDate || '—'}
+                      </span>
                     </td>
                     <td className="px-3 py-2.5">
-                      {r.status === 'oos' || r.status === 'critical' ? (
-                        <span className="flex items-center gap-1 text-red-400 font-bold text-[10px]"><AlertTriangle size={10}/>REORDER NOW</span>
-                      ) : r.status === 'low' ? (
-                        <span className="flex items-center gap-1 text-amber-400 font-semibold text-[10px]"><AlertTriangle size={10}/>Plan Restock</span>
-                      ) : r.status === 'watch' ? (
-                        <span className="text-yellow-400 text-[10px]">Monitor</span>
-                      ) : (
-                        <span className="flex items-center gap-1 text-emerald-400 text-[10px]"><CheckCircle size={10}/>Good</span>
-                      )}
+                      <span className={clsx('text-[10px] font-bold', urgencyColor)}>{r.urgency || '—'}</span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {(r.recommendedQty ?? r.reorderQty) > 0
+                        ? <span className="text-amber-400 font-bold">{(r.recommendedQty ?? r.reorderQty)?.toLocaleString()}</span>
+                        : <span className="text-slate-600">—</span>}
                     </td>
                   </tr>
                 );
@@ -762,7 +919,7 @@ function TabWarehouses({ plan, savePlan }) {
 }
 
 /* ─── TAB: WORKING CAPITAL ───────────────────────────────────────────── */
-function TabCapital({ plan, wc }) {
+function TabCapital({ plan, wc, cmStack, rtoModel }) {
   const [scenario, setScenario] = useState(40);
 
   const totalInvNeeded = wc.reduce((s, m) => s + m.inventoryInvestment, 0);
@@ -877,6 +1034,90 @@ function TabCapital({ plan, wc }) {
           </tbody>
         </table>
       </div>
+
+      {/* CM1 / CM2 / CM3 Waterfall */}
+      {cmStack?.length > 0 && (
+        <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-4">
+          <div className="text-xs font-bold text-slate-300 mb-1">Contribution Margin Stack — CM1 → CM2 → CM3</div>
+          <div className="text-[10px] text-slate-500 mb-4">CM1 = Rev−COGS · CM2 = CM1−Shipping−Gateway−PickPack−Packaging · CM3 = CM2−CAC−RTO</div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-gray-800/50">
+                  {['Month','Revenue','CM1','CM1%','Shipping+Ops','Gateway','CM2','CM2%','CAC+RTO','CM3','CM3%'].map(h => (
+                    <th key={h} className="px-3 py-2 text-[9px] font-bold text-slate-500 uppercase tracking-wider whitespace-nowrap text-left">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cmStack.map(m => {
+                  const tot = m.totals;
+                  const shippingOps = m.collections.reduce((s,c)=>s+c.shippingTotal+c.pickPackTotal+c.packagingTotal,0);
+                  const gateway    = m.collections.reduce((s,c)=>s+c.gatewayTotal,0);
+                  const cacRto     = m.collections.reduce((s,c)=>s+c.cacTotal+c.rtoCost,0);
+                  return (
+                    <tr key={m.key} className="border-b border-gray-800/30">
+                      <td className="px-3 py-2 font-semibold text-white whitespace-nowrap">{m.month}</td>
+                      <td className="px-3 py-2 text-slate-300">{fmtRs(m.totalRevenue)}</td>
+                      <td className="px-3 py-2 text-emerald-400 font-semibold">{fmtRs(tot.cm1)}</td>
+                      <td className="px-3 py-2 text-emerald-400">{tot.cm1Pct}%</td>
+                      <td className="px-3 py-2 text-amber-400">−{fmtRs(shippingOps)}</td>
+                      <td className="px-3 py-2 text-slate-400">−{fmtRs(gateway)}</td>
+                      <td className="px-3 py-2 text-blue-400 font-semibold">{fmtRs(tot.cm2)}</td>
+                      <td className="px-3 py-2 text-blue-400">{tot.cm2Pct}%</td>
+                      <td className="px-3 py-2 text-red-400">−{fmtRs(cacRto)}</td>
+                      <td className={clsx('px-3 py-2 font-bold', tot.cm3 >= 0 ? 'text-purple-400' : 'text-red-400')}>{fmtRs(tot.cm3)}</td>
+                      <td className={clsx('px-3 py-2', tot.cm3Pct >= 0 ? 'text-purple-400' : 'text-red-400')}>{tot.cm3Pct}%</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* RTO Cost Model */}
+      {rtoModel?.monthly?.length > 0 && (
+        <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-4">
+          <div className="text-xs font-bold text-slate-300 mb-1">RTO Cost Model — India D2C</div>
+          <div className="text-[10px] text-slate-500 mb-3">
+            COD {Math.round((plan.codPct||0.6)*100)}% × {Math.round((plan.rtoRateCOD||0.28)*100)}% RTO + Prepaid {Math.round((1-(plan.codPct||0.6))*100)}% × {Math.round((plan.rtoRatePrepaid||0.06)*100)}% RTO · Full cost ₹{rtoModel.summary.rtoFullCostPerOrder}/RTO
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <KpiCard label="Unmanaged RTO Cost" value={fmtRs(rtoModel.summary.totalCostUnmanaged)} cls="text-red-400" sub="no NDR management"/>
+            <KpiCard label="Managed RTO Cost"   value={fmtRs(rtoModel.summary.totalCostManaged)}   cls="text-amber-400" sub="active NDR"/>
+            <KpiCard label="NDR Savings (Year)" value={fmtRs(rtoModel.summary.annualSavingsFromNDR)} cls="text-emerald-400" sub={`${rtoModel.summary.ndrRescueRate}% rescue rate`}/>
+            <KpiCard label="Blended RTO (Managed)" value={`${rtoModel.summary.blendedRTOManaged}%`} sub={`Unmanaged: ${rtoModel.summary.blendedRTOUnmanaged}%`}/>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b border-gray-800/50">
+                  {['Month','Orders','COD','Prepaid','RTO (Unman.)','RTO (Managed)','Cost Unman.','Cost Managed','NDR Savings'].map(h => (
+                    <th key={h} className="px-3 py-2 text-[9px] font-bold text-slate-500 uppercase tracking-wider whitespace-nowrap text-left">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rtoModel.monthly.map(m => (
+                  <tr key={m.key} className="border-b border-gray-800/30">
+                    <td className="px-3 py-2 font-semibold text-white whitespace-nowrap">{m.month}</td>
+                    <td className="px-3 py-2 text-slate-300">{m.totalOrders.toLocaleString()}</td>
+                    <td className="px-3 py-2 text-slate-400">{m.codOrders.toLocaleString()}</td>
+                    <td className="px-3 py-2 text-slate-400">{m.prepOrders.toLocaleString()}</td>
+                    <td className="px-3 py-2 text-red-400 font-semibold">{m.rtoUnmanagedOrders.toLocaleString()} <span className="text-[9px] text-red-600">({m.blendedRTOPctUnmanaged}%)</span></td>
+                    <td className="px-3 py-2 text-amber-400">{m.rtoManagedOrders.toLocaleString()} <span className="text-[9px] text-amber-700">({m.blendedRTOPctManaged}%)</span></td>
+                    <td className="px-3 py-2 text-red-400">{fmtRs(m.costUnmanaged)}</td>
+                    <td className="px-3 py-2 text-amber-400">{fmtRs(m.costManaged)}</td>
+                    <td className="px-3 py-2 text-emerald-400 font-semibold">{fmtRs(m.savingsFromNDR)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1038,6 +1279,13 @@ export default function BusinessPlan() {
   const pva        = useMemo(() => buildPlanVsActual(plan, allOrders), [plan, allOrders]);
   const predictions= useMemo(() => buildPredictions(plan, allOrders), [plan, allOrders]);
   const wc         = useMemo(() => buildWorkingCapital(plan, pva), [plan, pva]);
+  const invNeeds   = useMemo(() => buildInventoryNeeds(inventoryMap, allOrders), [inventoryMap, allOrders]);
+  const growthInv  = useMemo(() => buildGrowthAdjustedInventory({ inventoryMap: invNeeds, allOrders }), [invNeeds, allOrders]);
+  const constraint = useMemo(() => buildCurrentConstraint({ plan, predictions, inventoryNeeds: invNeeds, pva, wc }), [plan, predictions, invNeeds, pva, wc]);
+  const breaking   = useMemo(() => buildBreakingPoints({ plan, predictions, inventoryNeeds: invNeeds, pva }), [plan, predictions, invNeeds, pva]);
+  const rtoModel   = useMemo(() => buildRTOModel({ plan, predictions }), [plan, predictions]);
+  const cmStack    = useMemo(() => buildContributionStack({ plan, pva }), [plan, pva]);
+  const bcgMatrix  = useMemo(() => buildBCGMatrix({ plan, allOrders, enrichedRows }), [plan, allOrders, enrichedRows]);
 
   const brand = brands.find(b => b.id === primaryBrandId);
   const stats = { orders: allOrders.length, skus: Object.keys(inventoryMap || {}).length, ads: enrichedRows?.length || 0 };
@@ -1085,12 +1333,12 @@ export default function BusinessPlan() {
         ))}
       </div>
 
-      {tab === 'command'   && <TabCommand   plan={plan} pva={pva} predictions={predictions} allOrders={allOrders}/>}
+      {tab === 'command'   && <TabCommand   plan={plan} pva={pva} predictions={predictions} allOrders={allOrders} constraint={constraint} breaking={breaking} bcgMatrix={bcgMatrix}/>}
       {tab === 'revenue'   && <TabRevenue   plan={plan} pva={pva} savePlan={savePlan} allOrders={allOrders}/>}
-      {tab === 'marketing' && <TabMarketing plan={plan} pva={pva} savePlan={savePlan}/>}
-      {tab === 'inventory' && <TabInventory inventoryMap={inventoryMap} allOrders={allOrders}/>}
+      {tab === 'marketing' && <TabMarketing plan={plan} pva={pva} savePlan={savePlan} bcgMatrix={bcgMatrix}/>}
+      {tab === 'inventory' && <TabInventory inventoryMap={inventoryMap} allOrders={allOrders} growthInv={growthInv}/>}
       {tab === 'warehouse' && <TabWarehouses plan={plan} savePlan={savePlan}/>}
-      {tab === 'capital'   && <TabCapital   plan={plan} wc={wc}/>}
+      {tab === 'capital'   && <TabCapital   plan={plan} wc={wc} cmStack={cmStack} rtoModel={rtoModel}/>}
     </div>
   );
 }
