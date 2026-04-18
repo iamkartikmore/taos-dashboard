@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
+import { buildEnrichedRows } from '../lib/analytics';
 import { pullAccount, fetchShopifyInventory, fetchShopifyOrders } from '../lib/api';
 import {
   DEFAULT_PLAN, GENERIC_PLAN, buildPlanVsActual, buildWeeklyBreakdown,
@@ -1932,11 +1933,24 @@ function PullPanel({ isPulling, pullLog, pullProgress, onPull, lastPullAt, stats
 
 /* ─── MAIN PAGE ──────────────────────────────────────────────────────── */
 export default function BusinessPlan() {
-  const { shopifyOrders, inventoryMap, enrichedRows, brands, activeBrandIds,
+  const { brandData, manualMap, brands, activeBrandIds,
     setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders } = useStore();
 
   const primaryBrandId = activeBrandIds[0] || 'default';
   const prevBrandId    = useRef(primaryBrandId);
+
+  // ── Per-brand data — Business Plan always shows the PRIMARY brand only ──
+  const bData        = brandData?.[primaryBrandId] || {};
+  const inventoryMap = useMemo(() => bData.inventoryMap || {}, [bData]);
+  const shopifyOrders= useMemo(() => bData.orders || [], [bData]);
+  const enrichedRows = useMemo(() => {
+    const d = bData;
+    const adsetMap = {}, campaignMap = {}, adMap = {};
+    (d.adsets    || []).forEach(a => { adsetMap[a.id]    = a; });
+    (d.campaigns || []).forEach(c => { campaignMap[c.id] = c; });
+    (d.ads       || []).forEach(a => { adMap[a.id]       = a; });
+    return buildEnrichedRows(d.insights7d || [], d.insights30d || [], manualMap || {}, adsetMap, campaignMap, adMap);
+  }, [bData, manualMap]);
 
   const [tab, setTab]                      = useState('command');
   const [isPulling, setIsPulling]          = useState(false);
@@ -2109,39 +2123,8 @@ export default function BusinessPlan() {
   const bcgMatrix  = useMemo(() => buildBCGMatrix({ plan, allOrders, enrichedRows, inventoryMap }), [plan, allOrders, enrichedRows, inventoryMap]);
   const collContrib = useMemo(() => buildCollectionContrib({ allOrders, inventoryMap, plan }), [allOrders, inventoryMap, plan]);
 
-  // Multi-brand combined BCG — filter orders by brand so collections don't bleed across brands
-  const combinedBCG = useMemo(() => {
-    if (activeBrandIds.length <= 1) return bcgMatrix;
-    const allPoints = activeBrandIds.flatMap(id => {
-      const b = brands.find(br => br.id === id);
-      const bp = hydrate(lsGet(id), b?.name);
-      const brandOrders = allOrders.filter(o => o._brandId === id);
-      const m  = buildBCGMatrix({ plan: bp, allOrders: brandOrders, enrichedRows, inventoryMap });
-      const prefix = b?.name?.split(' ')[0] || id;
-      return m.matrix.map(item => ({
-        ...item,
-        label: `${prefix} · ${item.label}`,
-        collection: `${id}_${item.collection}`,
-      }));
-    });
-    if (!allPoints.length) return bcgMatrix;
-    const sorted = (arr) => [...arr].sort((a,b)=>a-b);
-    const shares  = sorted(allPoints.map(p=>p.shareX));
-    const growths = sorted(allPoints.map(p=>p.growthY));
-    const mShare  = shares[Math.floor(shares.length/2)];
-    const mGrowth = growths[Math.floor(growths.length/2)];
-    const QUAD = { Star:['#22c55e','Invest aggressively'], 'Cash Cow':['#f59e0b','Milk margins'], 'Question Mark':['#818cf8','Test 2x budget'], Dog:['#ef4444','Harvest or drop'] };
-    const getQ = p => {
-      const hs = p.shareX >= mShare, hg = p.growthY >= mGrowth;
-      const name = hs&&hg ? 'Star' : hs&&!hg ? 'Cash Cow' : !hs&&hg ? 'Question Mark' : 'Dog';
-      return { name, icon: null, color: QUAD[name][0], action: QUAD[name][1] };
-    };
-    return {
-      matrix: allPoints.map(p=>({...p, quadrant: getQ(p)})),
-      medianShare: mShare, medianGrowth: mGrowth, combined: true,
-      recommendations: allPoints.map(p=>({ collection: p.label, quadrant: getQ(p).name, color: p.color, budgetSignal: getQ(p).name==='Star'?'+30%':getQ(p).name==='Cash Cow'?'Maintain':getQ(p).name==='Question Mark'?'Test +20%':'-50%' })),
-    };
-  }, [activeBrandIds, brands, bcgMatrix, allOrders, enrichedRows]);
+  // Business Plan is always PRIMARY BRAND only — no data bleed across brands
+  const combinedBCG = bcgMatrix;
 
   const brand = brands.find(b => b.id === primaryBrandId);
   const warehouseTags = useMemo(() => parseWarehouseTags(allOrders), [allOrders]);
