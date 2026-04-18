@@ -1807,3 +1807,298 @@ export function buildGrowthAdjustedInventory({ inventoryMap, allOrders, monthlyG
     };
   });
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   PHASE 2 + 3 — MARKETING ANALYTICS ENGINE
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Helpers ── */
+function ordersInRange(allOrders, startISO, endISO) {
+  return allOrders.filter(o => {
+    const d = (o.created_at || o.createdAt || '').slice(0, 10);
+    return d >= startISO && d <= endISO;
+  });
+}
+function spendInRange(rows, startISO, endISO) {
+  return (rows || []).filter(r => {
+    const d = (r.date || '').slice(0, 10);
+    return d >= startISO && d <= endISO;
+  }).reduce((s, r) => s + parseFloat(r.spend || 0), 0);
+}
+function revenueInRange(rows, startISO, endISO) {
+  return (rows || []).filter(r => {
+    const d = (r.date || '').slice(0, 10);
+    return d >= startISO && d <= endISO;
+  }).reduce((s, r) => s + parseFloat(r.purchase_value || r.revenue || r.purchaseValue || 0), 0);
+}
+function pctStatus(pct, isPartial = false) {
+  const threshold = isPartial ? 80 : 90;
+  return pct >= threshold ? 'on-track' : pct >= 65 ? 'behind' : 'critical';
+}
+
+/* ──────────────────────────────────────────────────────────────
+   PHASE 2 · 1 — Weekly Marketing Tracker (16-week rolling window)
+   ────────────────────────────────────────────────────────────── */
+export function buildWeeklyMarketingTracker({ plan, allOrders, enrichedRows }) {
+  const now = new Date();
+  now.setHours(12, 0, 0, 0); // midday for comparison
+  const weeks = [];
+
+  // Start 8 weeks back, aligned to Monday
+  const anchor = new Date(now);
+  anchor.setDate(anchor.getDate() - 56);
+  const dow = anchor.getDay();
+  anchor.setDate(anchor.getDate() - (dow === 0 ? 6 : dow - 1));
+
+  for (let w = 0; w < 20; w++) {
+    const wStart = new Date(anchor);
+    wStart.setDate(anchor.getDate() + w * 7);
+    const wEnd = new Date(wStart);
+    wEnd.setDate(wStart.getDate() + 6);
+    wEnd.setHours(23, 59, 59, 999);
+
+    const s = wStart.toISOString().slice(0, 10);
+    const e = wEnd.toISOString().slice(0, 10);
+
+    // Find plan month by mid-week
+    const mid = new Date(wStart); mid.setDate(wStart.getDate() + 3);
+    const monthKey = `${mid.getFullYear()}-${String(mid.getMonth() + 1).padStart(2, '0')}`;
+    const pm = plan.months?.find(m => m.key === monthKey);
+
+    const daysInWeek = 7;
+    const aov = pm?.aov || plan.aov || 340;
+    const targetOrders  = pm ? pm.ordersPerDay * daysInWeek : 0;
+    const targetSpend   = pm ? pm.adBudgetPerDay * daysInWeek : 0;
+    const targetRevenue = targetOrders * aov;
+    const targetROAS    = targetSpend > 0 ? +(targetRevenue / targetSpend).toFixed(2) : 0;
+    const targetCAC     = targetOrders > 0 ? Math.round(targetSpend / targetOrders) : (plan.cpr || 55);
+
+    const weekOrders   = ordersInRange(allOrders, s, e);
+    const actualOrders = weekOrders.length;
+    const actualRevenue= weekOrders.reduce((sum, o) => sum + parseFloat(o.total_price || o.totalPrice || 0), 0);
+    const actualSpend  = spendInRange(enrichedRows, s, e);
+    const metaRevenue  = revenueInRange(enrichedRows, s, e);
+    const useRevForROAS = metaRevenue > 0 ? metaRevenue : actualRevenue;
+    const actualROAS   = actualSpend > 0 ? +(useRevForROAS / actualSpend).toFixed(2) : 0;
+    const actualCAC    = actualOrders > 0 ? Math.round(actualSpend / actualOrders) : 0;
+
+    const isPast    = wEnd < now;
+    const isCurrent = wStart <= now && now <= wEnd;
+    const isFuture  = wStart > now;
+
+    let status = 'future';
+    let ordersPct = 0;
+    if (!isFuture && pm && targetOrders > 0) {
+      if (isCurrent) {
+        const elapsed = Math.max(1, (now - wStart) / 86400000);
+        const expected = pm.ordersPerDay * elapsed;
+        const prorated = expected > 0 ? actualOrders / expected * 100 : 100;
+        ordersPct = +prorated.toFixed(1);
+        status = pctStatus(prorated, true);
+      } else {
+        ordersPct = +(actualOrders / targetOrders * 100).toFixed(1);
+        status = pctStatus(ordersPct, false);
+      }
+    }
+
+    weeks.push({
+      w, s, e, monthKey,
+      label: `W${w + 1}`,
+      dateRange: `${wStart.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })} – ${wEnd.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}`,
+      monthLabel: pm?.label || '—',
+      isPast, isCurrent, isFuture,
+      targetOrders, actualOrders,
+      targetRevenue: Math.round(targetRevenue), actualRevenue: Math.round(actualRevenue),
+      targetSpend: Math.round(targetSpend), actualSpend: Math.round(actualSpend),
+      targetROAS, actualROAS,
+      targetCAC, actualCAC,
+      ordersPct,
+      spendPct: targetSpend > 0 ? +(actualSpend / targetSpend * 100).toFixed(1) : 0,
+      roasDelta: targetROAS > 0 ? +(actualROAS - targetROAS).toFixed(2) : 0,
+      status,
+    });
+  }
+  return weeks;
+}
+
+/* ──────────────────────────────────────────────────────────────
+   PHASE 2 · 2 — Monthly Marketing Actuals (plan + live Meta + Shopify)
+   ────────────────────────────────────────────────────────────── */
+export function buildMonthlyMarketingActuals({ plan, allOrders, enrichedRows }) {
+  const now = new Date();
+  return (plan.months || []).map(m => {
+    const [yr, mo] = m.key.split('-').map(Number);
+    const days   = DAYS_IN(yr, mo);
+    const s      = `${m.key}-01`;
+    const e      = `${m.key}-${String(days).padStart(2, '0')}`;
+    const mStart = new Date(yr, mo - 1, 1);
+    const mEnd   = new Date(yr, mo, 0, 23, 59, 59);
+
+    const monthOrders   = ordersInRange(allOrders, s, e);
+    const actualOrders  = monthOrders.length;
+    const actualRevenue = monthOrders.reduce((sum, o) => sum + parseFloat(o.total_price || o.totalPrice || 0), 0);
+    const actualSpend   = spendInRange(enrichedRows, s, e);
+    const metaRevenue   = revenueInRange(enrichedRows, s, e);
+    const useRev = metaRevenue > 0 ? metaRevenue : actualRevenue;
+
+    const targetOrders  = m.ordersPerDay * days;
+    const targetRevenue = targetOrders * (m.aov || plan.aov || 340);
+    const targetSpend   = m.adBudgetPerDay * days;
+    const targetROAS    = targetSpend > 0 ? +(targetRevenue / targetSpend).toFixed(2) : 0;
+    const actualROAS    = actualSpend > 0 ? +(useRev / actualSpend).toFixed(2) : 0;
+    const actualCAC     = actualOrders > 0 ? Math.round(actualSpend / actualOrders) : 0;
+
+    const isPast    = mEnd < now;
+    const isCurrent = mStart <= now && now <= mEnd;
+    const isFuture  = mStart > now;
+    const hasData   = actualOrders > 0 || actualSpend > 0;
+
+    let status = 'future', ordersPct = 0;
+    if (hasData && !isFuture) {
+      if (isCurrent) {
+        const elapsed = Math.max(1, (now - mStart) / 86400000);
+        const expected = m.ordersPerDay * elapsed;
+        ordersPct = expected > 0 ? +(actualOrders / expected * 100).toFixed(1) : 0;
+        status = pctStatus(ordersPct, true);
+      } else {
+        ordersPct = targetOrders > 0 ? +(actualOrders / targetOrders * 100).toFixed(1) : 0;
+        status = pctStatus(ordersPct, false);
+      }
+    }
+
+    return {
+      key: m.key, label: m.label,
+      targetOrders, actualOrders,
+      targetRevenue: Math.round(targetRevenue), actualRevenue: Math.round(actualRevenue),
+      targetSpend: Math.round(targetSpend), actualSpend: Math.round(actualSpend),
+      targetROAS, actualROAS,
+      targetCAC: Math.round(plan.cpr || 55), actualCAC,
+      ordersPct, spendPct: targetSpend > 0 ? +(actualSpend / targetSpend * 100).toFixed(1) : 0,
+      isPast, isCurrent, isFuture, hasData, status,
+      ordersPerDay: m.ordersPerDay, adBudgetPerDay: m.adBudgetPerDay,
+    };
+  });
+}
+
+/* ──────────────────────────────────────────────────────────────
+   PHASE 2 · 3 — Creative Health Scoring
+   ────────────────────────────────────────────────────────────── */
+export function buildCreativeHealth({ enrichedRows, plan }) {
+  if (!enrichedRows?.length) return [];
+  const map = {};
+  enrichedRows.forEach(r => {
+    const name = r.ad_name || r.adName || r.name || 'Unknown';
+    if (!map[name]) map[name] = { name, spend: 0, revenue: 0, impressions: 0, clicks: 0, orders: 0, days: new Set() };
+    map[name].spend       += parseFloat(r.spend || 0);
+    map[name].revenue     += parseFloat(r.purchase_value || r.revenue || r.purchaseValue || 0);
+    map[name].impressions += parseInt(r.impressions || 0, 10);
+    map[name].clicks      += parseInt(r.clicks || 0, 10);
+    map[name].orders      += parseInt(r.results || r.purchases || 0, 10);
+    if (r.date) map[name].days.add(r.date.slice(0, 10));
+  });
+
+  const targetROAS = plan.collectionRoas ? Math.max(...Object.values(plan.collectionRoas)) : 4;
+
+  return Object.values(map)
+    .filter(c => c.spend > 500)
+    .map(c => {
+      const roas  = c.spend > 0 ? +(c.revenue / c.spend).toFixed(2) : 0;
+      const ctr   = c.impressions > 0 ? +(c.clicks / c.impressions * 100).toFixed(2) : 0;
+      const cpc   = c.clicks > 0 ? Math.round(c.spend / c.clicks) : 0;
+      const cac   = c.orders > 0 ? Math.round(c.spend / c.orders) : 0;
+      const cpm   = c.impressions > 0 ? +(c.spend / c.impressions * 1000).toFixed(0) : 0;
+      const activeDays = c.days.size;
+
+      const roasScore = Math.min(100, roas / targetROAS * 100);
+      const ctrScore  = Math.min(100, ctr / 2 * 100);
+      const healthScore = Math.round(roasScore * 0.6 + ctrScore * 0.4);
+
+      return {
+        name: c.name, spend: Math.round(c.spend), revenue: Math.round(c.revenue),
+        impressions: c.impressions, clicks: c.clicks, orders: c.orders,
+        roas, ctr, cpc, cac, cpm, activeDays, healthScore,
+        health: healthScore >= 70 ? 'strong' : healthScore >= 45 ? 'ok' : 'weak',
+      };
+    })
+    .sort((a, b) => b.spend - a.spend)
+    .slice(0, 20);
+}
+
+/* ──────────────────────────────────────────────────────────────
+   PHASE 3 · 1 — LTV:CAC Analysis per Collection
+   ────────────────────────────────────────────────────────────── */
+export function buildLTVCAC({ plan, allOrders }) {
+  const cols = Object.keys(plan.collectionAlloc || {});
+  const aov  = plan.aov || 340;
+  const gm   = plan.grossMarginPct || 0.50;
+  const cpr  = plan.cpr || 55;
+
+  // Estimate repeat rate from order history
+  const custOrders = {};
+  allOrders.forEach(o => {
+    const id = o.customer?.id || o.email || o.customer_email || 'anon';
+    custOrders[id] = (custOrders[id] || 0) + 1;
+  });
+  const totalCust  = Object.keys(custOrders).length || 1;
+  const repeatCust = Object.values(custOrders).filter(n => n > 1).length;
+  const repeatRate = Math.max(0.15, repeatCust / totalCust);
+  const monthlyRepurchase = repeatRate * 0.12; // monthly purchase probability for repeat customers
+
+  // Average monthly ad budget across plan
+  const avgMonthBudget = (plan.months || []).reduce((s, m) => s + m.adBudgetPerDay * 30, 0) / (plan.months?.length || 1);
+
+  const COLL_LABELS = { plants: 'Plants', seeds: 'Seeds', allMix: 'All Mix', colA: 'Col A', colB: 'Col B', colC: 'Col C' };
+
+  return cols.map(coll => {
+    const allocPct = plan.collectionAlloc[coll] || 0;
+    const roas     = plan.collectionRoas?.[coll] || 4;
+    const collBudget  = avgMonthBudget * allocPct;
+    const collRevenue = collBudget * roas;
+    const collOrders  = aov > 0 ? collRevenue / aov : 0;
+    const cac = collOrders > 0 ? Math.round(collBudget / collOrders) : cpr;
+
+    // LTV: AOV × gross margin × expected lifetime orders
+    const avgLifetimeOrders = 1 + repeatRate * 18 * monthlyRepurchase; // 18-month window
+    const ltv = Math.round(aov * gm * avgLifetimeOrders * 0.85); // 15% time-value discount
+
+    const ratio = cac > 0 ? +(ltv / cac).toFixed(2) : 0;
+    const payback = aov * gm * monthlyRepurchase > 0
+      ? +(cac / (aov * gm * monthlyRepurchase)).toFixed(1) : 24;
+
+    return {
+      coll, label: COLL_LABELS[coll] || coll, allocPct: Math.round(allocPct * 100),
+      roas, cac, ltv, ratio, payback,
+      collRevenue: Math.round(collRevenue),
+      health: ratio >= 3 ? 'strong' : ratio >= 2 ? 'ok' : 'weak',
+    };
+  });
+}
+
+/* ──────────────────────────────────────────────────────────────
+   PHASE 3 · 2 — McKinsey Revenue Decomposition
+   ΔRevenue = Volume effect + Price (AOV) effect + Mix residual
+   ────────────────────────────────────────────────────────────── */
+export function buildMcKinseyDecomp({ plan, pva }) {
+  if (!pva || pva.length < 2) return [];
+  const aovFallback = plan.aov || 340;
+  return pva.slice(1).map((m, i) => {
+    const prev = pva[i];
+    const prevAov    = (plan.months?.[i]?.aov   || aovFallback);
+    const currAov    = (plan.months?.[i+1]?.aov || aovFallback);
+    const prevOrders = (plan.months?.[i]?.ordersPerDay   || 0) * (prev.days || 30);
+    const currOrders = (plan.months?.[i+1]?.ordersPerDay || 0) * (m.days   || 30);
+
+    const volumeEffect = Math.round((currOrders - prevOrders) * prevAov);
+    const priceEffect  = Math.round((currAov - prevAov) * currOrders);
+    const totalDelta   = Math.round(m.planRevenue - prev.planRevenue);
+    const mixEffect    = totalDelta - volumeEffect - priceEffect;
+
+    return {
+      key: m.key, label: m.label,
+      totalDelta, volumeEffect, priceEffect, mixEffect,
+      pct: prev.planRevenue > 0 ? +((totalDelta / prev.planRevenue) * 100).toFixed(1) : 0,
+      prevRevenue: Math.round(prev.planRevenue),
+      currRevenue: Math.round(m.planRevenue),
+    };
+  });
+}

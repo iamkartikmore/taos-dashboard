@@ -17,6 +17,8 @@ import {
   buildPredictions, parseOrdersCsv, fmtRs, fmtK,
   buildCurrentConstraint, buildBreakingPoints, buildRTOModel,
   buildContributionStack, buildBCGMatrix, buildGrowthAdjustedInventory,
+  buildWeeklyMarketingTracker, buildMonthlyMarketingActuals,
+  buildCreativeHealth, buildLTVCAC, buildMcKinseyDecomp,
   parseWarehouseTags,
 } from '../lib/businessPlanAnalytics';
 
@@ -573,18 +575,68 @@ function TabRevenue({ plan, pva, savePlan, allOrders }) {
   );
 }
 
-/* ─── TAB: MARKETING ─────────────────────────────────────────────────── */
-function TabMarketing({ plan, pva, savePlan, bcgMatrix }) {
-  const [editAlloc, setEditAlloc]       = useState(false);
-  const [allocDraft, setAllocDraft]     = useState({ ...plan.collectionAlloc });
-  const [editGlobals, setEditGlobals]   = useState(false);
-  const [globalsDraft, setGlobalsDraft] = useState({
-    cpr: plan.cpr, avgBudgetPerCampaign: plan.avgBudgetPerCampaign, avgCreativesPerCampaign: plan.avgCreativesPerCampaign,
-  });
+/* ─── TAB: MARKETING — Phase 2 + 3 ──────────────────────────────────── */
+const MKT_SUBTABS = [
+  { id: 'weekly',      label: 'Weekly Tracker' },
+  { id: 'monthly',     label: 'Monthly Plan' },
+  { id: 'collections', label: 'Collections' },
+  { id: 'creatives',   label: 'Creatives' },
+  { id: 'ltv',         label: 'LTV & McKinsey' },
+];
+
+const STATUS_DOT = {
+  'on-track': 'bg-emerald-400',
+  behind:     'bg-amber-400',
+  critical:   'bg-red-400',
+  future:     'bg-gray-600',
+};
+const STATUS_ROW = {
+  'on-track': 'bg-emerald-500/5',
+  behind:     'bg-amber-500/5',
+  critical:   'bg-red-500/8',
+  future:     '',
+};
+const STATUS_PILL = {
+  'on-track': 'bg-emerald-500/15 text-emerald-400 border-emerald-800/30',
+  behind:     'bg-amber-500/15  text-amber-400  border-amber-800/30',
+  critical:   'bg-red-500/15    text-red-400    border-red-800/30',
+  future:     'bg-gray-800      text-slate-500  border-gray-700',
+};
+const STATUS_LABEL = { 'on-track': 'On Track', behind: 'Behind', critical: 'Critical', future: 'Upcoming' };
+
+function StatusPill({ status }) {
+  return (
+    <span className={clsx('text-[11px] px-2 py-0.5 rounded-md border font-semibold whitespace-nowrap', STATUS_PILL[status] || STATUS_PILL.future)}>
+      <span className={clsx('inline-block w-1.5 h-1.5 rounded-full mr-1.5', STATUS_DOT[status] || 'bg-gray-600')}/>
+      {STATUS_LABEL[status] || 'Upcoming'}
+    </span>
+  );
+}
+
+function MktPct({ pct, future }) {
+  if (future || !pct) return <span className="text-slate-600">—</span>;
+  const col = pct >= 90 ? 'text-emerald-400' : pct >= 65 ? 'text-amber-400' : 'text-red-400';
+  return <span className={clsx('font-semibold', col)}>{pct}%</span>;
+}
+
+function TabMarketing({ plan, pva, savePlan, bcgMatrix, allOrders, enrichedRows }) {
+  const [mktTab,       setMktTab]       = useState('weekly');
+  const [editAlloc,    setEditAlloc]    = useState(false);
+  const [allocDraft,   setAllocDraft]   = useState({ ...plan.collectionAlloc });
+  const [editGlobals,  setEditGlobals]  = useState(false);
+  const [globalsDraft, setGlobalsDraft] = useState({ cpr: plan.cpr, avgBudgetPerCampaign: plan.avgBudgetPerCampaign, avgCreativesPerCampaign: plan.avgCreativesPerCampaign });
 
   useEffect(() => { setAllocDraft({ ...plan.collectionAlloc }); }, [plan.collectionAlloc]);
 
-  const mktData = useMemo(() => pva.map(m => buildMarketingNeeds(m, plan)), [pva, plan]);
+  const weeklyData  = useMemo(() => buildWeeklyMarketingTracker({ plan, allOrders, enrichedRows }), [plan, allOrders, enrichedRows]);
+  const monthlyData = useMemo(() => buildMonthlyMarketingActuals({ plan, allOrders, enrichedRows }), [plan, allOrders, enrichedRows]);
+  const creatives   = useMemo(() => buildCreativeHealth({ enrichedRows, plan }), [enrichedRows, plan]);
+  const ltvData     = useMemo(() => buildLTVCAC({ plan, allOrders }), [plan, allOrders]);
+  const mcKData     = useMemo(() => buildMcKinseyDecomp({ plan, pva }), [plan, pva]);
+  const mktData     = useMemo(() => pva.map(m => buildMarketingNeeds(m, plan)), [pva, plan]);
+
+  const curMonth  = monthlyData.find(m => m.isCurrent) || monthlyData.find(m => m.isFuture) || monthlyData[0] || {};
+  const curWeeks  = weeklyData.filter(w => w.isCurrent || (w.monthKey === curMonth.key && !w.isFuture));
 
   const saveAlloc = () => {
     const total = Object.values(allocDraft).reduce((s, v) => s + parseFloat(v), 0);
@@ -592,181 +644,501 @@ function TabMarketing({ plan, pva, savePlan, bcgMatrix }) {
     savePlan({ collectionAlloc: Object.fromEntries(Object.entries(allocDraft).map(([k, v]) => [k, parseFloat(v)])) });
     setEditAlloc(false);
   };
-
   const saveGlobals = () => {
-    savePlan({
-      cpr: parseFloat(globalsDraft.cpr) || plan.cpr,
-      avgBudgetPerCampaign:    parseFloat(globalsDraft.avgBudgetPerCampaign)    || plan.avgBudgetPerCampaign,
-      avgCreativesPerCampaign: parseFloat(globalsDraft.avgCreativesPerCampaign) || plan.avgCreativesPerCampaign,
-    });
+    savePlan({ cpr: parseFloat(globalsDraft.cpr)||plan.cpr, avgBudgetPerCampaign: parseFloat(globalsDraft.avgBudgetPerCampaign)||plan.avgBudgetPerCampaign, avgCreativesPerCampaign: parseFloat(globalsDraft.avgCreativesPerCampaign)||plan.avgCreativesPerCampaign });
     setEditGlobals(false);
   };
 
   return (
     <div className="space-y-5">
-      {/* BCG Matrix 2×2 */}
-      {bcgMatrix?.matrix?.length > 0 && (
-        <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-4">
-          <div className="text-sm font-semibold text-slate-200 mb-1">BCG Portfolio Matrix — Budget Allocation Signal</div>
-          <div className="text-[10px] text-slate-500 mb-4">X = Revenue share · Y = MoM growth rate · Median split divides quadrants</div>
-          <div className="grid grid-cols-2 gap-2 max-w-lg">
-            {/* Top-left: Question Mark (low share, high growth) */}
-            {(() => {
-              const quadrantOrder = ['Question Mark','Star','Dog','Cash Cow'];
-              const gridPositions = { 'Question Mark':'col-start-1 row-start-1', 'Star':'col-start-2 row-start-1', 'Dog':'col-start-1 row-start-2', 'Cash Cow':'col-start-2 row-start-2' };
-              return (
-                <div className="grid grid-cols-2 grid-rows-2 gap-2 col-span-2">
-                  {quadrantOrder.map(qName => {
-                    const item = bcgMatrix.matrix.find(m => m.quadrant.name === qName);
-                    if (!item) return null;
-                    return (
-                      <div key={qName} className={clsx('rounded-xl border p-4', gridPositions[qName])}
-                        style={{ borderColor: item.color + '40', background: item.color + '10' }}>
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-lg">{item.quadrant.icon}</span>
-                          <span className="text-[9px] font-bold px-2 py-0.5 rounded-full border"
-                            style={{ color: item.color, borderColor: item.color + '50', background: item.color + '15' }}>
-                            {item.quadrant.name}
-                          </span>
-                        </div>
-                        <div className="font-bold text-white text-sm mb-1">{item.label}</div>
-                        <div className="space-y-1 text-[10px] mb-3">
-                          <div className="flex justify-between"><span className="text-slate-500">Revenue share</span><span className="text-white font-semibold">{item.shareX}%</span></div>
-                          <div className="flex justify-between"><span className="text-slate-500">MoM growth</span><span style={{ color: item.color }} className="font-semibold">+{item.growthY}%</span></div>
-                          <div className="flex justify-between"><span className="text-slate-500">ROAS</span><span className="text-white font-semibold">{item.roas}x</span></div>
-                          <div className="flex justify-between"><span className="text-slate-500">Alloc</span><span className="text-white font-semibold">{item.alloc}%</span></div>
-                        </div>
-                        <div className="text-[9px] font-bold pt-2 border-t" style={{ color: item.color, borderColor: item.color + '30' }}>
-                          {item.quadrant.action}
-                        </div>
-                      </div>
-                    );
-                  })}
+
+      {/* ── Summary KPIs ── */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <KpiCard label="This Month Budget" value={fmtRs(curMonth.targetSpend || 0)} sub={curMonth.actualSpend > 0 ? `Actual: ${fmtRs(curMonth.actualSpend)}` : 'No spend data'}/>
+        <KpiCard label="Orders Pacing" value={curMonth.hasData ? `${curMonth.ordersPct || 0}%` : '—'}
+          cls={curMonth.ordersPct >= 90 ? 'text-emerald-400' : curMonth.ordersPct >= 65 ? 'text-amber-400' : curMonth.hasData ? 'text-red-400' : 'text-slate-500'}
+          sub={`${(curMonth.actualOrders||0).toLocaleString()} / ${(curMonth.targetOrders||0).toLocaleString()} orders`}/>
+        <KpiCard label="Blended ROAS" value={curMonth.actualROAS > 0 ? `${curMonth.actualROAS}x` : '—'}
+          sub={`Target: ${curMonth.targetROAS || 0}x`}
+          cls={curMonth.actualROAS >= (curMonth.targetROAS||4) ? 'text-emerald-400' : curMonth.actualROAS > 0 ? 'text-amber-400' : 'text-slate-500'}/>
+        <KpiCard label="CAC" value={curMonth.actualCAC > 0 ? `₹${curMonth.actualCAC}` : '—'}
+          sub={`Target: ₹${curMonth.targetCAC || plan.cpr || 55}`}
+          cls={curMonth.actualCAC > 0 && curMonth.actualCAC <= (curMonth.targetCAC||plan.cpr||55) ? 'text-emerald-400' : curMonth.actualCAC > 0 ? 'text-red-400' : 'text-slate-500'}/>
+      </div>
+
+      {/* ── Sub-tab bar ── */}
+      <div className="flex gap-1 bg-gray-900/60 rounded-xl p-1 border border-gray-800/50 overflow-x-auto scrollbar-none">
+        {MKT_SUBTABS.map(t => (
+          <button key={t.id} onClick={() => setMktTab(t.id)}
+            className={clsx('px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all',
+              mktTab === t.id ? 'bg-brand-600/20 text-brand-300 ring-1 ring-brand-500/30' : 'text-slate-400 hover:text-slate-200 hover:bg-gray-800/50')}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ══════════════════════════════════════════════════════════
+          SUB-TAB: WEEKLY TRACKER
+         ══════════════════════════════════════════════════════════ */}
+      {mktTab === 'weekly' && (
+        <div className="space-y-4">
+          {/* Current week highlight */}
+          {(() => {
+            const cw = weeklyData.find(w => w.isCurrent);
+            if (!cw) return null;
+            return (
+              <div className="bg-brand-600/10 rounded-xl border border-brand-500/30 p-5">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <div className="text-sm font-semibold text-white">Current Week — {cw.dateRange}</div>
+                    <div className="text-xs text-slate-500">{cw.monthLabel}</div>
+                  </div>
+                  <StatusPill status={cw.status}/>
                 </div>
-              );
-            })()}
-          </div>
-          <div className="mt-4 grid grid-cols-3 gap-2">
-            {bcgMatrix.recommendations.map(r => (
-              <div key={r.collection} className="bg-gray-800/40 rounded-lg px-3 py-2 flex items-center justify-between text-[10px]">
-                <span className="font-bold text-white">{r.collection}</span>
-                <span className="font-bold px-2 py-0.5 rounded"
-                  style={{ background: (r.color||'#64748b') + '25', color: r.color || '#64748b' }}>
-                  {r.budgetSignal}
-                </span>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {[
+                    { l: 'Orders', v: cw.actualOrders, t: cw.targetOrders, pct: cw.ordersPct, unit: '' },
+                    { l: 'Ad Spend', v: fmtRs(cw.actualSpend), t: fmtRs(cw.targetSpend), pct: cw.spendPct, unit: '' },
+                    { l: 'ROAS', v: cw.actualROAS > 0 ? `${cw.actualROAS}x` : '—', t: `${cw.targetROAS}x`, pct: null, unit: '' },
+                    { l: 'CAC', v: cw.actualCAC > 0 ? `₹${cw.actualCAC}` : '—', t: `₹${cw.targetCAC}`, pct: null, unit: '' },
+                  ].map(item => (
+                    <div key={item.l} className="bg-gray-900/60 rounded-lg p-3">
+                      <div className="text-xs text-slate-500 mb-1 uppercase tracking-wide">{item.l}</div>
+                      <div className="text-xl font-bold text-white">{item.v}</div>
+                      <div className="text-xs text-slate-500 mt-0.5">Target: {item.t}</div>
+                      {item.pct != null && (
+                        <div className="mt-2 h-1 bg-gray-700 rounded-full overflow-hidden">
+                          <div className={clsx('h-full rounded-full', item.pct >= 90 ? 'bg-emerald-500' : item.pct >= 65 ? 'bg-amber-500' : 'bg-red-500')} style={{ width: `${Math.min(item.pct, 100)}%` }}/>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
-            ))}
+            );
+          })()}
+
+          {/* 16-week table */}
+          <div className="overflow-x-auto rounded-xl border border-gray-800/50">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-800/50 bg-gray-900/40">
+                  {['Week','Dates','Month','Status','Orders (A/T)','Pacing','Spend (A/T)','ROAS (A/T)','CAC'].map(h => (
+                    <th key={h} className="px-3 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {weeklyData.map((w, i) => (
+                  <tr key={i} className={clsx('border-b border-gray-800/25 transition-colors',
+                    w.isCurrent ? 'bg-brand-600/8 border-brand-800/30' : STATUS_ROW[w.status],
+                    'hover:bg-gray-800/20')}>
+                    <td className="px-3 py-2.5 font-bold text-white whitespace-nowrap">{w.label}</td>
+                    <td className="px-3 py-2.5 text-slate-400 text-xs whitespace-nowrap">{w.dateRange}</td>
+                    <td className="px-3 py-2.5 text-slate-500 text-xs whitespace-nowrap">{w.monthLabel}</td>
+                    <td className="px-3 py-2.5"><StatusPill status={w.status}/></td>
+                    <td className="px-3 py-2.5">
+                      <span className={w.isFuture ? 'text-slate-600' : 'text-white font-semibold'}>{w.isFuture ? '—' : w.actualOrders}</span>
+                      <span className="text-slate-500">/{w.targetOrders}</span>
+                    </td>
+                    <td className="px-3 py-2.5 min-w-[80px]">
+                      {w.isFuture ? <span className="text-slate-600">—</span> : (
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden min-w-[48px]">
+                            <div className={clsx('h-full rounded-full', w.ordersPct >= 90 ? 'bg-emerald-500' : w.ordersPct >= 65 ? 'bg-amber-500' : 'bg-red-500')} style={{ width: `${Math.min(w.ordersPct, 100)}%` }}/>
+                          </div>
+                          <MktPct pct={w.ordersPct} future={w.isFuture}/>
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {w.isFuture
+                        ? <span className="text-slate-500 text-xs">{fmtRs(w.targetSpend)}</span>
+                        : <><span className="text-slate-200">{fmtRs(w.actualSpend)}</span><span className="text-slate-600 text-xs">/{fmtRs(w.targetSpend)}</span></>}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {w.actualROAS > 0
+                        ? <span className={w.actualROAS >= w.targetROAS ? 'text-emerald-400 font-semibold' : 'text-amber-400'}>{w.actualROAS}x</span>
+                        : <span className="text-slate-600">{w.targetROAS}x</span>}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {w.actualCAC > 0
+                        ? <span className={w.actualCAC <= w.targetCAC ? 'text-emerald-400' : 'text-red-400'}>₹{w.actualCAC}</span>
+                        : <span className="text-slate-600">₹{w.targetCAC}</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
 
-      {/* Global settings */}
-      <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="text-sm font-semibold text-slate-200">Global Marketing Settings</div>
-          <button onClick={() => setEditGlobals(v => !v)} className="text-[10px] text-brand-400 hover:text-brand-300 flex items-center gap-1">
-            <Edit2 size={11}/>{editGlobals ? 'Cancel' : 'Edit'}
-          </button>
-        </div>
-        {editGlobals ? (
-          <div className="grid grid-cols-3 gap-3">
-            {[['cpr','Avg CPR (₹)'],['avgBudgetPerCampaign','Budget/Campaign (₹/day)'],['avgCreativesPerCampaign','Creatives/Campaign']].map(([field, label]) => (
-              <div key={field}>
-                <div className="text-[9px] text-slate-500 mb-1">{label}</div>
-                <input className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-white text-xs"
-                  value={globalsDraft[field]} onChange={e => setGlobalsDraft(p => ({ ...p, [field]: e.target.value }))}/>
-              </div>
-            ))}
-            <div className="col-span-3 flex gap-2 pt-1">
-              <button onClick={saveGlobals} className="px-3 py-1.5 bg-brand-600 text-white rounded text-xs hover:bg-brand-500">Save</button>
-              <button onClick={() => setEditGlobals(false)} className="px-3 py-1.5 bg-gray-700 text-slate-300 rounded text-xs">Cancel</button>
-            </div>
+      {/* ══════════════════════════════════════════════════════════
+          SUB-TAB: MONTHLY PLAN
+         ══════════════════════════════════════════════════════════ */}
+      {mktTab === 'monthly' && (
+        <div className="space-y-4">
+          {/* Monthly bar chart — orders pacing */}
+          <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-5">
+            <div className="text-sm font-semibold text-slate-200 mb-4">Orders Plan vs Actual — All Months</div>
+            <ResponsiveContainer width="100%" height={180}>
+              <BarChart data={monthlyData.map(m => ({ label: m.label.slice(0,3), Plan: m.targetOrders, Actual: m.hasData ? m.actualOrders : null }))} barGap={3}>
+                <CartesianGrid strokeDasharray="2 4" stroke="#1f2937" vertical={false}/>
+                <XAxis dataKey="label" tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} tickLine={false}/>
+                <YAxis tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} tickLine={false}/>
+                <Tooltip content={<ChartTip/>}/>
+                <Bar dataKey="Plan"   fill="#334155" radius={[3,3,0,0]} name="Plan"/>
+                <Bar dataKey="Actual" fill="#22c55e" radius={[3,3,0,0]} name="Actual"/>
+              </BarChart>
+            </ResponsiveContainer>
           </div>
-        ) : (
-          <div className="flex gap-6 text-xs">
-            <div><span className="text-slate-500">CPR:</span> <span className="text-white font-semibold">₹{plan.cpr}</span></div>
-            <div><span className="text-slate-500">Budget/Campaign:</span> <span className="text-white font-semibold">₹{(plan.avgBudgetPerCampaign||0).toLocaleString()}/day</span></div>
-            <div><span className="text-slate-500">Creatives/Campaign:</span> <span className="text-white font-semibold">{plan.avgCreativesPerCampaign}</span></div>
-          </div>
-        )}
-      </div>
 
-      {/* Collection allocation */}
-      <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="text-sm font-semibold text-slate-200">Collection Allocation & ROAS</div>
-          <button onClick={() => setEditAlloc(v => !v)} className="text-[10px] text-brand-400 hover:text-brand-300 flex items-center gap-1">
-            <Edit2 size={11}/>{editAlloc ? 'Cancel' : 'Edit'}
-          </button>
+          {/* Monthly detail table */}
+          <div className="overflow-x-auto rounded-xl border border-gray-800/50">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-800/50 bg-gray-900/40">
+                  {['Month','Status','Orders/Day','Orders (A/T)','Pacing','Budget (Plan)','Spend (Actual)','ROAS','CAC','Revenue'].map(h => (
+                    <th key={h} className="px-3 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {monthlyData.map((m, i) => {
+                  const mk = mktData[i] || {};
+                  return (
+                    <tr key={m.key} className={clsx('border-b border-gray-800/25 transition-colors',
+                      m.isCurrent ? 'bg-brand-600/8' : STATUS_ROW[m.status], 'hover:bg-gray-800/20')}>
+                      <td className="px-3 py-3 font-semibold text-white whitespace-nowrap">{m.label}</td>
+                      <td className="px-3 py-3"><StatusPill status={m.status}/></td>
+                      <td className="px-3 py-3 text-slate-300">{m.ordersPerDay}/d</td>
+                      <td className="px-3 py-3">
+                        {m.hasData ? <span className="text-white font-semibold">{m.actualOrders.toLocaleString()}</span> : <span className="text-slate-600">—</span>}
+                        <span className="text-slate-500">/{m.targetOrders.toLocaleString()}</span>
+                      </td>
+                      <td className="px-3 py-3"><MktPct pct={m.ordersPct} future={m.isFuture && !m.hasData}/></td>
+                      <td className="px-3 py-3 text-slate-300">{fmtRs(m.targetSpend)}</td>
+                      <td className="px-3 py-3">
+                        {m.actualSpend > 0 ? <span className="text-white font-semibold">{fmtRs(m.actualSpend)}</span> : <span className="text-slate-600">—</span>}
+                      </td>
+                      <td className="px-3 py-3">
+                        {m.actualROAS > 0
+                          ? <span className={m.actualROAS >= m.targetROAS ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold'}>{m.actualROAS}x</span>
+                          : <span className="text-slate-500">{m.targetROAS}x</span>}
+                      </td>
+                      <td className="px-3 py-3">
+                        {m.actualCAC > 0
+                          ? <span className={m.actualCAC <= m.targetCAC ? 'text-emerald-400' : 'text-red-400'}>₹{m.actualCAC}</span>
+                          : <span className="text-slate-500">₹{m.targetCAC}</span>}
+                      </td>
+                      <td className="px-3 py-3">
+                        {m.hasData ? <span className="text-white">{fmtRs(m.actualRevenue)}</span> : <span className="text-slate-500">{fmtRs(m.targetRevenue)}</span>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+              <tfoot>
+                <tr className="border-t border-gray-700/50 bg-gray-900/40">
+                  <td className="px-3 py-2.5 font-bold text-slate-300 text-xs" colSpan={4}>TOTAL</td>
+                  <td colSpan={2}/>
+                  <td className="px-3 py-2.5 font-bold text-white text-xs">{fmtRs(monthlyData.reduce((s,m)=>s+m.targetSpend,0))}</td>
+                  <td colSpan={3}/>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
         </div>
-        {editAlloc ? (
-          <div className="space-y-3">
-            {Object.entries(allocDraft).map(([key, val]) => (
-              <div key={key} className="flex items-center gap-3">
-                <div className="w-16 text-xs text-slate-300">{COLL_LABEL[key] || key}</div>
-                <input type="range" min="0" max="1" step="0.01" value={val}
-                  onChange={e => setAllocDraft(p => ({ ...p, [key]: parseFloat(e.target.value) }))}
-                  className="flex-1 accent-brand-500"/>
-                <input className="w-16 bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-white text-xs text-center"
-                  value={(val * 100).toFixed(0)}
-                  onChange={e => setAllocDraft(p => ({ ...p, [key]: parseFloat(e.target.value) / 100 || 0 }))}/>
-                <span className="text-[10px] text-slate-500">%</span>
-                <div className="w-24 text-xs text-slate-400">ROAS: <span className="text-white">{plan.collectionRoas?.[key]?.toFixed(2) || '—'}</span></div>
-              </div>
-            ))}
-            <div className="flex items-center gap-3 pt-2 border-t border-gray-800/40">
-              <div className="text-[10px] text-slate-500">
-                Total: {(Object.values(allocDraft).reduce((s, v) => s + parseFloat(v), 0) * 100).toFixed(0)}%
-              </div>
-              <button onClick={saveAlloc} className="px-3 py-1.5 bg-brand-600 text-white rounded text-xs hover:bg-brand-500">Save</button>
-              <button onClick={() => setEditAlloc(false)} className="px-3 py-1.5 bg-gray-700 text-slate-300 rounded text-xs">Cancel</button>
-            </div>
-          </div>
-        ) : (
-          <div className="flex gap-3">
-            {Object.entries(plan.collectionAlloc || {}).map(([key, pct]) => (
-              <div key={key} className="flex-1 bg-gray-800/50 rounded-lg p-3">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="w-2.5 h-2.5 rounded-full" style={{ background: COLL_COLORS[key] || '#64748b' }}/>
-                  <span className="text-xs font-semibold text-white">{COLL_LABEL[key] || key}</span>
-                </div>
-                <div className="text-xl font-bold text-white">{Math.round(pct * 100)}%</div>
-                <div className="text-[10px] text-slate-500 mt-0.5">ROAS: {plan.collectionRoas?.[key]?.toFixed(2) || '—'}</div>
-                <div className="h-1 bg-gray-700 rounded-full mt-2 overflow-hidden">
-                  <div className="h-full rounded-full" style={{ width: `${pct * 100}%`, background: COLL_COLORS[key] || '#64748b' }}/>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      )}
 
-      {/* Monthly marketing table */}
-      <div className="overflow-x-auto rounded-xl border border-gray-800/50">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="border-b border-gray-800/50">
-              {['Month','Budget/Day','Month Budget','Campaigns','Creatives','Blended ROAS','Exp Orders/Day','Exp Revenue'].map(h => (
-                <th key={h} className="px-3 py-2.5 text-left text-[10px] font-bold text-slate-500 uppercase tracking-wider whitespace-nowrap">{h}</th>
+      {/* ══════════════════════════════════════════════════════════
+          SUB-TAB: COLLECTIONS
+         ══════════════════════════════════════════════════════════ */}
+      {mktTab === 'collections' && (
+        <div className="space-y-5">
+          {/* BCG Matrix */}
+          {bcgMatrix?.matrix?.length > 0 && (
+            <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-5">
+              <div className="text-sm font-semibold text-slate-200 mb-1">BCG Portfolio Matrix</div>
+              <div className="text-xs text-slate-500 mb-4">Revenue share (X) × MoM growth (Y) · Median split</div>
+              <div className="grid grid-cols-2 gap-3 max-w-2xl">
+                {['Question Mark','Star','Dog','Cash Cow'].map(qName => {
+                  const item = bcgMatrix.matrix.find(m => m.quadrant.name === qName);
+                  if (!item) return null;
+                  return (
+                    <div key={qName} className="rounded-xl border p-4" style={{ borderColor: item.color+'40', background: item.color+'0d' }}>
+                      <div className="flex items-center justify-between mb-3">
+                        <span className="text-sm font-bold" style={{ color: item.color }}>{item.label}</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full border font-semibold"
+                          style={{ color: item.color, borderColor: item.color+'50', background: item.color+'18' }}>
+                          {item.quadrant.name}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs mb-3">
+                        <div className="flex justify-between col-span-2"><span className="text-slate-500">Rev share</span><span className="text-white font-semibold">{item.shareX}%</span></div>
+                        <div className="flex justify-between col-span-2"><span className="text-slate-500">MoM growth</span><span className="font-semibold" style={{ color: item.color }}>+{item.growthY}%</span></div>
+                        <div className="flex justify-between col-span-2"><span className="text-slate-500">ROAS</span><span className="text-white font-semibold">{item.roas}x</span></div>
+                        <div className="flex justify-between col-span-2"><span className="text-slate-500">Allocation</span><span className="text-white font-semibold">{item.alloc}%</span></div>
+                      </div>
+                      <div className="text-xs font-semibold pt-2.5 border-t leading-snug" style={{ color: item.color, borderColor: item.color+'30' }}>
+                        {item.quadrant.action}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="mt-4 flex gap-2 flex-wrap">
+                {bcgMatrix.recommendations.map(r => (
+                  <div key={r.collection} className="bg-gray-800/60 rounded-lg px-3 py-2 flex items-center gap-3 text-sm">
+                    <div className="w-2 h-2 rounded-full shrink-0" style={{ background: r.color||'#64748b' }}/>
+                    <span className="font-semibold text-white">{r.collection}</span>
+                    <span className="text-xs font-bold px-2 py-0.5 rounded"
+                      style={{ background: (r.color||'#64748b')+'20', color: r.color||'#64748b' }}>
+                      {r.budgetSignal}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Allocation editor */}
+          <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div className="text-sm font-semibold text-slate-200">Collection Allocation & ROAS</div>
+              <button onClick={() => setEditAlloc(v => !v)} className="text-xs text-brand-400 hover:text-brand-300 flex items-center gap-1.5">
+                <Edit2 size={12}/>{editAlloc ? 'Cancel' : 'Edit'}
+              </button>
+            </div>
+            {editAlloc ? (
+              <div className="space-y-3">
+                {Object.entries(allocDraft).map(([key, val]) => (
+                  <div key={key} className="flex items-center gap-3">
+                    <div className="w-20 text-sm text-slate-300">{COLL_LABEL[key] || key}</div>
+                    <input type="range" min="0" max="1" step="0.01" value={val}
+                      onChange={e => setAllocDraft(p => ({ ...p, [key]: parseFloat(e.target.value) }))}
+                      className="flex-1 accent-brand-500"/>
+                    <input className="w-16 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-white text-sm text-center"
+                      value={(val * 100).toFixed(0)}
+                      onChange={e => setAllocDraft(p => ({ ...p, [key]: parseFloat(e.target.value) / 100 || 0 }))}/>
+                    <span className="text-xs text-slate-500">%</span>
+                    <div className="w-24 text-xs text-slate-400">ROAS: <span className="text-white">{plan.collectionRoas?.[key]?.toFixed(2) || '—'}</span></div>
+                  </div>
+                ))}
+                <div className="flex items-center gap-3 pt-2 border-t border-gray-800/40">
+                  <span className="text-xs text-slate-500">Total: {(Object.values(allocDraft).reduce((s, v) => s + parseFloat(v), 0) * 100).toFixed(0)}%</span>
+                  <button onClick={saveAlloc} className="px-3 py-1.5 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-500">Save</button>
+                  <button onClick={() => setEditAlloc(false)} className="px-3 py-1.5 bg-gray-700 text-slate-300 rounded-lg text-sm">Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex gap-3 flex-wrap">
+                {Object.entries(plan.collectionAlloc || {}).map(([key, pct]) => (
+                  <div key={key} className="flex-1 min-w-[120px] bg-gray-800/50 rounded-xl p-4">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ background: COLL_COLORS[key] || '#64748b' }}/>
+                      <span className="text-sm font-semibold text-white">{COLL_LABEL[key] || key}</span>
+                    </div>
+                    <div className="text-2xl font-bold text-white">{Math.round(pct * 100)}%</div>
+                    <div className="text-xs text-slate-500 mt-1">ROAS: {plan.collectionRoas?.[key]?.toFixed(2) || '—'}x</div>
+                    <div className="h-1.5 bg-gray-700 rounded-full mt-3 overflow-hidden">
+                      <div className="h-full rounded-full" style={{ width: `${pct * 100}%`, background: COLL_COLORS[key] || '#64748b' }}/>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Global settings */}
+          <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div className="text-sm font-semibold text-slate-200">Global Settings</div>
+              <button onClick={() => setEditGlobals(v => !v)} className="text-xs text-brand-400 hover:text-brand-300 flex items-center gap-1.5">
+                <Edit2 size={12}/>{editGlobals ? 'Cancel' : 'Edit'}
+              </button>
+            </div>
+            {editGlobals ? (
+              <div className="grid grid-cols-3 gap-3">
+                {[['cpr','Avg CPR (₹)'],['avgBudgetPerCampaign','Budget/Campaign (₹/day)'],['avgCreativesPerCampaign','Creatives/Campaign']].map(([f, l]) => (
+                  <div key={f}>
+                    <div className="text-xs text-slate-500 mb-1">{l}</div>
+                    <input className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-2 text-white text-sm"
+                      value={globalsDraft[f]} onChange={e => setGlobalsDraft(p => ({ ...p, [f]: e.target.value }))}/>
+                  </div>
+                ))}
+                <div className="col-span-3 flex gap-2 pt-1">
+                  <button onClick={saveGlobals} className="px-3 py-2 bg-brand-600 text-white rounded-lg text-sm hover:bg-brand-500">Save</button>
+                  <button onClick={() => setEditGlobals(false)} className="px-3 py-2 bg-gray-700 text-slate-300 rounded-lg text-sm">Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex gap-6 text-sm">
+                <div><span className="text-slate-500">CPR:</span> <span className="text-white font-semibold ml-1.5">₹{plan.cpr}</span></div>
+                <div><span className="text-slate-500">Budget/Campaign:</span> <span className="text-white font-semibold ml-1.5">₹{(plan.avgBudgetPerCampaign||0).toLocaleString()}/d</span></div>
+                <div><span className="text-slate-500">Creatives/Campaign:</span> <span className="text-white font-semibold ml-1.5">{plan.avgCreativesPerCampaign}</span></div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════
+          SUB-TAB: CREATIVES
+         ══════════════════════════════════════════════════════════ */}
+      {mktTab === 'creatives' && (
+        <div className="space-y-4">
+          {creatives.length === 0 ? (
+            <div className="bg-gray-900/40 rounded-xl border border-gray-800/40 p-10 text-center">
+              <div className="text-sm text-slate-400 mb-1">No Meta creative data loaded</div>
+              <div className="text-xs text-slate-600">Pull live Meta data to see creative health scores.</div>
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-3 gap-3">
+                {[['strong','bg-emerald-500/15 text-emerald-400 border-emerald-800/30'],['ok','bg-amber-500/15 text-amber-400 border-amber-800/30'],['weak','bg-red-500/15 text-red-400 border-red-800/30']].map(([h, cls]) => (
+                  <div key={h} className={clsx('rounded-xl border p-4 text-center', cls)}>
+                    <div className="text-2xl font-bold">{creatives.filter(c=>c.health===h).length}</div>
+                    <div className="text-xs font-semibold uppercase mt-1">{h}</div>
+                    <div className="text-xs opacity-70 mt-0.5">{fmtRs(creatives.filter(c=>c.health===h).reduce((s,c)=>s+c.spend,0))} spend</div>
+                  </div>
+                ))}
+              </div>
+              <div className="overflow-x-auto rounded-xl border border-gray-800/50">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-800/50 bg-gray-900/40">
+                      {['Creative','Health','Spend','ROAS','CTR','CPC','CAC','Impressions','Days Active'].map(h => (
+                        <th key={h} className="px-3 py-2.5 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {creatives.map((c, i) => (
+                      <tr key={i} className="border-b border-gray-800/25 hover:bg-gray-800/20">
+                        <td className="px-3 py-2.5">
+                          <div className="font-medium text-white truncate max-w-[200px]" title={c.name}>{c.name}</div>
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <div className="flex items-center gap-2">
+                            <div className="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                              <div className={clsx('h-full rounded-full', c.health==='strong'?'bg-emerald-500':c.health==='ok'?'bg-amber-500':'bg-red-500')} style={{ width: `${c.healthScore}%` }}/>
+                            </div>
+                            <span className={clsx('text-xs font-semibold', c.health==='strong'?'text-emerald-400':c.health==='ok'?'text-amber-400':'text-red-400')}>{c.healthScore}</span>
+                          </div>
+                        </td>
+                        <td className="px-3 py-2.5 text-slate-300">{fmtRs(c.spend)}</td>
+                        <td className="px-3 py-2.5"><span className={c.roas >= 4 ? 'text-emerald-400 font-semibold' : c.roas >= 2.5 ? 'text-amber-400' : 'text-red-400'}>{c.roas}x</span></td>
+                        <td className="px-3 py-2.5 text-slate-300">{c.ctr}%</td>
+                        <td className="px-3 py-2.5 text-slate-300">₹{c.cpc}</td>
+                        <td className="px-3 py-2.5 text-slate-300">{c.cac > 0 ? `₹${c.cac}` : '—'}</td>
+                        <td className="px-3 py-2.5 text-slate-400">{c.impressions.toLocaleString()}</td>
+                        <td className="px-3 py-2.5 text-slate-400">{c.activeDays}d</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════
+          SUB-TAB: LTV & McKINSEY
+         ══════════════════════════════════════════════════════════ */}
+      {mktTab === 'ltv' && (
+        <div className="space-y-5">
+          {/* LTV:CAC cards */}
+          <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-5">
+            <div className="text-sm font-semibold text-slate-200 mb-1">LTV:CAC Analysis — By Collection</div>
+            <div className="text-xs text-slate-500 mb-4">Target ratio ≥ 3:1 · LTV = AOV × margin × expected lifetime orders (18-month window)</div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {ltvData.map(c => (
+                <div key={c.coll} className={clsx('rounded-xl border p-5',
+                  c.health==='strong' ? 'border-emerald-800/30 bg-emerald-500/5' : c.health==='ok' ? 'border-amber-800/30 bg-amber-500/5' : 'border-red-800/30 bg-red-500/5')}>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2.5 h-2.5 rounded-full" style={{ background: COLL_COLORS[c.coll] || '#64748b' }}/>
+                      <span className="text-sm font-bold text-white">{c.label}</span>
+                    </div>
+                    <span className={clsx('text-xs px-2 py-0.5 rounded-md font-bold border',
+                      c.health==='strong'?'bg-emerald-500/15 text-emerald-400 border-emerald-800/30':c.health==='ok'?'bg-amber-500/15 text-amber-400 border-amber-800/30':'bg-red-500/15 text-red-400 border-red-800/30')}>
+                      {c.ratio}:1
+                    </span>
+                  </div>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between"><span className="text-slate-500">LTV</span><span className="text-white font-semibold">₹{c.ltv}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-500">CAC</span><span className="text-white font-semibold">₹{c.cac}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-500">Payback</span><span className="text-amber-400 font-semibold">{c.payback}mo</span></div>
+                    <div className="flex justify-between"><span className="text-slate-500">ROAS</span><span className="text-white">{c.roas}x</span></div>
+                    <div className="flex justify-between"><span className="text-slate-500">Alloc</span><span className="text-slate-300">{c.allocPct}%</span></div>
+                  </div>
+                  <div className="mt-3 pt-3 border-t border-gray-700/40">
+                    <div className="text-xs text-slate-500 mb-1">LTV:CAC ratio</div>
+                    <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                      <div className={clsx('h-full rounded-full', c.health==='strong'?'bg-emerald-500':c.health==='ok'?'bg-amber-500':'bg-red-500')}
+                        style={{ width: `${Math.min(c.ratio / 5 * 100, 100)}%` }}/>
+                    </div>
+                    <div className="flex justify-between text-[11px] mt-1 text-slate-600"><span>0</span><span className="text-amber-500">2x</span><span className="text-emerald-500">3x</span><span>5x+</span></div>
+                  </div>
+                </div>
               ))}
-            </tr>
-          </thead>
-          <tbody>
-            {mktData.map((mk, i) => (
-              <tr key={pva[i]?.key || i} className={clsx('border-b border-gray-800/30', pva[i]?.isCurrentMonth && 'bg-brand-600/5')}>
-                <td className="px-3 py-2.5 font-semibold text-white whitespace-nowrap">{pva[i]?.label}</td>
-                <td className="px-3 py-2.5 text-slate-300">{fmtRs(mk.adBudgetPerDay)}</td>
-                <td className="px-3 py-2.5 text-slate-300">{fmtRs(mk.totalMonthlyBudget)}</td>
-                <td className="px-3 py-2.5 text-white font-semibold">{mk.campaigns}</td>
-                <td className="px-3 py-2.5 text-white font-semibold">{mk.creatives}</td>
-                <td className="px-3 py-2.5"><span className="text-emerald-400 font-semibold">{mk.blendedRoas?.toFixed(2)}x</span></td>
-                <td className="px-3 py-2.5 text-slate-300">{mk.expectedResults?.toLocaleString()}</td>
-                <td className="px-3 py-2.5 text-slate-300">{fmtRs(mk.totalExpectedRevenue)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </div>
+          </div>
+
+          {/* McKinsey decomposition */}
+          {mcKData.length > 0 && (
+            <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-5">
+              <div className="text-sm font-semibold text-slate-200 mb-1">McKinsey Revenue Decomposition</div>
+              <div className="text-xs text-slate-500 mb-4">ΔRevenue = Volume effect + Price (AOV) effect + Mix residual · Month over month</div>
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={mcKData.map(m => ({ label: m.label.slice(0,3), Volume: m.volumeEffect, Price: m.priceEffect, Mix: m.mixEffect }))}>
+                  <CartesianGrid strokeDasharray="2 4" stroke="#1f2937" vertical={false}/>
+                  <XAxis dataKey="label" tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} tickLine={false}/>
+                  <YAxis tickFormatter={v => fmtK(v)} tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} tickLine={false} width={45}/>
+                  <Tooltip content={<ChartTip/>}/>
+                  <Bar dataKey="Volume" fill="#818cf8" stackId="a" radius={[0,0,0,0]} name="Volume"/>
+                  <Bar dataKey="Price"  fill="#f59e0b" stackId="a" radius={[0,0,0,0]} name="Price/AOV"/>
+                  <Bar dataKey="Mix"    fill="#22c55e" stackId="a" radius={[3,3,0,0]} name="Mix"/>
+                </BarChart>
+              </ResponsiveContainer>
+              <div className="flex gap-4 mt-2">
+                {[['Volume','#818cf8'],['Price/AOV','#f59e0b'],['Mix','#22c55e']].map(([l,c]) => (
+                  <span key={l} className="flex items-center gap-1.5 text-xs text-slate-400">
+                    <span className="w-2 h-2 rounded-sm" style={{ background: c }}/>{l}
+                  </span>
+                ))}
+              </div>
+              <div className="overflow-x-auto mt-4">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-800/50">
+                      {['Month','Total ΔRev','Volume','Price/AOV','Mix','MoM Growth'].map(h => (
+                        <th key={h} className="px-3 py-2 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mcKData.map(m => (
+                      <tr key={m.key} className="border-b border-gray-800/25">
+                        <td className="px-3 py-2.5 font-semibold text-white whitespace-nowrap">{m.label}</td>
+                        <td className="px-3 py-2.5 text-emerald-400 font-semibold">{fmtRs(m.totalDelta)}</td>
+                        <td className="px-3 py-2.5 text-purple-400">{fmtRs(m.volumeEffect)}</td>
+                        <td className="px-3 py-2.5 text-amber-400">{fmtRs(m.priceEffect)}</td>
+                        <td className="px-3 py-2.5 text-emerald-400">{fmtRs(m.mixEffect)}</td>
+                        <td className="px-3 py-2.5"><span className={m.pct >= 0 ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>+{m.pct}%</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
     </div>
   );
 }
@@ -1536,7 +1908,7 @@ export default function BusinessPlan() {
 
       {tab === 'command'   && <TabCommand   plan={plan} pva={pva} predictions={predictions} allOrders={allOrders} constraint={constraint} breaking={breaking} bcgMatrix={combinedBCG}/>}
       {tab === 'revenue'   && <TabRevenue   plan={plan} pva={pva} savePlan={savePlan} allOrders={allOrders}/>}
-      {tab === 'marketing' && <TabMarketing plan={plan} pva={pva} savePlan={savePlan} bcgMatrix={combinedBCG}/>}
+      {tab === 'marketing' && <TabMarketing plan={plan} pva={pva} savePlan={savePlan} bcgMatrix={combinedBCG} allOrders={allOrders} enrichedRows={enrichedRows}/>}
       {tab === 'inventory' && <TabInventory inventoryMap={inventoryMap} allOrders={allOrders} growthInv={growthInv}/>}
       {tab === 'warehouse' && <TabWarehouses plan={plan} savePlan={savePlan} warehouseTags={warehouseTags} allOrders={allOrders}/>}
       {tab === 'capital'   && <TabCapital   plan={plan} wc={wc} cmStack={cmStack} rtoModel={rtoModel}/>}
