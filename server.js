@@ -760,7 +760,7 @@ app.post('/api/ga/report', async (req, res) => {
 
 /* ─── GOOGLE ADS ──────────────────────────────────────────────────── */
 
-const GADS_API_VERSION = 'v16';
+const GADS_API_VERSION = 'v23';
 const GADS_BASE = 'https://googleads.googleapis.com';
 
 async function getGadsAccessToken(clientId, clientSecret, refreshToken) {
