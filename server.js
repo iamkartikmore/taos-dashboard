@@ -62,6 +62,10 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const JWT_SECRET       = process.env.JWT_SECRET || 'dev-secret-change-in-prod';
 const googleAuthClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
+// Silenced Google login — flip to false to require Google sign-in again
+const AUTH_BYPASS       = true;
+const AUTH_BYPASS_EMAIL = process.env.AUTH_BYPASS_EMAIL || 'kartik@theaffordableorganicstore.com';
+
 // GitHub API persistence — config lives in git, server is stateless
 const GH_TOKEN = process.env.GITHUB_TOKEN;
 const GH_OWNER = process.env.GITHUB_OWNER || 'iamkartikmore';
@@ -260,6 +264,28 @@ app.get('/api/auth/me', async (req, res) => {
   } catch {
     res.status(401).json({ error: 'Invalid or expired token' });
   }
+});
+
+// POST /api/auth/bypass — silenced Google login; issues a JWT for the default admin
+app.post('/api/auth/bypass', async (req, res) => {
+  if (!AUTH_BYPASS) return res.status(404).end();
+  const email = AUTH_BYPASS_EMAIL.toLowerCase();
+  const { users, roles } = await loadAuthConfig();
+  const userConfig = users.find(u => u.email.toLowerCase() === email);
+  if (!userConfig) return res.status(500).json({ error: `Bypass email ${email} not found in auth-config` });
+  const modules = resolveModules(userConfig, roles);
+  const brands  = userConfig.brands || ['*'];
+  const user = {
+    email,
+    name: userConfig.name,
+    picture: null,
+    role: userConfig.role,
+    modules,
+    brands,
+  };
+  const token = jwt.sign(user, JWT_SECRET, { expiresIn: '30d' });
+  pushLog({ type: 'login', email, name: user.name, bypass: true });
+  res.json({ token, user });
 });
 
 /* ─── META PROXY ──────────────────────────────────────────────────── */

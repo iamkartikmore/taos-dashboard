@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Zap, AlertTriangle } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth, AUTH_BYPASS } from '../contexts/AuthContext';
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 
@@ -21,6 +21,7 @@ export default function Login() {
   }, [user, from, navigate]);
 
   useEffect(() => {
+    if (AUTH_BYPASS) return;
     if (!GOOGLE_CLIENT_ID || !window.google?.accounts?.id) return;
 
     window.google.accounts.id.initialize({
@@ -64,34 +65,48 @@ export default function Login() {
 
         <div className="w-full h-px bg-gray-800" />
 
-        <p className="text-sm text-slate-400 text-center leading-relaxed">
-          Sign in with your Google account to access the dashboard.
-        </p>
-
-        {error && (
-          <div className="w-full flex items-start gap-2 px-3 py-2.5 rounded-lg bg-red-900/30 border border-red-700/40 text-red-300 text-sm">
-            <AlertTriangle size={14} className="shrink-0 mt-0.5" />
-            <span>{error}</span>
-          </div>
-        )}
-
-        <div className="flex flex-col items-center gap-3 w-full">
-          {loading ? (
-            <div className="w-7 h-7 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
-          ) : (
-            <div ref={btnRef} />
-          )}
-
-          {!GOOGLE_CLIENT_ID && (
-            <p className="text-xs text-amber-400 text-center mt-1">
-              VITE_GOOGLE_CLIENT_ID is not configured.
+        {AUTH_BYPASS ? (
+          <>
+            <p className="text-sm text-slate-400 text-center leading-relaxed">
+              Signing you in…
             </p>
-          )}
-        </div>
+            <div className="w-7 h-7 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+            <p className="text-[11px] text-slate-600 text-center">
+              Google sign-in is silenced. Flip <span className="font-mono text-slate-500">AUTH_BYPASS</span> to re-enable.
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="text-sm text-slate-400 text-center leading-relaxed">
+              Sign in with your Google account to access the dashboard.
+            </p>
 
-        <p className="text-[11px] text-slate-600 text-center">
-          Access is restricted to authorised email addresses only.
-        </p>
+            {error && (
+              <div className="w-full flex items-start gap-2 px-3 py-2.5 rounded-lg bg-red-900/30 border border-red-700/40 text-red-300 text-sm">
+                <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </div>
+            )}
+
+            <div className="flex flex-col items-center gap-3 w-full">
+              {loading ? (
+                <div className="w-7 h-7 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <div ref={btnRef} />
+              )}
+
+              {!GOOGLE_CLIENT_ID && (
+                <p className="text-xs text-amber-400 text-center mt-1">
+                  VITE_GOOGLE_CLIENT_ID is not configured.
+                </p>
+              )}
+            </div>
+
+            <p className="text-[11px] text-slate-600 text-center">
+              Access is restricted to authorised email addresses only.
+            </p>
+          </>
+        )}
       </div>
     </div>
   );
