@@ -1109,6 +1109,102 @@ app.post('/api/listmonk/send', async (req, res) => {
   }
 });
 
+// POST /api/listmonk/ensure-lists — idempotently create segment lists, return {segmentName: listId}
+// body: url, username, password, segmentNames: string[], prefix?: string (default "TAOS")
+app.post('/api/listmonk/ensure-lists', async (req, res) => {
+  try {
+    const { segmentNames, prefix = 'TAOS', ...creds } = req.body;
+    if (!Array.isArray(segmentNames) || !segmentNames.length) {
+      return res.status(400).json({ error: 'segmentNames[] required' });
+    }
+    const cfg = listmonkAuth(creds);
+    const listsResp = await axios.get(`${cfg.baseURL}/api/lists?per_page=500`, cfg);
+    const existing = listsResp.data?.data?.results || [];
+    const byName = new Map(existing.map(l => [l.name, l]));
+    const result = {};
+    for (const seg of segmentNames) {
+      const name = `${prefix} — ${seg}`;
+      if (byName.has(name)) {
+        result[seg] = byName.get(name).id;
+        continue;
+      }
+      const created = await axios.post(`${cfg.baseURL}/api/lists`, {
+        name, type: 'private', optin: 'single', tags: ['taos', 'rfm', seg.toLowerCase()],
+      }, cfg);
+      result[seg] = created.data?.data?.id;
+    }
+    res.json({ lists: result });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
+// POST /api/listmonk/import-subscribers — bulk upsert via Listmonk CSV import
+// body: url, username, password, listId, customers: [{email, name, attribs}]
+app.post('/api/listmonk/import-subscribers', async (req, res) => {
+  try {
+    const { listId, customers, ...creds } = req.body;
+    if (!listId || !Array.isArray(customers) || !customers.length) {
+      return res.status(400).json({ error: 'listId and customers[] required' });
+    }
+    const cfg = listmonkAuth(creds);
+
+    // Listmonk CSV import: email,name,attributes(JSON)
+    const header = 'email,name,attributes';
+    const rows = customers.map(c => {
+      const email = (c.email || '').replace(/"/g, '""');
+      const name  = (c.name  || '').replace(/"/g, '""');
+      const attribs = JSON.stringify(c.attribs || {}).replace(/"/g, '""');
+      return `"${email}","${name}","${attribs}"`;
+    });
+    const csv = [header, ...rows].join('\n');
+
+    // Build multipart form-data manually (avoid extra dep)
+    const boundary = '----taos' + Date.now();
+    const params = JSON.stringify({
+      mode: 'subscribe',
+      subscription_status: 'confirmed',
+      delim: ',',
+      lists: [Number(listId)],
+      overwrite: true,
+    });
+    const body = [
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="params"',
+      '',
+      params,
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="file"; filename="subscribers.csv"',
+      'Content-Type: text/csv',
+      '',
+      csv,
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
+
+    const r = await axios.post(`${cfg.baseURL}/api/import/subscribers`, body, {
+      ...cfg,
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+    res.json({ ok: true, import: r.data?.data || null, imported: customers.length });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
+// GET /api/listmonk/import-status — current import progress (Listmonk returns singleton job)
+app.post('/api/listmonk/import-status', async (req, res) => {
+  try {
+    const cfg = listmonkAuth(req.body);
+    const r = await axios.get(`${cfg.baseURL}/api/import/subscribers`, cfg);
+    res.json({ status: r.data?.data || null });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
 /* ─── HEALTH CHECK ────────────────────────────────────────────────── */
 
 app.get('/api/health', (_, res) => res.json({ ok: true, ts: Date.now() }));

@@ -318,6 +318,11 @@ export const useStore = create((set, get) => {
       set({ brandData });
     },
 
+    setBrandSegmentSync: (brandId, syncResult) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), segmentSync: syncResult } };
+      set({ brandData });
+    },
+
     /* ── Aggregated (derived, rebuilt when active brands / brandData change) */
     enrichedRows:  [],
     rawAccounts:   [],

@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
   Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck, ClipboardList,
-  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, LogOut, ShieldCheck, Search, Mail,
+  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, LogOut, ShieldCheck, Search, Mail, Users,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -39,6 +39,7 @@ const NAV = [
   { to: '/ga',               icon: Activity,    label: 'GA Analytics',       group: 'shopify',  moduleKey: 'ga' },
   { to: '/google-ads',       icon: Search,      label: 'Google Ads',         group: 'shopify',  moduleKey: 'google-ads' },
   { to: '/email-campaigns',  icon: Mail,        label: 'Email Campaigns',    group: 'shopify',  moduleKey: 'email-campaigns' },
+  { to: '/segments',         icon: Users,       label: 'Customer Segments',  group: 'shopify',  moduleKey: 'segments' },
   { to: '/admin',            icon: ShieldCheck, label: 'User Management',    group: 'admin',    moduleKey: 'admin' },
 ];
 

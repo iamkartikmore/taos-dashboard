@@ -364,6 +364,18 @@ export async function sendListmonkCampaign(creds, payload) {
   return listmonkCall('/send', creds, payload);  // { campaign: {id, status, ...} }
 }
 
+export async function ensureListmonkLists(creds, segmentNames, prefix = 'TAOS') {
+  return listmonkCall('/ensure-lists', creds, { segmentNames, prefix });  // { lists: {segment: id} }
+}
+
+export async function importListmonkSubscribers(creds, listId, customers) {
+  return listmonkCall('/import-subscribers', creds, { listId, customers });
+}
+
+export async function fetchListmonkImportStatus(creds) {
+  return listmonkCall('/import-status', creds);
+}
+
 /* ─── VERIFY TOKEN ───────────────────────────────────────────────── */
 
 export async function verifyToken(token, ver = 'v21.0') {
