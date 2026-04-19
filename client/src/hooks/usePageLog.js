@@ -13,7 +13,8 @@ const PATH_LABELS = {
   '/collection-spend': 'Collection Spend', '/aov': 'AOV Analysis',
   '/business-plan': 'Business Plan', '/shopify': 'Shopify Orders',
   '/shopify-insights': 'Shopify Analytics', '/shopify-ops': 'Shopify Ops',
-  '/procurement': 'Procurement', '/ga': 'GA Analytics', '/google-ads': 'Google Ads', '/admin': 'Admin',
+  '/procurement': 'Procurement', '/ga': 'GA Analytics', '/google-ads': 'Google Ads',
+  '/email-campaigns': 'Email Campaigns', '/admin': 'Admin',
 };
 
 export function usePageLog() {

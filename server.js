@@ -952,6 +952,163 @@ app.post('/api/google-ads/pull', async (req, res) => {
   }
 });
 
+/* ─── LISTMONK (email) ────────────────────────────────────────────── */
+
+function listmonkAuth({ url, username, password }) {
+  if (!url || !username || !password) throw new Error('listmonk url, username, password required');
+  return {
+    baseURL: url.replace(/\/+$/, ''),
+    auth:    { username, password },
+    timeout: 30000,
+  };
+}
+
+function listmonkErr(err) {
+  return err.response?.data?.message || err.response?.data?.error || err.message;
+}
+
+// POST /api/listmonk/verify — confirm reachable + list configured lists
+app.post('/api/listmonk/verify', async (req, res) => {
+  try {
+    const cfg = listmonkAuth(req.body);
+    const [health, lists] = await Promise.all([
+      axios.get(`${cfg.baseURL}/api/health`, cfg),
+      axios.get(`${cfg.baseURL}/api/lists?per_page=200`, cfg),
+    ]);
+    const listRows = (lists.data?.data?.results || []).map(l => ({
+      id: l.id, name: l.name, type: l.type, subscriberCount: l.subscriber_count,
+    }));
+    res.json({ ok: true, health: health.data?.data ?? true, lists: listRows });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: listmonkErr(err) });
+  }
+});
+
+// POST /api/listmonk/campaigns — list recent campaigns (with stats)
+app.post('/api/listmonk/campaigns', async (req, res) => {
+  try {
+    const cfg = listmonkAuth(req.body);
+    const r = await axios.get(`${cfg.baseURL}/api/campaigns?per_page=200&order_by=created_at&order=desc`, cfg);
+    const campaigns = (r.data?.data?.results || []).map(c => ({
+      id:        c.id,
+      name:      c.name,
+      subject:   c.subject,
+      status:    c.status,
+      type:      c.type,
+      createdAt: c.created_at,
+      sendAt:    c.send_at,
+      startedAt: c.started_at,
+      finishedAt:c.finished_at,
+      toSend:    c.to_send,
+      sent:      c.sent,
+      views:     c.views,
+      clicks:    c.clicks,
+      bounces:   c.bounces,
+      lists:     (c.lists || []).map(l => ({ id: l.id, name: l.name })),
+    }));
+    res.json({ campaigns });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
+// POST /api/listmonk/campaign — single campaign detail
+app.post('/api/listmonk/campaign', async (req, res) => {
+  try {
+    const { id, ...creds } = req.body;
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const cfg = listmonkAuth(creds);
+    const r = await axios.get(`${cfg.baseURL}/api/campaigns/${id}`, cfg);
+    res.json({ campaign: r.data?.data });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
+// POST /api/listmonk/analytics — views/clicks/bounces/links time series
+app.post('/api/listmonk/analytics', async (req, res) => {
+  try {
+    const { type = 'views', campaignIds = [], from, to, ...creds } = req.body;
+    const cfg = listmonkAuth(creds);
+    const params = new URLSearchParams();
+    (campaignIds || []).forEach(id => params.append('id', id));
+    if (from) params.set('from', from);
+    if (to)   params.set('to',   to);
+    const r = await axios.get(`${cfg.baseURL}/api/campaigns/analytics/${type}?${params}`, cfg);
+    res.json({ series: r.data?.data || [] });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
+// POST /api/listmonk/lists — list subscriber lists
+app.post('/api/listmonk/lists', async (req, res) => {
+  try {
+    const cfg = listmonkAuth(req.body);
+    const r = await axios.get(`${cfg.baseURL}/api/lists?per_page=200`, cfg);
+    res.json({ lists: r.data?.data?.results || [] });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
+// POST /api/listmonk/templates — list templates
+app.post('/api/listmonk/templates', async (req, res) => {
+  try {
+    const cfg = listmonkAuth(req.body);
+    const r = await axios.get(`${cfg.baseURL}/api/templates`, cfg);
+    res.json({ templates: r.data?.data || [] });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
+// POST /api/listmonk/send — create + start a campaign
+// body: url, username, password, name, subject, fromEmail, listIds, body, contentType?, templateId?, sendAt?, startNow?
+app.post('/api/listmonk/send', async (req, res) => {
+  try {
+    const {
+      name, subject, fromEmail, listIds, body, contentType = 'html',
+      templateId, sendAt, startNow = true, ...creds
+    } = req.body;
+
+    if (!name || !subject || !fromEmail || !Array.isArray(listIds) || !listIds.length) {
+      return res.status(400).json({ error: 'name, subject, fromEmail, listIds[] required' });
+    }
+
+    const cfg = listmonkAuth(creds);
+
+    const payload = {
+      name,
+      subject,
+      from_email:   fromEmail,
+      lists:        listIds.map(Number),
+      content_type: contentType,
+      messenger:    'email',
+      body:         body || '',
+      type:         'regular',
+    };
+    if (templateId) payload.template_id = Number(templateId);
+    if (sendAt)     payload.send_at     = sendAt;
+
+    // 1) Create campaign (draft)
+    const created = await axios.post(`${cfg.baseURL}/api/campaigns`, payload, cfg);
+    const campaign = created.data?.data;
+    if (!campaign?.id) throw new Error('campaign creation returned no id');
+
+    // 2) Flip status → running (or scheduled if sendAt was provided)
+    if (startNow || sendAt) {
+      const nextStatus = sendAt ? 'scheduled' : 'running';
+      await axios.put(`${cfg.baseURL}/api/campaigns/${campaign.id}/status`, { status: nextStatus }, cfg);
+      campaign.status = nextStatus;
+    }
+
+    res.json({ campaign });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
 /* ─── HEALTH CHECK ────────────────────────────────────────────────── */
 
 app.get('/api/health', (_, res) => res.json({ ok: true, ts: Date.now() }));

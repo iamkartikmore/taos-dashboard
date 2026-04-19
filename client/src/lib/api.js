@@ -322,6 +322,48 @@ export async function fetchGoogleAds(creds, datePreset = 'last_30d', onProgress)
   return json;
 }
 
+/* ─── LISTMONK ───────────────────────────────────────────────────── */
+
+async function listmonkCall(path, creds, body) {
+  const res = await fetch(`/api/listmonk${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...creds, ...(body || {}) }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok || json.error) throw new Error(json.error || `Listmonk ${path} failed (${res.status})`);
+  return json;
+}
+
+export async function verifyListmonk(creds) {
+  return listmonkCall('/verify', creds);  // { ok, version, lists: [{id,name,count}] }
+}
+
+export async function fetchListmonkCampaigns(creds) {
+  return listmonkCall('/campaigns', creds);  // { campaigns: [...] }
+}
+
+export async function fetchListmonkCampaign(creds, id) {
+  return listmonkCall('/campaign', creds, { id });  // { campaign: {...} }
+}
+
+export async function fetchListmonkAnalytics(creds, { type = 'views', campaignIds = [], from, to }) {
+  return listmonkCall('/analytics', creds, { type, campaignIds, from, to });  // { series: [...] }
+}
+
+export async function fetchListmonkLists(creds) {
+  return listmonkCall('/lists', creds);  // { lists: [...] }
+}
+
+export async function fetchListmonkTemplates(creds) {
+  return listmonkCall('/templates', creds);  // { templates: [...] }
+}
+
+export async function sendListmonkCampaign(creds, payload) {
+  // payload: { name, subject, fromEmail, listIds:[], body, contentType:'html'|'richtext', templateId?, sendAt?, startNow? }
+  return listmonkCall('/send', creds, payload);  // { campaign: {id, status, ...} }
+}
+
 /* ─── VERIFY TOKEN ───────────────────────────────────────────────── */
 
 export async function verifyToken(token, ver = 'v21.0') {

@@ -34,6 +34,7 @@ export function makeBrand(name = 'New Brand', idx = 0) {
     shopify: { shop: '', clientId: '', clientSecret: '' },
     ga:      { propertyId: '', serviceAccountJson: '' },
     googleAds: { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '' },
+    listmonk: { url: '', username: '', password: '', defaultListId: '', fromEmail: '' },
   };
 }
 
@@ -50,11 +51,13 @@ const DEFAULT_LISTS = {
 function loadBrands() {
   const stored = lsGet(LS_BRANDS, null);
   if (stored?.length) {
-    // Backfill missing googleAds field on existing brands (added 2026-04)
-    return stored.map(b => b.googleAds
-      ? b
-      : { ...b, googleAds: { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '' } }
-    );
+    // Backfill missing googleAds / listmonk fields on existing brands
+    return stored.map(b => {
+      const u = { ...b };
+      if (!u.googleAds) u.googleAds = { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '' };
+      if (!u.listmonk)  u.listmonk  = { url: '', username: '', password: '', defaultListId: '', fromEmail: '' };
+      return u;
+    });
   }
 
   const old = lsGet('taos_config', null);
@@ -173,6 +176,7 @@ export const useStore = create((set, get) => {
         if (patch.shopify)   u.shopify   = { ...b.shopify,   ...patch.shopify };
         if (patch.ga)        u.ga        = { ...b.ga,        ...patch.ga };
         if (patch.googleAds) u.googleAds = { ...b.googleAds, ...patch.googleAds };
+        if (patch.listmonk)  u.listmonk  = { ...(b.listmonk || {}), ...patch.listmonk };
         return u;
       }));
       set({ brands });
@@ -301,6 +305,16 @@ export const useStore = create((set, get) => {
 
     setBrandGoogleAdsStatus: (brandId, status, error = null) => {
       const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), googleAdsStatus: status, googleAdsError: error } };
+      set({ brandData });
+    },
+
+    setBrandListmonkData: (brandId, data) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), listmonkData: data, listmonkStatus: 'success', listmonkFetchAt: Date.now() } };
+      set({ brandData });
+    },
+
+    setBrandListmonkStatus: (brandId, status, error = null) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), listmonkStatus: status, listmonkError: error } };
       set({ brandData });
     },
 

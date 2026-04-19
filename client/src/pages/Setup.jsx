@@ -3,10 +3,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key,
   BookOpen, Upload, ShoppingBag, Zap, ChevronDown, ChevronRight,
-  Package, BarChart3, Calendar, Search,
+  Package, BarChart3, Calendar, Search, Mail,
 } from 'lucide-react';
 import { useStore, BRAND_COLORS } from '../store';
-import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData, fetchGoogleAds, verifyGoogleAds, pullAccountWithCustomRange } from '../lib/api';
+import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData, fetchGoogleAds, verifyGoogleAds, pullAccountWithCustomRange, verifyListmonk, fetchListmonkCampaigns } from '../lib/api';
 import { normalizeGoogleAdsResponse } from '../lib/googleAdsAnalytics';
 import { BREAKDOWN_SPECS, pullAllBreakdowns } from '../lib/breakdownApi';
 import { parseCsv, csvRowsToManualMap, detectListsFromCsvRows } from '../lib/csvImport';
@@ -83,6 +83,7 @@ function BrandCard({ brand, brandInfo }) {
     setBrandOrders, setBrandOrdersStatus,
     setBrandGaData, setBrandGaStatus,
     setBrandGoogleAdsData, setBrandGoogleAdsStatus,
+    setBrandListmonkData, setBrandListmonkStatus,
     appendLog,
   } = useStore();
 
@@ -97,6 +98,9 @@ function BrandCard({ brand, brandInfo }) {
   const [pullingGAds, setPullingGAds]       = useState(false);
   const [verifyingGAds, setVerifyingGAds]   = useState(false);
   const [verifyGAdsOk, setVerifyGAdsOk]     = useState(null);
+  const [pullingLmonk, setPullingLmonk]     = useState(false);
+  const [verifyingLmonk, setVerifyingLmonk] = useState(false);
+  const [verifyLmonkOk, setVerifyLmonkOk]   = useState(null);
   const [pullingAll, setPullingAll]         = useState(false);
 
   // Per-brand time windows
@@ -109,13 +113,16 @@ function BrandCard({ brand, brandInfo }) {
   const ordersStatus    = bd.ordersStatus    || 'idle';
   const gaStatus        = bd.gaStatus        || 'idle';
   const googleAdsStatus = bd.googleAdsStatus || 'idle';
+  const listmonkStatus  = bd.listmonkStatus  || 'idle';
   const hasToken   = !!brand.meta.token;
   const hasAccts   = brand.meta.accounts.filter(a => a.key && a.id).length > 0;
   const hasShopify = !!(brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret);
   const hasGa      = !!(brand.ga?.propertyId && brand.ga?.serviceAccountJson);
   const gAds       = brand.googleAds || {};
   const hasGAds    = !!(gAds.devToken && gAds.customerId && gAds.clientId && gAds.clientSecret && gAds.refreshToken);
-  const anyBusy    = pullingMeta || pullingInv || pullingOrders || pullingGa || pullingGAds || pullingAll;
+  const lmonk      = brand.listmonk || {};
+  const hasLmonk   = !!(lmonk.url && lmonk.username && lmonk.password);
+  const anyBusy    = pullingMeta || pullingInv || pullingOrders || pullingGa || pullingGAds || pullingLmonk || pullingAll;
 
   /* ── individual pull handlers ───────────────────────────────────── */
   const handleVerify = async () => {
@@ -238,6 +245,32 @@ function BrandCard({ brand, brandInfo }) {
     finally { setPullingGAds(false); }
   };
 
+  const handleVerifyLmonk = async () => {
+    if (!hasLmonk) return;
+    setVerifyingLmonk(true); setVerifyLmonkOk(null);
+    try {
+      const info = await verifyListmonk(brand.listmonk);
+      setVerifyLmonkOk({ ok: true, lists: info.lists?.length || 0 });
+    } catch (e) { setVerifyLmonkOk({ ok: false, msg: e.message }); }
+    finally { setVerifyingLmonk(false); }
+  };
+
+  const doPullListmonk = async () => {
+    setBrandListmonkStatus(brand.id, 'loading');
+    appendLog(`[${brand.name}] Starting Listmonk pull...`);
+    const { campaigns } = await fetchListmonkCampaigns(brand.listmonk);
+    setBrandListmonkData(brand.id, { campaigns, pulledAt: Date.now() });
+    appendLog(`[${brand.name}] ✅ Listmonk — ${campaigns.length} campaigns`);
+  };
+
+  const handlePullLmonk = async () => {
+    if (!hasLmonk) return;
+    setPullingLmonk(true);
+    try { await doPullListmonk(); }
+    catch (e) { setBrandListmonkStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Listmonk: ${e.message}`); }
+    finally { setPullingLmonk(false); }
+  };
+
   const handlePullAll = async () => {
     setPullingAll(true);
     appendLog(`━━━ ${brand.name} — Pull All ━━━`);
@@ -321,12 +354,13 @@ function BrandCard({ brand, brandInfo }) {
         />
 
         {/* Status dots */}
-        <div className="flex items-center gap-1.5" title="Meta · Inventory · Orders · GA · Google Ads">
+        <div className="flex items-center gap-1.5" title="Meta · Inventory · Orders · GA · Google Ads · Listmonk">
           <StatusDot status={metaStatus} />
           <StatusDot status={inventoryStatus} />
           <StatusDot status={ordersStatus} />
           <StatusDot status={gaStatus} />
           <StatusDot status={googleAdsStatus} />
+          <StatusDot status={listmonkStatus} />
         </div>
 
         <button onClick={() => setExpanded(v => !v)}
@@ -637,6 +671,82 @@ function BrandCard({ brand, brandInfo }) {
                   {bd.googleAdsData && (
                     <span className="px-2 py-0.5 rounded-full bg-amber-900/30 text-amber-400 text-[10px]">
                       {bd.googleAdsData.campaigns?.length || 0} campaigns · {bd.googleAdsData.adGroups?.length || 0} ad groups · {bd.googleAdsData.ads?.length || 0} ads
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* ── LISTMONK (email) ──────────────────────────────── */}
+              <div className="space-y-3 xl:col-span-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-widest">
+                  <Mail size={11} /> Listmonk (Email)
+                  <StatusDot status={listmonkStatus} />
+                  {bd.listmonkFetchAt && <span className="text-[10px] text-slate-600 font-normal ml-1">Last: {new Date(bd.listmonkFetchAt).toLocaleTimeString()}</span>}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="sm:col-span-2">
+                    <label className="text-[10px] text-slate-500 mb-1 block">Listmonk URL</label>
+                    <input type="text"
+                      value={lmonk.url || ''}
+                      onChange={e => updateBrand(brand.id, { listmonk: { ...lmonk, url: e.target.value.trim() } })}
+                      placeholder="https://listmonk.yourdomain.com"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-sky-500" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">API Username</label>
+                    <input type="text"
+                      value={lmonk.username || ''}
+                      onChange={e => updateBrand(brand.id, { listmonk: { ...lmonk, username: e.target.value } })}
+                      placeholder="admin-api"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-sky-500" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">API Password / Token</label>
+                    <input type="password"
+                      value={lmonk.password || ''}
+                      onChange={e => updateBrand(brand.id, { listmonk: { ...lmonk, password: e.target.value } })}
+                      placeholder="••••••••"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-sky-500" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">From Email</label>
+                    <input type="text"
+                      value={lmonk.fromEmail || ''}
+                      onChange={e => updateBrand(brand.id, { listmonk: { ...lmonk, fromEmail: e.target.value } })}
+                      placeholder='"TAOS" <hello@theaffordableorganicstore.com>'
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-sky-500" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">Default List ID (optional)</label>
+                    <input type="text"
+                      value={lmonk.defaultListId || ''}
+                      onChange={e => updateBrand(brand.id, { listmonk: { ...lmonk, defaultListId: e.target.value.replace(/\D/g, '') } })}
+                      placeholder="1"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-sky-500" />
+                  </div>
+                </div>
+
+                {verifyLmonkOk && (
+                  <div className={`flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-lg ${verifyLmonkOk.ok ? 'bg-emerald-900/30 text-emerald-300' : 'bg-red-900/30 text-red-300'}`}>
+                    {verifyLmonkOk.ok
+                      ? <><CheckCircle size={11} /> Reachable · {verifyLmonkOk.lists} list(s) configured</>
+                      : <><AlertCircle size={11} /> {verifyLmonkOk.msg}</>}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 flex-wrap pt-1">
+                  <button onClick={handleVerifyLmonk} disabled={verifyingLmonk || !hasLmonk}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 rounded-lg text-xs text-slate-300 transition-all border border-gray-700">
+                    {verifyingLmonk ? <Spinner size="sm" /> : <CheckCircle size={11} />} Verify
+                  </button>
+                  <button onClick={handlePullLmonk} disabled={anyBusy || !hasLmonk}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-sky-700/30 hover:bg-sky-700/50 disabled:opacity-30 rounded-lg text-xs font-medium text-sky-300 transition-all border border-sky-700/30">
+                    {pullingLmonk ? <Spinner size="sm" /> : <Mail size={11} />} Pull Campaigns
+                  </button>
+                  {bd.listmonkData?.campaigns && (
+                    <span className="px-2 py-0.5 rounded-full bg-sky-900/30 text-sky-400 text-[10px]">
+                      {bd.listmonkData.campaigns.length} campaigns
                     </span>
                   )}
                 </div>

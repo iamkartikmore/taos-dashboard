@@ -20,6 +20,7 @@ const ShopifyInsights= lazy(() => import('./pages/ShopifyInsights'));
 const ShopifyOps     = lazy(() => import('./pages/ShopifyOps'));
 const GAInsights     = lazy(() => import('./pages/GAInsights'));
 const GoogleAds      = lazy(() => import('./pages/GoogleAds'));
+const EmailCampaigns = lazy(() => import('./pages/EmailCampaigns'));
 const Procurement    = lazy(() => import('./pages/Procurement'));
 const CreativeIntel  = lazy(() => import('./pages/CreativeIntel'));
 const Attribution    = lazy(() => import('./pages/Attribution'));
@@ -104,6 +105,7 @@ function PrefetchAllPages() {
       import('./pages/CollectionSpend');
       import('./pages/AOVAnalysis');
       import('./pages/BusinessPlan');
+      import('./pages/EmailCampaigns');
     }, 800);
     return () => clearTimeout(t);
   }, []);
@@ -157,6 +159,7 @@ export default function App() {
               <Route path="/procurement"      element={M(Procurement,     'procurement')} />
               <Route path="/ga"               element={M(GAInsights,      'ga')} />
               <Route path="/google-ads"       element={M(GoogleAds,       'google-ads')} />
+              <Route path="/email-campaigns"  element={M(EmailCampaigns,  'email-campaigns')} />
               <Route path="/admin"            element={<ModuleGuard moduleKey="admin"><Admin /></ModuleGuard>} />
               <Route path="*"                 element={<Navigate to="/" replace />} />
             </Route>
