@@ -36,7 +36,7 @@ const SEVERITY_ICON = { critical: Skull, high: AlertTriangle, medium: Activity }
 const ALERT_ROUTES = {
   fatigue:     '/creative-intel',
   opportunity: '/scale',
-  stockout:    '/procurement',
+  stockout:    '/sku',
   waste:       '/kill',
   worsening:   '/fix',
 };

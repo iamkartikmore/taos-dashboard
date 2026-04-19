@@ -323,6 +323,43 @@ export const useStore = create((set, get) => {
       set({ brandData });
     },
 
+    /* ── Global pull progress (persistent panel) ─────────────────── */
+    // Keyed by jobId (e.g. `meta:b_123:TAOS_ACCT`, `shopify-orders:b_123`).
+    // Each entry: { label, status:'loading'|'success'|'error', pct, detail, startedAt, finishedAt, error }
+    pullJobs: {},
+    startPullJob: (jobId, label, detail = '') => {
+      const pullJobs = { ...get().pullJobs, [jobId]: {
+        label, detail,
+        status: 'loading', pct: null,
+        startedAt: Date.now(), finishedAt: null, error: null,
+      }};
+      set({ pullJobs });
+    },
+    updatePullJob: (jobId, patch) => {
+      const cur = get().pullJobs[jobId];
+      if (!cur) return;
+      set({ pullJobs: { ...get().pullJobs, [jobId]: { ...cur, ...patch } } });
+    },
+    finishPullJob: (jobId, ok, detailOrError = '') => {
+      const cur = get().pullJobs[jobId];
+      if (!cur) return;
+      set({ pullJobs: { ...get().pullJobs, [jobId]: {
+        ...cur,
+        status: ok ? 'success' : 'error',
+        pct: 100,
+        detail: ok ? (detailOrError || cur.detail) : cur.detail,
+        error: ok ? null : (detailOrError || cur.error || 'Unknown error'),
+        finishedAt: Date.now(),
+      }}});
+    },
+    clearFinishedPullJobs: () => {
+      const next = {};
+      Object.entries(get().pullJobs).forEach(([id, j]) => {
+        if (j.status === 'loading') next[id] = j;
+      });
+      set({ pullJobs: next });
+    },
+
     /* ── Aggregated (derived, rebuilt when active brands / brandData change) */
     enrichedRows:  [],
     rawAccounts:   [],

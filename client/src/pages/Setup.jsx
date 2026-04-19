@@ -85,6 +85,7 @@ function BrandCard({ brand, brandInfo }) {
     setBrandGoogleAdsData, setBrandGoogleAdsStatus,
     setBrandListmonkData, setBrandListmonkStatus,
     appendLog,
+    startPullJob, updatePullJob, finishPullJob,
   } = useStore();
 
   const [expanded, setExpanded]       = useState(true);
@@ -140,69 +141,129 @@ function BrandCard({ brand, brandInfo }) {
     if (!hasToken || !accounts.length) return;
     setBrandMetaStatus(brand.id, 'loading');
     appendLog(`[${brand.name}] Starting Meta pull...`);
-    let combined = { campaigns: [], adsets: [], ads: [], insightsToday: [], insights7d: [], insights14d: [], insights30d: [] };
+    const jobId = `meta:${brand.id}`;
+    startPullJob(jobId, `Meta — ${brand.name}`, `0 / ${accounts.length} accounts`);
+
+    const combined = { campaigns: [], adsets: [], ads: [], insightsToday: [], insights7d: [], insights14d: [], insights30d: [] };
+    const failures = [];
     for (let i = 0; i < accounts.length; i++) {
       const acc = accounts[i];
       if (i > 0) {
+        updatePullJob(jobId, { detail: `Cooling down 10s before ${acc.key}` });
         appendLog(`[${brand.name}] Cooling down 10s before next account (Meta app rate limit)...`);
         await new Promise(r => setTimeout(r, 10000));
       }
-      const r = await pullAccount(
-        { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
-        msg => appendLog(`[${brand.name}] ${msg}`),
-      );
-      combined.campaigns.push(...r.campaigns);
-      combined.adsets.push(...r.adsets);
-      combined.ads.push(...r.ads);
-      combined.insightsToday.push(...r.insightsToday);
-      combined.insights7d.push(...r.insights7d);
-      combined.insights14d.push(...r.insights14d);
-      combined.insights30d.push(...r.insights30d);
+      updatePullJob(jobId, { pct: (i / accounts.length) * 100, detail: `${acc.key}: fetching…` });
+      try {
+        const r = await pullAccount(
+          { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
+          msg => { appendLog(`[${brand.name}] ${msg}`); updatePullJob(jobId, { detail: `${acc.key}: ${msg.replace(/^\[[^\]]+\]\s*/, '')}` }); },
+        );
+        combined.campaigns.push(...r.campaigns);
+        combined.adsets.push(...r.adsets);
+        combined.ads.push(...r.ads);
+        combined.insightsToday.push(...r.insightsToday);
+        combined.insights7d.push(...r.insights7d);
+        combined.insights14d.push(...r.insights14d);
+        combined.insights30d.push(...r.insights30d);
+      } catch (e) {
+        const msg = e.message || 'Meta error';
+        failures.push(`${acc.key}: ${msg}`);
+        appendLog(`[${brand.name}] ⚠ ${acc.key} failed — continuing with remaining accounts: ${msg}`);
+      }
     }
     setBrandMetaData(brand.id, combined);
-    appendLog(`[${brand.name}] ✅ Meta done`);
+    const okN = accounts.length - failures.length;
+    if (failures.length && okN === 0) {
+      finishPullJob(jobId, false, failures.join(' · '));
+      throw new Error(failures.join(' · '));
+    }
+    if (failures.length) {
+      finishPullJob(jobId, false, `${okN}/${accounts.length} ok · ${failures.join(' · ')}`);
+    } else {
+      finishPullJob(jobId, true, `${accounts.length} account(s) · ${combined.insights7d.length} ads (7D)`);
+    }
+    appendLog(`[${brand.name}] ✅ Meta done — ${okN}/${accounts.length} account(s)`);
   };
 
   const doPullInventory = async () => {
     setBrandInventoryStatus(brand.id, 'loading');
-    const result = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
-    setBrandInventory(brand.id, result.map, result.locations, result.inventoryByLocation, result.skuToItemId, result.collections);
-    appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(result.map).length} SKUs · ${result.locations.length} locations`);
+    const jobId = `inventory:${brand.id}`;
+    startPullJob(jobId, `Inventory — ${brand.name}`, 'fetching SKUs');
+    try {
+      const result = await fetchShopifyInventory(brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret);
+      setBrandInventory(brand.id, result.map, result.locations, result.inventoryByLocation, result.skuToItemId, result.collections);
+      finishPullJob(jobId, true, `${Object.keys(result.map).length} SKUs · ${result.locations.length} locations`);
+      appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(result.map).length} SKUs · ${result.locations.length} locations`);
+    } catch (e) {
+      finishPullJob(jobId, false, e.message || 'Inventory failed');
+      throw e;
+    }
   };
 
   const doPullOrders = async (days = ordersDays) => {
     setBrandOrdersStatus(brand.id, 'loading');
-    const { since, until } = daysToRange(days);
-    const { orders: fetched, count } = await fetchShopifyOrders(
-      brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
-      since, until, msg => appendLog(`[${brand.name}] ${msg}`),
-    );
-    setBrandOrders(brand.id, fetched, days);
-    appendLog(`[${brand.name}] ✅ Orders — ${count} orders`);
+    const jobId = `orders:${brand.id}`;
+    startPullJob(jobId, `Shopify Orders — ${brand.name}`, `last ${days}d`);
+    try {
+      const { since, until } = daysToRange(days);
+      const { orders: fetched, count } = await fetchShopifyOrders(
+        brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
+        since, until,
+        msg => {
+          appendLog(`[${brand.name}] ${msg}`);
+          const m = msg.match(/Page (\d+).*?(\d+) total/);
+          if (m) updatePullJob(jobId, { detail: `page ${m[1]} · ${m[2]} orders` });
+          else updatePullJob(jobId, { detail: msg });
+        },
+      );
+      setBrandOrders(brand.id, fetched, days);
+      finishPullJob(jobId, true, `${count} orders`);
+      appendLog(`[${brand.name}] ✅ Orders — ${count} orders`);
+    } catch (e) {
+      finishPullJob(jobId, false, e.message || 'Orders failed');
+      throw e;
+    }
   };
 
   const doPullGa = async (since = gaDays) => {
     setBrandGaStatus(brand.id, 'loading');
-    const data = await fetchGaData(
-      brand.ga.serviceAccountJson, brand.ga.propertyId,
-      { since, until: 'today' },
-      msg => appendLog(`[${brand.name}] ${msg}`),
-    );
-    setBrandGaData(brand.id, data);
-    appendLog(`[${brand.name}] ✅ GA — ${data.dailyTrend?.length || 0} days`);
+    const jobId = `ga:${brand.id}`;
+    startPullJob(jobId, `GA4 — ${brand.name}`, 'fetching reports');
+    try {
+      const data = await fetchGaData(
+        brand.ga.serviceAccountJson, brand.ga.propertyId,
+        { since, until: 'today' },
+        msg => { appendLog(`[${brand.name}] ${msg}`); updatePullJob(jobId, { detail: msg }); },
+      );
+      setBrandGaData(brand.id, data);
+      finishPullJob(jobId, true, `${data.dailyTrend?.length || 0} days`);
+      appendLog(`[${brand.name}] ✅ GA — ${data.dailyTrend?.length || 0} days`);
+    } catch (e) {
+      finishPullJob(jobId, false, e.message || 'GA failed');
+      throw e;
+    }
   };
 
   const doPullGoogleAds = async () => {
     setBrandGoogleAdsStatus(brand.id, 'loading');
     appendLog(`[${brand.name}] Starting Google Ads pull...`);
-    const raw = await fetchGoogleAds(
-      brand.googleAds,
-      'last_30d',
-      msg => appendLog(`[${brand.name}] ${msg}`),
-    );
-    const normalized = normalizeGoogleAdsResponse(raw);
-    setBrandGoogleAdsData(brand.id, normalized);
-    appendLog(`[${brand.name}] ✅ Google Ads — ${normalized.campaigns.length} campaigns · ${normalized.adGroups.length} ad groups · ${normalized.ads.length} ads`);
+    const jobId = `gads:${brand.id}`;
+    startPullJob(jobId, `Google Ads — ${brand.name}`, 'last 30d');
+    try {
+      const raw = await fetchGoogleAds(
+        brand.googleAds,
+        'last_30d',
+        msg => { appendLog(`[${brand.name}] ${msg}`); updatePullJob(jobId, { detail: msg }); },
+      );
+      const normalized = normalizeGoogleAdsResponse(raw);
+      setBrandGoogleAdsData(brand.id, normalized);
+      finishPullJob(jobId, true, `${normalized.campaigns.length} campaigns · ${normalized.ads.length} ads`);
+      appendLog(`[${brand.name}] ✅ Google Ads — ${normalized.campaigns.length} campaigns · ${normalized.adGroups.length} ad groups · ${normalized.ads.length} ads`);
+    } catch (e) {
+      finishPullJob(jobId, false, e.message || 'Google Ads failed');
+      throw e;
+    }
   };
 
   const handlePullMeta = async () => {

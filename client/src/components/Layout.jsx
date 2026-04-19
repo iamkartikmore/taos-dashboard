@@ -1,6 +1,7 @@
 import Sidebar from './Sidebar';
 import BrandSelector from './BrandSelector';
 import PageErrorBoundary from './PageErrorBoundary';
+import PullProgressPanel from './PullProgressPanel';
 import { Outlet, useLocation } from 'react-router-dom';
 import { useAutoLoad } from '../hooks/useAutoLoad';
 import { usePageLog } from '../hooks/usePageLog';
@@ -23,6 +24,7 @@ export default function Layout() {
           </PageErrorBoundary>
         </div>
       </main>
+      <PullProgressPanel />
     </div>
   );
 }
