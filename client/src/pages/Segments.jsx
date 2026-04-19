@@ -53,12 +53,17 @@ function BrandPicker({ brands, selected, onChange }) {
 }
 
 function buildAttribs(c) {
+  const fullName = (c.name || '').trim();
+  const first = fullName.split(/\s+/)[0] || (c.email || '').split('@')[0] || 'friend';
   return {
+    first_name: first,
     city: c.city || '',
     segment: c.segment,
     r: c.rScore, f: c.fScore, m: c.mScore,
     order_count: c.orderCount || 0,
+    lifetime_orders: c.orderCount || 0,
     total_spent: Math.round(c.totalSpent || 0),
+    lifetime_spent: Math.round(c.totalSpent || 0),
     aov: Math.round(c.aov || 0),
     recency_days: c.recencyDays,
     lifespan_days: c.lifespan || 0,

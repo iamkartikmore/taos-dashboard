@@ -393,6 +393,23 @@ export async function stopListmonkImport(creds) {
   return listmonkCall('/import-stop', creds);  // { ok, status }
 }
 
+export async function upsertListmonkTemplate(creds, { name, subject, body, type = 'campaign' }) {
+  return listmonkCall('/template-upsert', creds, { name, subject, body, type });
+}
+
+export async function deleteListmonkTemplate(creds, id) {
+  return listmonkCall('/template-delete', creds, { id });
+}
+
+export async function createListmonkCampaignDraft(creds, payload) {
+  // payload: { name, subject, fromEmail, listIds, templateId, body?, tags? }
+  return listmonkCall('/campaign-draft', creds, payload);
+}
+
+export async function fetchListmonkCampaignStats(creds, id) {
+  return listmonkCall('/campaign-stats', creds, { id });
+}
+
 /* ─── VERIFY TOKEN ───────────────────────────────────────────────── */
 
 export async function verifyToken(token, ver = 'v21.0') {

@@ -342,7 +342,7 @@ app.post('/api/shopify/inventory', async (req, res) => {
     // Request minimal fields from Shopify to reduce inbound payload too (images/options/body_html excluded).
     const variantMap  = {};  // inventory_item_id → slim variant record
     const skuToItemId = {};
-    let url = `https://${shopDomain}.myshopify.com/admin/api/2024-01/products.json?limit=250&status=active&fields=id,title,product_type,tags,variants`;
+    let url = `https://${shopDomain}.myshopify.com/admin/api/2024-01/products.json?limit=250&status=active&fields=id,title,handle,product_type,tags,variants,image`;
     while (url) {
       const resp = await withRetry(() => axios.get(url, { headers, timeout: 45000 }));
       for (const p of (resp.data.products || [])) {
@@ -357,6 +357,8 @@ app.post('/api/shopify/inventory', async (req, res) => {
             price:        parseFloat(v.price) || 0,
             productId:    pid,
             productTitle: p.title        || '',
+            productHandle:p.handle       || '',
+            productImage: p.image?.src   || '',
             productType:  p.product_type || '',
             tags:         p.tags         || '',
             _totalStock:  0,
@@ -487,6 +489,8 @@ app.post('/api/shopify/inventory', async (req, res) => {
       } else {
         map[rec.sku] = {
           title:           rec.productTitle,
+          handle:          rec.productHandle,
+          image:           rec.productImage,
           variantTitle:    rec.variantTitle,
           stock:           rec._totalStock,
           price:           rec.price,
@@ -1074,6 +1078,96 @@ app.post('/api/listmonk/templates', async (req, res) => {
     const cfg = listmonkAuth(req.body);
     const r = await axios.get(`${cfg.baseURL}/api/templates`, cfg);
     res.json({ templates: r.data?.data || [] });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
+// POST /api/listmonk/template-upsert — create or update a template by name
+// body: url, username, password, name, subject?, body, type? ('campaign'|'tx')
+app.post('/api/listmonk/template-upsert', async (req, res) => {
+  try {
+    const { name, subject, body, type = 'campaign', ...creds } = req.body;
+    if (!name || !body) return res.status(400).json({ error: 'name and body required' });
+    const cfg = listmonkAuth(creds);
+    // Find existing by exact name match
+    const listResp = await axios.get(`${cfg.baseURL}/api/templates`, cfg);
+    const existing = (listResp.data?.data || []).find(t => t.name === name);
+    const payload = { name, body, type };
+    if (subject) payload.subject = subject;
+    let tpl;
+    if (existing?.id) {
+      const r = await axios.put(`${cfg.baseURL}/api/templates/${existing.id}`, payload, cfg);
+      tpl = r.data?.data || { ...existing, ...payload };
+    } else {
+      const r = await axios.post(`${cfg.baseURL}/api/templates`, payload, cfg);
+      tpl = r.data?.data;
+    }
+    res.json({ template: tpl });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
+// POST /api/listmonk/template-delete — delete template by id
+app.post('/api/listmonk/template-delete', async (req, res) => {
+  try {
+    const { id, ...creds } = req.body;
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const cfg = listmonkAuth(creds);
+    await axios.delete(`${cfg.baseURL}/api/templates/${id}`, cfg);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
+// POST /api/listmonk/campaign-draft — create a campaign in draft status (user sends manually)
+// body: url, username, password, name, subject, fromEmail, listIds, templateId, body?, tags?
+app.post('/api/listmonk/campaign-draft', async (req, res) => {
+  try {
+    const {
+      name, subject, fromEmail, listIds, templateId,
+      body = '', contentType = 'html', tags = [],
+      ...creds
+    } = req.body;
+    if (!name || !subject || !fromEmail || !Array.isArray(listIds) || !listIds.length) {
+      return res.status(400).json({ error: 'name, subject, fromEmail, listIds[] required' });
+    }
+    const cfg = listmonkAuth(creds);
+    const payload = {
+      name, subject,
+      from_email:   fromEmail,
+      lists:        listIds.map(Number),
+      content_type: contentType,
+      messenger:    'email',
+      body,
+      type:         'regular',
+      tags,
+    };
+    if (templateId) payload.template_id = Number(templateId);
+    const r = await axios.post(`${cfg.baseURL}/api/campaigns`, payload, cfg);
+    res.json({ campaign: r.data?.data });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
+// POST /api/listmonk/campaign-stats — detailed stats for a single campaign
+// body: url, username, password, id
+app.post('/api/listmonk/campaign-stats', async (req, res) => {
+  try {
+    const { id, ...creds } = req.body;
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const cfg = listmonkAuth(creds);
+    const [detail, links] = await Promise.all([
+      axios.get(`${cfg.baseURL}/api/campaigns/${id}`, cfg),
+      axios.get(`${cfg.baseURL}/api/campaigns/analytics/links?id=${id}`, cfg).catch(() => ({ data: { data: [] } })),
+    ]);
+    res.json({
+      campaign: detail.data?.data || null,
+      links:    links.data?.data  || [],
+    });
   } catch (err) {
     res.status(400).json({ error: listmonkErr(err) });
   }
