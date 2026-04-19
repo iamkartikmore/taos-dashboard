@@ -1,10 +1,13 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Users, Upload, RefreshCw, CheckCircle, AlertCircle, ExternalLink,
+  Users, Upload, RefreshCw, CheckCircle, AlertCircle, ExternalLink, Square,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { computeRfm, RFM_SEGMENT_COLORS } from '../lib/shopifyAnalytics';
-import { ensureListmonkLists, importListmonkSubscribers } from '../lib/api';
+import {
+  ensureListmonkLists, importListmonkSubscribers,
+  fetchListmonkImportStatus, fetchListmonkImportLogs, stopListmonkImport,
+} from '../lib/api';
 import Spinner from '../components/ui/Spinner';
 
 const num = v => Number(v || 0).toLocaleString('en-IN');
@@ -70,6 +73,11 @@ export default function Segments() {
   const [syncing, setSyncing]  = useState(false);
   const [progress, setProgress] = useState('');
   const [syncError, setSyncError] = useState('');
+  const [importStatus, setImportStatus] = useState(null);  // { name, total, imported, status }
+  const [importLogs, setImportLogs] = useState('');
+  const [stopping, setStopping] = useState(false);
+  const pollTimerRef = useRef(null);
+  const cancelRef = useRef(false);
 
   const brand = brands.find(b => b.id === selectedBrand);
   const lastSync = brandData?.[selectedBrand]?.segmentSync;
@@ -94,38 +102,124 @@ export default function Segments() {
   const totalCustomers = rfmRows.length;
   const totalRevenue = rfmRows.reduce((a, c) => a + (c.totalSpent || 0), 0);
 
+  // Poll Listmonk import status + logs until the current import is no longer running.
+  // Returns final status ("finished" | "stopped" | "failed" | "none").
+  async function waitForImportDone(onTick) {
+    while (true) {
+      if (cancelRef.current) return 'stopped';
+      let s = null, logs = '';
+      try {
+        const r = await fetchListmonkImportStatus(brand.listmonk);
+        s = r.status;
+      } catch { /* transient — keep polling */ }
+      try {
+        const r = await fetchListmonkImportLogs(brand.listmonk);
+        logs = r.logs || '';
+      } catch { /* logs are best-effort */ }
+      setImportStatus(s);
+      setImportLogs(logs);
+      onTick?.(s, logs);
+      const status = s?.status;
+      if (!status || status === 'finished' || status === 'stopped' || status === 'failed' || status === 'none') {
+        return status || 'none';
+      }
+      await new Promise(r => { pollTimerRef.current = setTimeout(r, 1500); });
+    }
+  }
+
   async function handleSyncAll() {
     if (!brand?.listmonk || !rfmRows.length) return;
-    setSyncing(true); setSyncError(''); setProgress('Creating Listmonk lists...');
+    cancelRef.current = false;
+    setSyncing(true); setSyncError(''); setImportLogs('');
+    setProgress('Checking Listmonk for any running import...');
     try {
+      // If an import is already running (from a previous stuck attempt), wait for it or ask the user to stop.
+      const pre = await fetchListmonkImportStatus(brand.listmonk).catch(() => ({ status: null }));
+      if (pre.status?.status === 'importing') {
+        setImportStatus(pre.status);
+        setProgress(`An import is already running: ${pre.status.name || 'unnamed'} (${pre.status.imported}/${pre.status.total}). Waiting for it to finish — or click Stop Import.`);
+        await waitForImportDone();
+        if (cancelRef.current) { setProgress('Stopped by user.'); return; }
+      }
+
+      setProgress('Creating Listmonk lists...');
       const segmentNames = SEGMENT_ORDER.filter(s => segments.find(x => x.segment === s && x.count > 0));
       const { lists: listMap } = await ensureListmonkLists(brand.listmonk, segmentNames, `TAOS-${brand.name.slice(0,12)}`);
 
       const perSegmentCount = {};
       let totalSynced = 0;
       for (const seg of segmentNames) {
+        if (cancelRef.current) break;
         const listId = listMap[seg];
         if (!listId) continue;
         const customers = rfmRows
           .filter(c => c.segment === seg && c.email && c.email.includes('@'))
           .map(c => ({ email: c.email, name: c.name || c.email.split('@')[0], attribs: buildAttribs(c) }));
         if (!customers.length) { perSegmentCount[seg] = 0; continue; }
-        setProgress(`Syncing ${seg} (${customers.length} customers)...`);
+        setProgress(`Queueing ${seg} (${customers.length} customers)...`);
         await importListmonkSubscribers(brand.listmonk, listId, customers);
+        // Listmonk runs imports as a background singleton — wait for this one to drain before queueing the next.
+        const final = await waitForImportDone((s) => {
+          if (s?.status === 'importing') {
+            setProgress(`Importing ${seg}: ${s.imported}/${s.total}...`);
+          }
+        });
+        if (final === 'failed') throw new Error(`Listmonk import failed for ${seg}. See logs below.`);
+        if (cancelRef.current) break;
         perSegmentCount[seg] = customers.length;
         totalSynced += customers.length;
       }
 
-      setBrandSegmentSync(brand.id, {
-        syncedAt: Date.now(), listMap, perSegmentCount, totalSynced,
-      });
-      setProgress(`Done — ${totalSynced} customers synced across ${segmentNames.length} segments.`);
+      if (cancelRef.current) {
+        setProgress(`Stopped — ${totalSynced} customers synced before cancel.`);
+      } else {
+        setBrandSegmentSync(brand.id, {
+          syncedAt: Date.now(), listMap, perSegmentCount, totalSynced,
+        });
+        setProgress(`Done — ${totalSynced} customers synced across ${segmentNames.length} segments.`);
+      }
     } catch (e) {
       setSyncError(e.message || 'Sync failed');
     } finally {
       setSyncing(false);
+      cancelRef.current = false;
+      if (pollTimerRef.current) { clearTimeout(pollTimerRef.current); pollTimerRef.current = null; }
     }
   }
+
+  async function handleStopImport() {
+    if (!brand?.listmonk) return;
+    cancelRef.current = true;
+    setStopping(true);
+    try {
+      await stopListmonkImport(brand.listmonk);
+      const r = await fetchListmonkImportStatus(brand.listmonk).catch(() => ({ status: null }));
+      setImportStatus(r.status);
+      setProgress('Import stopped.');
+    } catch (e) {
+      setSyncError(e.message || 'Failed to stop import');
+    } finally {
+      setStopping(false);
+    }
+  }
+
+  // On mount / brand change, peek at Listmonk to surface any already-running import.
+  useEffect(() => {
+    if (!brand?.listmonk?.url) { setImportStatus(null); setImportLogs(''); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const [s, l] = await Promise.all([
+          fetchListmonkImportStatus(brand.listmonk).catch(() => ({ status: null })),
+          fetchListmonkImportLogs(brand.listmonk).catch(() => ({ logs: '' })),
+        ]);
+        if (cancelled) return;
+        setImportStatus(s.status);
+        setImportLogs(l.logs || '');
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [brand?.listmonk?.url, brand?.listmonk?.username]);
 
   return (
     <div className="p-6 space-y-6">
@@ -164,15 +258,35 @@ export default function Segments() {
         </div>
       )}
 
-      {syncError && (
-        <div className="bg-red-950/30 border border-red-800/40 rounded-xl p-3 text-sm text-red-300">
-          Sync failed: {syncError}
+      {(syncing || progress || importStatus?.status === 'importing') && (
+        <div className="bg-sky-950/30 border border-sky-800/40 rounded-xl p-3 space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm text-sky-300 min-w-0">
+              {(syncing || importStatus?.status === 'importing') && <Spinner size={12} />}
+              <span className="truncate">{progress || (importStatus?.status === 'importing'
+                ? `Listmonk importing: ${importStatus.name || 'unnamed'} — ${importStatus.imported}/${importStatus.total}`
+                : '')}</span>
+            </div>
+            {importStatus?.status === 'importing' && (
+              <button
+                onClick={handleStopImport}
+                disabled={stopping}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-900/40 hover:bg-red-900/60 border border-red-800/60 text-red-200 text-xs font-medium disabled:opacity-50">
+                <Square size={10} /> {stopping ? 'Stopping...' : 'Stop Import'}
+              </button>
+            )}
+          </div>
+          {importLogs && (
+            <pre className="text-[11px] text-slate-400 bg-black/30 rounded-md p-2 max-h-40 overflow-auto whitespace-pre-wrap leading-snug">
+{importLogs.split('\n').slice(-20).join('\n')}
+            </pre>
+          )}
         </div>
       )}
 
-      {syncing && progress && (
-        <div className="bg-sky-950/30 border border-sky-800/40 rounded-xl p-3 text-sm text-sky-300 flex items-center gap-2">
-          <Spinner size={12} /> {progress}
+      {syncError && (
+        <div className="bg-red-950/30 border border-red-800/40 rounded-xl p-3 text-sm text-red-300">
+          Sync failed: {syncError}
         </div>
       )}
 

@@ -1221,6 +1221,28 @@ app.post('/api/listmonk/import-status', async (req, res) => {
   }
 });
 
+// POST /api/listmonk/import-logs — fetch raw log text from the running/last import
+app.post('/api/listmonk/import-logs', async (req, res) => {
+  try {
+    const cfg = listmonkAuth(req.body);
+    const r = await axios.get(`${cfg.baseURL}/api/import/subscribers/logs`, cfg);
+    res.json({ logs: r.data?.data || '' });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
+// POST /api/listmonk/import-stop — abort the currently running import
+app.post('/api/listmonk/import-stop', async (req, res) => {
+  try {
+    const cfg = listmonkAuth(req.body);
+    const r = await axios.delete(`${cfg.baseURL}/api/import/subscribers`, cfg);
+    res.json({ ok: true, status: r.data?.data || null });
+  } catch (err) {
+    res.status(400).json({ error: listmonkErr(err) });
+  }
+});
+
 /* ─── HEALTH CHECK ────────────────────────────────────────────────── */
 
 app.get('/api/health', (_, res) => res.json({ ok: true, ts: Date.now() }));

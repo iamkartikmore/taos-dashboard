@@ -385,6 +385,14 @@ export async function fetchListmonkImportStatus(creds) {
   return listmonkCall('/import-status', creds);
 }
 
+export async function fetchListmonkImportLogs(creds) {
+  return listmonkCall('/import-logs', creds);  // { logs: "..." }
+}
+
+export async function stopListmonkImport(creds) {
+  return listmonkCall('/import-stop', creds);  // { ok, status }
+}
+
 /* ─── VERIFY TOKEN ───────────────────────────────────────────────── */
 
 export async function verifyToken(token, ver = 'v21.0') {
