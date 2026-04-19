@@ -296,6 +296,32 @@ export async function fetchGaData(serviceAccountJson, propertyId, dateRange, onP
   return json;
 }
 
+/* ─── GOOGLE ADS ─────────────────────────────────────────────────── */
+
+export async function verifyGoogleAds(creds) {
+  const res = await fetch('/api/google-ads/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(creds),
+  });
+  const json = await res.json();
+  if (!res.ok || !json.ok) throw new Error(json.error || 'Google Ads credential verification failed');
+  return json; // { ok, name, currency, timeZone }
+}
+
+export async function fetchGoogleAds(creds, datePreset = 'last_30d', onProgress) {
+  onProgress?.(`Pulling Google Ads (${datePreset})...`);
+  const res = await fetch('/api/google-ads/pull', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...creds, datePreset }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'Google Ads API error');
+  onProgress?.(`✓ Google Ads — campaigns:${json.campaigns?.length || 0} adgroups:${json.adGroups?.length || 0} ads:${json.ads?.length || 0} keywords:${json.keywords?.length || 0}`);
+  return json;
+}
+
 /* ─── VERIFY TOKEN ───────────────────────────────────────────────── */
 
 export async function verifyToken(token, ver = 'v21.0') {

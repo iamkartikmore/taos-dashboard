@@ -3,10 +3,11 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key,
   BookOpen, Upload, ShoppingBag, Zap, ChevronDown, ChevronRight,
-  Package, BarChart3, Calendar,
+  Package, BarChart3, Calendar, Search,
 } from 'lucide-react';
 import { useStore, BRAND_COLORS } from '../store';
-import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData, pullAccountWithCustomRange } from '../lib/api';
+import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData, fetchGoogleAds, verifyGoogleAds, pullAccountWithCustomRange } from '../lib/api';
+import { normalizeGoogleAdsResponse } from '../lib/googleAdsAnalytics';
 import { BREAKDOWN_SPECS, pullAllBreakdowns } from '../lib/breakdownApi';
 import { parseCsv, csvRowsToManualMap, detectListsFromCsvRows } from '../lib/csvImport';
 import Spinner from '../components/ui/Spinner';
@@ -81,6 +82,7 @@ function BrandCard({ brand, brandInfo }) {
     setBrandInventory, setBrandInventoryStatus,
     setBrandOrders, setBrandOrdersStatus,
     setBrandGaData, setBrandGaStatus,
+    setBrandGoogleAdsData, setBrandGoogleAdsStatus,
     appendLog,
   } = useStore();
 
@@ -92,6 +94,9 @@ function BrandCard({ brand, brandInfo }) {
   const [pullingInv, setPullingInv]         = useState(false);
   const [pullingOrders, setPullingOrders]   = useState(false);
   const [pullingGa, setPullingGa]           = useState(false);
+  const [pullingGAds, setPullingGAds]       = useState(false);
+  const [verifyingGAds, setVerifyingGAds]   = useState(false);
+  const [verifyGAdsOk, setVerifyGAdsOk]     = useState(null);
   const [pullingAll, setPullingAll]         = useState(false);
 
   // Per-brand time windows
@@ -103,11 +108,14 @@ function BrandCard({ brand, brandInfo }) {
   const inventoryStatus = bd.inventoryStatus || 'idle';
   const ordersStatus    = bd.ordersStatus    || 'idle';
   const gaStatus        = bd.gaStatus        || 'idle';
+  const googleAdsStatus = bd.googleAdsStatus || 'idle';
   const hasToken   = !!brand.meta.token;
   const hasAccts   = brand.meta.accounts.filter(a => a.key && a.id).length > 0;
   const hasShopify = !!(brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret);
   const hasGa      = !!(brand.ga?.propertyId && brand.ga?.serviceAccountJson);
-  const anyBusy    = pullingMeta || pullingInv || pullingOrders || pullingGa || pullingAll;
+  const gAds       = brand.googleAds || {};
+  const hasGAds    = !!(gAds.devToken && gAds.customerId && gAds.clientId && gAds.clientSecret && gAds.refreshToken);
+  const anyBusy    = pullingMeta || pullingInv || pullingOrders || pullingGa || pullingGAds || pullingAll;
 
   /* ── individual pull handlers ───────────────────────────────────── */
   const handleVerify = async () => {
@@ -172,6 +180,19 @@ function BrandCard({ brand, brandInfo }) {
     appendLog(`[${brand.name}] ✅ GA — ${data.dailyTrend?.length || 0} days`);
   };
 
+  const doPullGoogleAds = async () => {
+    setBrandGoogleAdsStatus(brand.id, 'loading');
+    appendLog(`[${brand.name}] Starting Google Ads pull...`);
+    const raw = await fetchGoogleAds(
+      brand.googleAds,
+      'last_30d',
+      msg => appendLog(`[${brand.name}] ${msg}`),
+    );
+    const normalized = normalizeGoogleAdsResponse(raw);
+    setBrandGoogleAdsData(brand.id, normalized);
+    appendLog(`[${brand.name}] ✅ Google Ads — ${normalized.campaigns.length} campaigns · ${normalized.adGroups.length} ad groups · ${normalized.ads.length} ads`);
+  };
+
   const handlePullMeta = async () => {
     setPullingMeta(true);
     try { await doPullMeta(); } catch (e) { setBrandMetaStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Meta: ${e.message}`); }
@@ -199,12 +220,31 @@ function BrandCard({ brand, brandInfo }) {
     finally { setPullingGa(false); }
   };
 
+  const handleVerifyGAds = async () => {
+    if (!hasGAds) return;
+    setVerifyingGAds(true); setVerifyGAdsOk(null);
+    try {
+      const info = await verifyGoogleAds(brand.googleAds);
+      setVerifyGAdsOk({ ok: true, name: info.descriptiveName || info.name, currency: info.currencyCode, tz: info.timeZone });
+    } catch (e) { setVerifyGAdsOk({ ok: false, msg: e.message }); }
+    finally { setVerifyingGAds(false); }
+  };
+
+  const handlePullGoogleAds = async () => {
+    if (!hasGAds) return;
+    setPullingGAds(true);
+    try { await doPullGoogleAds(); }
+    catch (e) { setBrandGoogleAdsStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Google Ads: ${e.message}`); }
+    finally { setPullingGAds(false); }
+  };
+
   const handlePullAll = async () => {
     setPullingAll(true);
     appendLog(`━━━ ${brand.name} — Pull All ━━━`);
     appendLog(`[${brand.name}] Meta: ${hasToken && hasAccts ? `✓ ${brand.meta.accounts.filter(a=>a.key&&a.id).length} account(s)` : '✗ not configured'}`);
     appendLog(`[${brand.name}] Shopify: ${hasShopify ? `✓ ${brand.shopify.shop}` : '✗ not configured'}`);
     appendLog(`[${brand.name}] GA4: ${hasGa ? `✓ property ${brand.ga?.propertyId}` : '✗ not configured'}`);
+    appendLog(`[${brand.name}] Google Ads: ${hasGAds ? `✓ customer ${gAds.customerId}` : '✗ not configured'}`);
 
     let metaOk = false;
     if (hasToken && hasAccts) {
@@ -242,6 +282,13 @@ function BrandCard({ brand, brandInfo }) {
       appendLog(`[${brand.name}] GA4: skipped`);
     }
 
+    if (hasGAds) {
+      try { await doPullGoogleAds(); }
+      catch (e) { setBrandGoogleAdsStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Google Ads: ${e.message || e.toString()}`); }
+    } else {
+      appendLog(`[${brand.name}] Google Ads: skipped`);
+    }
+
     appendLog(`[${brand.name}] ✅ Pull All complete`);
     setPullingAll(false);
   };
@@ -274,11 +321,12 @@ function BrandCard({ brand, brandInfo }) {
         />
 
         {/* Status dots */}
-        <div className="flex items-center gap-1.5" title="Meta · Inventory · Orders · GA">
+        <div className="flex items-center gap-1.5" title="Meta · Inventory · Orders · GA · Google Ads">
           <StatusDot status={metaStatus} />
           <StatusDot status={inventoryStatus} />
           <StatusDot status={ordersStatus} />
           <StatusDot status={gaStatus} />
+          <StatusDot status={googleAdsStatus} />
         </div>
 
         <button onClick={() => setExpanded(v => !v)}
@@ -508,6 +556,91 @@ function BrandCard({ brand, brandInfo }) {
                   </div>
                 </div>
               </div>
+
+              {/* ── GOOGLE ADS ─────────────────────────────────────── */}
+              <div className="space-y-3 xl:col-span-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-widest">
+                  <Search size={11} /> Google Ads
+                  <StatusDot status={googleAdsStatus} />
+                  {bd.googleAdsFetchAt && <span className="text-[10px] text-slate-600 font-normal ml-1">Last: {new Date(bd.googleAdsFetchAt).toLocaleTimeString()}</span>}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">Developer Token</label>
+                    <input type="password"
+                      value={gAds.devToken || ''}
+                      onChange={e => updateBrand(brand.id, { googleAds: { ...gAds, devToken: e.target.value } })}
+                      placeholder="iauCQ..."
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">Login Customer ID (MCC)</label>
+                    <input type="text"
+                      value={gAds.loginCustomerId || ''}
+                      onChange={e => updateBrand(brand.id, { googleAds: { ...gAds, loginCustomerId: e.target.value.replace(/\D/g, '') } })}
+                      placeholder="9675029246"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">Customer ID (this brand)</label>
+                    <input type="text"
+                      value={gAds.customerId || ''}
+                      onChange={e => updateBrand(brand.id, { googleAds: { ...gAds, customerId: e.target.value.replace(/\D/g, '') } })}
+                      placeholder="5202936374"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">OAuth Client ID</label>
+                    <input type="text"
+                      value={gAds.clientId || ''}
+                      onChange={e => updateBrand(brand.id, { googleAds: { ...gAds, clientId: e.target.value } })}
+                      placeholder="123...apps.googleusercontent.com"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">OAuth Client Secret</label>
+                    <input type="password"
+                      value={gAds.clientSecret || ''}
+                      onChange={e => updateBrand(brand.id, { googleAds: { ...gAds, clientSecret: e.target.value } })}
+                      placeholder="GOCSPX-..."
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">Refresh Token</label>
+                    <input type="password"
+                      value={gAds.refreshToken || ''}
+                      onChange={e => updateBrand(brand.id, { googleAds: { ...gAds, refreshToken: e.target.value } })}
+                      placeholder="1//..."
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                  </div>
+                </div>
+
+                {verifyGAdsOk && (
+                  <div className={`flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-lg ${verifyGAdsOk.ok ? 'bg-emerald-900/30 text-emerald-300' : 'bg-red-900/30 text-red-300'}`}>
+                    {verifyGAdsOk.ok
+                      ? <><CheckCircle size={11} /> {verifyGAdsOk.name} · {verifyGAdsOk.currency} · {verifyGAdsOk.tz}</>
+                      : <><AlertCircle size={11} /> {verifyGAdsOk.msg}</>}
+                  </div>
+                )}
+
+                {/* Verify + Pull */}
+                <div className="flex items-center gap-2 flex-wrap pt-1">
+                  <button onClick={handleVerifyGAds} disabled={verifyingGAds || !hasGAds}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 rounded-lg text-xs text-slate-300 transition-all border border-gray-700">
+                    {verifyingGAds ? <Spinner size="sm" /> : <CheckCircle size={11} />} Verify
+                  </button>
+                  <button onClick={handlePullGoogleAds} disabled={anyBusy || !hasGAds}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-700/30 hover:bg-amber-700/50 disabled:opacity-30 rounded-lg text-xs font-medium text-amber-300 transition-all border border-amber-700/30">
+                    {pullingGAds ? <Spinner size="sm" /> : <Search size={11} />} Pull Google Ads
+                  </button>
+                  {bd.googleAdsData && (
+                    <span className="px-2 py-0.5 rounded-full bg-amber-900/30 text-amber-400 text-[10px]">
+                      {bd.googleAdsData.campaigns?.length || 0} campaigns · {bd.googleAdsData.adGroups?.length || 0} ad groups · {bd.googleAdsData.ads?.length || 0} ads
+                    </span>
+                  )}
+                </div>
+              </div>
             </div>
 
             {/* ── PULL ALL for this brand ─────────────────────────── */}
@@ -541,6 +674,7 @@ export default function Setup() {
     setBrandInventory, setBrandInventoryStatus,
     setBrandOrders, setBrandOrdersStatus,
     setBrandGaData, setBrandGaStatus,
+    setBrandGoogleAdsData, setBrandGoogleAdsStatus,
     setBreakdownData, setBreakdownStatus,
   } = useStore();
 
@@ -590,7 +724,9 @@ export default function Setup() {
       const hasMeta    = !!brand.meta.token && accounts.length > 0;
       const hasShopify = !!(brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret);
       const hasGa      = !!(brand.ga?.propertyId && brand.ga?.serviceAccountJson);
-      const anything   = hasMeta || hasShopify || hasGa;
+      const g          = brand.googleAds || {};
+      const hasGAds    = !!(g.devToken && g.customerId && g.clientId && g.clientSecret && g.refreshToken);
+      const anything   = hasMeta || hasShopify || hasGa || hasGAds;
 
       appendLog(`[${brand.name}]`);
       if (!brand.meta.token)       appendLog(`  Meta     : ✗ no token`);
@@ -603,9 +739,12 @@ export default function Setup() {
       if (!hasGa)                  appendLog(`  GA4      : ✗ not configured`);
       else                         appendLog(`  GA4      : ✓ property ${brand.ga.propertyId}`);
 
+      if (!hasGAds)                appendLog(`  GoogAds  : ✗ not configured`);
+      else                         appendLog(`  GoogAds  : ✓ customer ${g.customerId}`);
+
       if (!anything)               appendLog(`  → SKIPPING — nothing configured`);
 
-      return { brand, accounts, hasMeta, hasShopify, hasGa, anything };
+      return { brand, accounts, hasMeta, hasShopify, hasGa, hasGAds, anything };
     });
 
     const active = plans.filter(p => p.anything);
@@ -620,7 +759,7 @@ export default function Setup() {
     appendLog(`Starting fetch for ${active.length} brand(s) — sequential order`);
 
     // ── 2. Fetch brands ONE BY ONE so logs stay clean ─────────────
-    for (const { brand, accounts, hasMeta, hasShopify, hasGa } of active) {
+    for (const { brand, accounts, hasMeta, hasShopify, hasGa, hasGAds } of active) {
       appendLog('');
       appendLog(`━━━ ${brand.name} ━━━`);
       setMegaStep(`${brand.id}:meta`);
@@ -741,6 +880,26 @@ export default function Setup() {
         }
       } else {
         appendLog(`[${brand.name}] GA4: skipped — not configured`);
+      }
+
+      // ── Google Ads ────────────────────────────────────────────────
+      if (hasGAds) {
+        appendLog(`[${brand.name}] Google Ads: pulling last 30d...`);
+        setBrandGoogleAdsStatus(brand.id, 'loading');
+        try {
+          const raw = await fetchGoogleAds(
+            brand.googleAds, 'last_30d',
+            msg => appendLog(`[${brand.name}]   ${msg}`),
+          );
+          const normalized = normalizeGoogleAdsResponse(raw);
+          setBrandGoogleAdsData(brand.id, normalized);
+          appendLog(`[${brand.name}] ✅ Google Ads — ${normalized.campaigns.length} campaigns · ${normalized.ads.length} ads`);
+        } catch (e) {
+          setBrandGoogleAdsStatus(brand.id, 'error', e.message);
+          appendLog(`[${brand.name}] ❌ Google Ads: ${e.message || e.toString()}`);
+        }
+      } else {
+        appendLog(`[${brand.name}] Google Ads: skipped — not configured`);
       }
 
       appendLog(`[${brand.name}] ✅ Done`);

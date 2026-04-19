@@ -732,6 +732,200 @@ app.post('/api/ga/report', async (req, res) => {
   }
 });
 
+/* ─── GOOGLE ADS ──────────────────────────────────────────────────── */
+
+const GADS_API_VERSION = 'v16';
+const GADS_BASE = 'https://googleads.googleapis.com';
+
+async function getGadsAccessToken(clientId, clientSecret, refreshToken) {
+  const r = await axios.post('https://oauth2.googleapis.com/token', null, {
+    params: { client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' },
+    timeout: 15000,
+  });
+  return r.data.access_token;
+}
+
+async function gadsQuery({ accessToken, devToken, loginCustomerId, customerId, query }) {
+  const url = `${GADS_BASE}/${GADS_API_VERSION}/customers/${customerId}/googleAds:search`;
+  const headers = {
+    'Authorization':   `Bearer ${accessToken}`,
+    'developer-token': devToken,
+    'Content-Type':    'application/json',
+  };
+  if (loginCustomerId) headers['login-customer-id'] = loginCustomerId;
+
+  const allRows = [];
+  let pageToken;
+  do {
+    const body = { query, pageSize: 10000 };
+    if (pageToken) body.pageToken = pageToken;
+    const r = await withRetry(() => axios.post(url, body, { headers, timeout: 60000 }));
+    if (r.data.results?.length) allRows.push(...r.data.results);
+    pageToken = r.data.nextPageToken;
+  } while (pageToken);
+  return allRows;
+}
+
+const GADS_DATE_PRESETS = {
+  today:    'TODAY',
+  last_7d:  'LAST_7_DAYS',
+  last_14d: 'LAST_14_DAYS',
+  last_30d: 'LAST_30_DAYS',
+  last_90d: 'LAST_90_DAYS',
+};
+
+// POST /api/google-ads/verify — test credentials, return customer metadata
+app.post('/api/google-ads/verify', async (req, res) => {
+  const { devToken, loginCustomerId, customerId, clientId, clientSecret, refreshToken } = req.body;
+  if (!devToken || !customerId || !clientId || !clientSecret || !refreshToken) {
+    return res.status(400).json({ ok: false, error: 'missing required fields' });
+  }
+  try {
+    const accessToken = await getGadsAccessToken(clientId, clientSecret, refreshToken);
+    const rows = await gadsQuery({
+      accessToken, devToken,
+      loginCustomerId: loginCustomerId || customerId,
+      customerId,
+      query: 'SELECT customer.descriptive_name, customer.currency_code, customer.time_zone FROM customer LIMIT 1',
+    });
+    const c = rows[0]?.customer || {};
+    res.json({ ok: true, name: c.descriptiveName, currency: c.currencyCode, timeZone: c.timeZone });
+  } catch (err) {
+    const gErr = err.response?.data?.error;
+    const msg  = gErr?.details?.[0]?.errors?.[0]?.message || gErr?.message || err.message;
+    res.status(400).json({ ok: false, error: msg, status: err.response?.status });
+  }
+});
+
+// POST /api/google-ads/pull — full parallel pull of campaigns, adgroups, ads, keywords, search terms, breakdowns, shopping
+app.post('/api/google-ads/pull', async (req, res) => {
+  const { devToken, loginCustomerId, customerId, clientId, clientSecret, refreshToken, datePreset = 'last_30d' } = req.body;
+  if (!devToken || !customerId || !clientId || !clientSecret || !refreshToken) {
+    return res.status(400).json({ error: 'devToken, customerId, clientId, clientSecret, refreshToken required' });
+  }
+  const startMs = Date.now();
+  const mcc    = loginCustomerId || customerId;
+  const during = GADS_DATE_PRESETS[datePreset] || 'LAST_30_DAYS';
+
+  try {
+    const accessToken = await getGadsAccessToken(clientId, clientSecret, refreshToken);
+    const q = query => gadsQuery({ accessToken, devToken, loginCustomerId: mcc, customerId, query });
+
+    const queries = {
+      campaigns: `
+        SELECT campaign.id, campaign.name, campaign.status,
+          campaign.advertising_channel_type, campaign.bidding_strategy_type,
+          campaign_budget.amount_micros,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value,
+          metrics.all_conversions, metrics.all_conversions_value,
+          metrics.view_through_conversions,
+          metrics.ctr, metrics.average_cpc
+        FROM campaign
+        WHERE segments.date DURING ${during}
+          AND campaign.status != 'REMOVED'`,
+      campaignsDaily: `
+        SELECT campaign.id, campaign.name, segments.date,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value
+        FROM campaign
+        WHERE segments.date DURING ${during}`,
+      adGroups: `
+        SELECT ad_group.id, ad_group.name, ad_group.status, ad_group.type,
+          campaign.id, campaign.name, ad_group.cpc_bid_micros,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value, metrics.ctr, metrics.average_cpc
+        FROM ad_group
+        WHERE segments.date DURING ${during}
+          AND ad_group.status != 'REMOVED'`,
+      ads: `
+        SELECT ad_group_ad.ad.id, ad_group_ad.ad.name, ad_group_ad.ad.type,
+          ad_group_ad.status, ad_group_ad.ad.final_urls,
+          ad_group.id, ad_group.name, campaign.id, campaign.name,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value, metrics.ctr, metrics.average_cpc
+        FROM ad_group_ad
+        WHERE segments.date DURING ${during}
+          AND ad_group_ad.status != 'REMOVED'`,
+      keywords: `
+        SELECT ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
+          ad_group_criterion.status, ad_group_criterion.quality_info.quality_score,
+          ad_group.id, ad_group.name, campaign.id, campaign.name,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value, metrics.ctr, metrics.average_cpc
+        FROM keyword_view
+        WHERE segments.date DURING ${during}
+          AND ad_group_criterion.status != 'REMOVED'`,
+      searchTerms: `
+        SELECT search_term_view.search_term,
+          ad_group.id, campaign.id,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value, metrics.ctr
+        FROM search_term_view
+        WHERE segments.date DURING ${during}`,
+      devices: `
+        SELECT campaign.id, segments.device,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value
+        FROM campaign
+        WHERE segments.date DURING ${during}`,
+      hours: `
+        SELECT campaign.id, segments.hour, segments.day_of_week,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value
+        FROM campaign
+        WHERE segments.date DURING ${during}`,
+      geo: `
+        SELECT campaign.id, geographic_view.country_criterion_id, geographic_view.location_type,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value
+        FROM geographic_view
+        WHERE segments.date DURING ${during}`,
+      age: `
+        SELECT ad_group.id, ad_group.name, ad_group_criterion.age_range.type,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value
+        FROM age_range_view
+        WHERE segments.date DURING ${during}`,
+      gender: `
+        SELECT ad_group.id, ad_group.name, ad_group_criterion.gender.type,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value
+        FROM gender_view
+        WHERE segments.date DURING ${during}`,
+      shopping: `
+        SELECT segments.product_item_id, segments.product_title, segments.product_brand,
+          segments.product_type_l1, segments.product_channel,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value
+        FROM shopping_performance_view
+        WHERE segments.date DURING ${during}`,
+    };
+
+    // Run in parallel; individual failures are tolerated (e.g., shopping fails on non-ecommerce accounts)
+    const entries = await Promise.all(Object.entries(queries).map(async ([key, query]) => {
+      try {
+        const rows = await q(query);
+        return [key, rows];
+      } catch (e) {
+        const msg = e.response?.data?.error?.message || e.response?.data?.error?.details?.[0]?.errors?.[0]?.message || e.message;
+        console.warn(`[gads:${customerId}] ${key} failed: ${msg}`);
+        return [key, [], msg];
+      }
+    }));
+
+    const data   = {};
+    const errors = {};
+    entries.forEach(([key, rows, err]) => { data[key] = rows; if (err) errors[key] = err; });
+
+    res.json({ ...data, errors, fetchMs: Date.now() - startMs });
+  } catch (err) {
+    const gErr = err.response?.data?.error;
+    const msg  = gErr?.details?.[0]?.errors?.[0]?.message || gErr?.message || err.message;
+    res.status(err.response?.status || 500).json({ error: msg });
+  }
+});
+
 /* ─── HEALTH CHECK ────────────────────────────────────────────────── */
 
 app.get('/api/health', (_, res) => res.json({ ok: true, ts: Date.now() }));

@@ -19,6 +19,7 @@ const ShopifyOrders  = lazy(() => import('./pages/ShopifyOrders'));
 const ShopifyInsights= lazy(() => import('./pages/ShopifyInsights'));
 const ShopifyOps     = lazy(() => import('./pages/ShopifyOps'));
 const GAInsights     = lazy(() => import('./pages/GAInsights'));
+const GoogleAds      = lazy(() => import('./pages/GoogleAds'));
 const Procurement    = lazy(() => import('./pages/Procurement'));
 const CreativeIntel  = lazy(() => import('./pages/CreativeIntel'));
 const Attribution    = lazy(() => import('./pages/Attribution'));
@@ -92,6 +93,7 @@ function PrefetchAllPages() {
       import('./pages/ShopifyInsights');
       import('./pages/ShopifyOps');
       import('./pages/GAInsights');
+      import('./pages/GoogleAds');
       import('./pages/Procurement');
       import('./pages/CreativeIntel');
       import('./pages/Attribution');
@@ -154,6 +156,7 @@ export default function App() {
               <Route path="/shopify-ops"      element={M(ShopifyOps,      'shopify-ops')} />
               <Route path="/procurement"      element={M(Procurement,     'procurement')} />
               <Route path="/ga"               element={M(GAInsights,      'ga')} />
+              <Route path="/google-ads"       element={M(GoogleAds,       'google-ads')} />
               <Route path="/admin"            element={<ModuleGuard moduleKey="admin"><Admin /></ModuleGuard>} />
               <Route path="*"                 element={<Navigate to="/" replace />} />
             </Route>

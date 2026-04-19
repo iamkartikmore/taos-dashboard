@@ -8,6 +8,7 @@ import { Trophy } from 'lucide-react';
 import { useStore } from '../store';
 import Badge from '../components/ui/Badge';
 import { aggregateMetrics, groupBy, fmt, safeNum, median } from '../lib/analytics';
+import { totalsFromNormalized } from '../lib/googleAdsAnalytics';
 import { FullPageSpinner } from '../components/ui/Spinner';
 
 const COLORS = ['#2d7cf6','#22c55e','#f59e0b','#a78bfa','#f472b6','#34d399','#fb923c'];
@@ -114,9 +115,34 @@ function AccountCard({ accountKey, rows, medians }) {
 }
 
 export default function Scorecard() {
-  const { enrichedRows, fetchStatus } = useStore();
+  const { enrichedRows, fetchStatus, brands, activeBrandIds, brandData } = useStore();
 
   const accountGroups = useMemo(() => groupBy(enrichedRows, 'accountKey'), [enrichedRows]);
+
+  // Cross-channel totals across active brands
+  const crossChannel = useMemo(() => {
+    const activeIds = activeBrandIds || [];
+    const metaAgg = aggregateMetrics(enrichedRows) || { spend: 0, revenue: 0 };
+    const google = activeIds.reduce((acc, bid) => {
+      const d = brandData?.[bid]?.googleAdsData;
+      if (!d) return acc;
+      const t = totalsFromNormalized(d);
+      acc.spend   += t.spend;
+      acc.revenue += t.conversionValue;
+      return acc;
+    }, { spend: 0, revenue: 0 });
+    const meta = { spend: safeNum(metaAgg.spend), revenue: safeNum(metaAgg.revenue) };
+    const total = { spend: meta.spend + google.spend, revenue: meta.revenue + google.revenue };
+    return {
+      meta,
+      google,
+      total,
+      metaRoas:   meta.spend   > 0 ? meta.revenue   / meta.spend   : 0,
+      googleRoas: google.spend > 0 ? google.revenue / google.spend : 0,
+      totalRoas:  total.spend  > 0 ? total.revenue  / total.spend  : 0,
+      hasGoogle:  google.spend > 0,
+    };
+  }, [enrichedRows, brandData, activeBrandIds]);
 
   const globalMedians = useMemo(() => ({
     cpr:  median(enrichedRows.map(r => safeNum(r.metaCpr)).filter(v => v > 0)),
@@ -148,6 +174,51 @@ export default function Scorecard() {
           <p className="text-sm text-slate-500 mt-1">Account-level and collection-level performance scoring</p>
         </div>
       </div>
+
+      {/* Cross-channel banner */}
+      {crossChannel.hasGoogle && (
+        <motion.div initial={{ opacity:0, y:8 }} animate={{ opacity:1, y:0 }}
+          className="bg-gradient-to-br from-gray-900 to-gray-900/40 rounded-xl border border-gray-800 p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Cross-Channel · All Active Brands</h2>
+            <span className="text-[10px] text-slate-600">Meta + Google Ads</span>
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="bg-gray-950/50 rounded-lg p-3">
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Total Spend</div>
+              <div className="text-lg font-bold text-white">{fmt.currency(crossChannel.total.spend)}</div>
+              <div className="text-[10px] text-slate-500 mt-1">
+                Meta {fmt.currency(crossChannel.meta.spend)} · Google {fmt.currency(crossChannel.google.spend)}
+              </div>
+            </div>
+            <div className="bg-gray-950/50 rounded-lg p-3">
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Total Revenue</div>
+              <div className="text-lg font-bold text-emerald-400">{fmt.currency(crossChannel.total.revenue)}</div>
+              <div className="text-[10px] text-slate-500 mt-1">
+                Meta {fmt.currency(crossChannel.meta.revenue)} · Google {fmt.currency(crossChannel.google.revenue)}
+              </div>
+            </div>
+            <div className="bg-gray-950/50 rounded-lg p-3">
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Blended ROAS</div>
+              <div className="text-lg font-bold text-violet-300">{fmt.roas(crossChannel.totalRoas)}</div>
+              <div className="text-[10px] text-slate-500 mt-1">
+                Meta {fmt.roas(crossChannel.metaRoas)} · Google {fmt.roas(crossChannel.googleRoas)}
+              </div>
+            </div>
+            <div className="bg-gray-950/50 rounded-lg p-3">
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Channel Mix</div>
+              <div className="flex h-2 rounded-full overflow-hidden bg-gray-800 my-2">
+                <div style={{ width: `${crossChannel.total.spend > 0 ? (crossChannel.meta.spend   / crossChannel.total.spend) * 100 : 0}%`, background: '#2d7cf6' }} />
+                <div style={{ width: `${crossChannel.total.spend > 0 ? (crossChannel.google.spend / crossChannel.total.spend) * 100 : 0}%`, background: '#f59e0b' }} />
+              </div>
+              <div className="text-[10px] text-slate-500 flex justify-between">
+                <span><span className="inline-block w-2 h-2 rounded-full bg-blue-500 mr-1" />Meta {fmt.pct(crossChannel.total.spend > 0 ? (crossChannel.meta.spend/crossChannel.total.spend)*100 : 0)}</span>
+                <span><span className="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1" />Google {fmt.pct(crossChannel.total.spend > 0 ? (crossChannel.google.spend/crossChannel.total.spend)*100 : 0)}</span>
+              </div>
+            </div>
+          </div>
+        </motion.div>
+      )}
 
       {/* Account scorecards */}
       {Object.keys(accountGroups).length === 0 ? (

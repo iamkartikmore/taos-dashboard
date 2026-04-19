@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '../store';
-import { pullAccount, fetchShopifyInventory, fetchShopifyOrders } from '../lib/api';
+import { pullAccount, fetchShopifyInventory, fetchShopifyOrders, fetchGoogleAds } from '../lib/api';
+import { normalizeGoogleAdsResponse } from '../lib/googleAdsAnalytics';
 
 const LS_AUTO_FETCH = 'taos_auto_fetch_at';
 const COOLDOWN_MS   = 4 * 60 * 60 * 1000; // 4 hours
@@ -26,6 +27,8 @@ export function useAutoLoad() {
     setBrandMetaStatus,
     setBrandInventory,
     setBrandOrders,
+    setBrandGoogleAdsData,
+    setBrandGoogleAdsStatus,
   } = useStore();
 
   /* ── Core pull function — reusable for initial load & brand-switch ── */
@@ -88,9 +91,23 @@ export function useAutoLoad() {
           console.warn('[AutoLoad] Shopify orders failed:', e.message);
         }
       }
+
+      // Google Ads
+      const gAds = brand.googleAds || {};
+      if (gAds.devToken && gAds.customerId && gAds.clientId && gAds.clientSecret && gAds.refreshToken) {
+        setBrandGoogleAdsStatus(brand.id, 'loading');
+        try {
+          const raw        = await fetchGoogleAds(gAds, 'last_30d');
+          const normalized = normalizeGoogleAdsResponse(raw);
+          setBrandGoogleAdsData(brand.id, normalized);
+        } catch (e) {
+          console.warn('[AutoLoad] Google Ads failed:', e.message);
+          setBrandGoogleAdsStatus(brand.id, 'error', e.message);
+        }
+      }
     }));
     return results;
-  }, [setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders]);
+  }, [setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders, setBrandGoogleAdsData, setBrandGoogleAdsStatus]);
 
   /* ── Initial load (once, with 4-hour cooldown) ── */
   useEffect(() => {

@@ -13,16 +13,16 @@
       "overview", "decisions", "boards",
       "patterns", "scorecard", "video", "sku", "flat", "breakdowns",
       "creative-intel", "attribution", "momentum", "inactive", "daily",
-      "collection-spend", "aov"
+      "collection-spend", "aov", "google-ads"
     ],
     "commerce": [
       "overview",
       "shopify", "shopify-insights", "shopify-ops", "procurement", "ga",
-      "sku", "analysis"
+      "sku", "analysis", "google-ads"
     ],
     "analyst": [
       "overview", "patterns", "scorecard",
-      "analysis", "aov", "collection-spend", "ga", "business-plan"
+      "analysis", "aov", "collection-spend", "ga", "business-plan", "google-ads"
     ],
     "operations": [
       "overview", "shopify", "shopify-ops", "procurement"

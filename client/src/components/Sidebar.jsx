@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
   Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck, ClipboardList,
-  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, LogOut, ShieldCheck,
+  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, LogOut, ShieldCheck, Search,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -37,6 +37,7 @@ const NAV = [
   { to: '/shopify-ops',      icon: Truck,       label: 'Shopify Ops',        group: 'shopify',  moduleKey: 'shopify-ops' },
   { to: '/procurement',      icon: ClipboardList, label: 'Procurement',      group: 'shopify',  moduleKey: 'procurement' },
   { to: '/ga',               icon: Activity,    label: 'GA Analytics',       group: 'shopify',  moduleKey: 'ga' },
+  { to: '/google-ads',       icon: Search,      label: 'Google Ads',         group: 'shopify',  moduleKey: 'google-ads' },
   { to: '/admin',            icon: ShieldCheck, label: 'User Management',    group: 'admin',    moduleKey: 'admin' },
 ];
 

@@ -33,6 +33,7 @@ export function makeBrand(name = 'New Brand', idx = 0) {
     meta:    { token: '', apiVersion: 'v21.0', accounts: [] },
     shopify: { shop: '', clientId: '', clientSecret: '' },
     ga:      { propertyId: '', serviceAccountJson: '' },
+    googleAds: { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '' },
   };
 }
 
@@ -48,7 +49,13 @@ const DEFAULT_LISTS = {
 /* ─── MIGRATION from old single-brand config ────────────────────── */
 function loadBrands() {
   const stored = lsGet(LS_BRANDS, null);
-  if (stored?.length) return stored;
+  if (stored?.length) {
+    // Backfill missing googleAds field on existing brands (added 2026-04)
+    return stored.map(b => b.googleAds
+      ? b
+      : { ...b, googleAds: { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '' } }
+    );
+  }
 
   const old = lsGet('taos_config', null);
   if (old) {
@@ -162,8 +169,10 @@ export const useStore = create((set, get) => {
       const brands = _saveBrands(get().brands.map(b => {
         if (b.id !== id) return b;
         const u = { ...b, ...patch };
-        if (patch.meta)    u.meta    = { ...b.meta,    ...patch.meta };
-        if (patch.shopify) u.shopify = { ...b.shopify, ...patch.shopify };
+        if (patch.meta)      u.meta      = { ...b.meta,      ...patch.meta };
+        if (patch.shopify)   u.shopify   = { ...b.shopify,   ...patch.shopify };
+        if (patch.ga)        u.ga        = { ...b.ga,        ...patch.ga };
+        if (patch.googleAds) u.googleAds = { ...b.googleAds, ...patch.googleAds };
         return u;
       }));
       set({ brands });
@@ -282,6 +291,16 @@ export const useStore = create((set, get) => {
 
     setBrandGaStatus: (brandId, status, error = null) => {
       const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), gaStatus: status, gaError: error } };
+      set({ brandData });
+    },
+
+    setBrandGoogleAdsData: (brandId, data) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), googleAdsData: data, googleAdsStatus: 'success', googleAdsFetchAt: Date.now() } };
+      set({ brandData });
+    },
+
+    setBrandGoogleAdsStatus: (brandId, status, error = null) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), googleAdsStatus: status, googleAdsError: error } };
       set({ brandData });
     },
 

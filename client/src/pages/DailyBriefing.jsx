@@ -9,6 +9,7 @@ import { useStore } from '../store';
 import { fetchInsightsCustom } from '../lib/api';
 import { normalizeInsight } from '../lib/analytics';
 import { buildDayOverDayAnalysis } from '../lib/metaIntelligence';
+import { totalsFromNormalized } from '../lib/googleAdsAnalytics';
 
 /* ─── helpers ─── */
 const fmtN = n => Math.round(n).toLocaleString('en-IN');
@@ -165,7 +166,21 @@ function AdDriverRow({ d }) {
 
 /* ─── Main page ─── */
 export default function DailyBriefing() {
-  const { brands, brandData, shopifyOrders } = useStore();
+  const { brands, brandData, shopifyOrders, activeBrandIds } = useStore();
+
+  // Last-30d cross-channel spend context (from the auto-pulled Google Ads data)
+  const channelContext = useMemo(() => {
+    const activeIds = activeBrandIds || [];
+    const google = activeIds.reduce((acc, bid) => {
+      const d = brandData?.[bid]?.googleAdsData;
+      if (!d) return acc;
+      const t = totalsFromNormalized(d);
+      acc.spend   += t.spend;
+      acc.revenue += t.conversionValue;
+      return acc;
+    }, { spend: 0, revenue: 0 });
+    return google.spend > 0 ? google : null;
+  }, [brandData, activeBrandIds]);
   const [status, setStatus] = useState('idle'); // idle | loading | done | error
   const [logs, setLogs] = useState([]);
   const [analyses, setAnalyses] = useState([]); // one per brand
@@ -259,6 +274,13 @@ export default function DailyBriefing() {
             <span className="text-white font-medium">{fmtLabel(dbDate)}</span>
           </p>
         </div>
+        {channelContext && (
+          <div className="text-[10px] text-slate-500 text-right leading-relaxed">
+            <div className="font-semibold text-slate-400 mb-0.5">Google Ads 30d context</div>
+            <div>{fmtC(channelContext.spend)} spend · {fmtC(channelContext.revenue)} value</div>
+            <div>ROAS {channelContext.spend > 0 ? fmtDec(channelContext.revenue / channelContext.spend) : '—'}</div>
+          </div>
+        )}
         <button
           onClick={handlePull}
           disabled={status === 'loading' || !brands.length}
