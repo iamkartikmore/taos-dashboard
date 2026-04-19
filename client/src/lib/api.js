@@ -10,8 +10,17 @@ async function proxyGet(url, params = {}, endpoint = '/api/meta/fetch') {
     headers: { 'Content-Type': 'application/json' },
     body:    JSON.stringify({ url, params }),
   });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.error?.message || JSON.stringify(json.error) || 'Meta API error');
+  let json;
+  try { json = await res.json(); }
+  catch { throw new Error(`Meta proxy returned non-JSON (HTTP ${res.status})`); }
+  if (!res.ok) {
+    const e = json?.error;
+    const msg = (typeof e === 'string' && e) ||
+                e?.message ||
+                (e && JSON.stringify(e)) ||
+                `Meta proxy HTTP ${res.status}`;
+    throw new Error(msg);
+  }
   return json;
 }
 
@@ -170,25 +179,25 @@ export async function fetchCampaigns(ver, token, accountId) {
 export async function pullAccount({ ver, token, accountKey, accountId }, onProgress) {
   const log = msg => onProgress?.(`[${accountKey}] ${msg}`);
 
-  // Fetch structural data and all insight windows in parallel
-  log('fetching structure + all insight windows in parallel...');
-  const [
-    campaigns, adsets, ads,
-    rawToday, raw7d, raw14d, raw30d,
-  ] = await Promise.all([
+  // Phase 1: structural (small payloads, safe to parallelise)
+  log('fetching structure...');
+  const [campaigns, adsets, ads] = await Promise.all([
     fetchCampaigns(ver, token, accountId).then(r => { log(`${r.length} campaigns`); return r; }),
-    fetchAdsets(ver, token, accountId).then(r => { log(`${r.length} adsets`); return r; }),
-    fetchAds(ver, token, accountId).then(r => { log(`${r.length} ads`); return r; }),
-    fetchInsights(ver, token, accountId, 'today',     msg => log(`Today ${msg}`)),
-    fetchInsights(ver, token, accountId, 'last_7d',   msg => log(`7D ${msg}`)),
-    fetchInsights(ver, token, accountId, 'last_14d',  msg => log(`14D ${msg}`)),
-    fetchInsights(ver, token, accountId, 'last_30d',  msg => log(`30D ${msg}`)),
+    fetchAdsets(ver, token, accountId).then(r  => { log(`${r.length} adsets`);    return r; }),
+    fetchAds(ver, token, accountId).then(r     => { log(`${r.length} ads`);       return r; }),
   ]);
 
+  // Phase 2: insights (big payloads) — run sequentially so Render memory stays flat
+  log('fetching insight windows sequentially...');
+  const rawToday = await fetchInsights(ver, token, accountId, 'today',    msg => log(`Today ${msg}`));
+  const raw7d    = await fetchInsights(ver, token, accountId, 'last_7d',  msg => log(`7D ${msg}`));
+  const raw14d   = await fetchInsights(ver, token, accountId, 'last_14d', msg => log(`14D ${msg}`));
+  const raw30d   = await fetchInsights(ver, token, accountId, 'last_30d', msg => log(`30D ${msg}`));
+
   const insightsToday = rawToday.map(r => normalizeInsight(r, accountKey, 'Today'));
-  const insights7d    = raw7d.map(r =>    normalizeInsight(r, accountKey, '7D'));
-  const insights14d   = raw14d.map(r =>   normalizeInsight(r, accountKey, '14D'));
-  const insights30d   = raw30d.map(r =>   normalizeInsight(r, accountKey, '30D'));
+  const insights7d    = raw7d.map(r    => normalizeInsight(r, accountKey, '7D'));
+  const insights14d   = raw14d.map(r   => normalizeInsight(r, accountKey, '14D'));
+  const insights30d   = raw30d.map(r   => normalizeInsight(r, accountKey, '30D'));
 
   log(`✓ Done — Today:${insightsToday.length} 7D:${insights7d.length} 14D:${insights14d.length} 30D:${insights30d.length}`);
   return { accountKey, accountId, campaigns, adsets, ads, insightsToday, insights7d, insights14d, insights30d };

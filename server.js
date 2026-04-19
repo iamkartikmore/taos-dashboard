@@ -602,7 +602,11 @@ app.post('/api/shopify/orders/stream', async (req, res) => {
       try {
         resp = await withRetry(() => axios.get(url, { headers, timeout: 90000 }));
       } catch (pageErr) {
-        emit({ type: 'error', msg: `Page ${page} failed: ${pageErr.message}` });
+        const detail = pageErr.message
+          || pageErr.code
+          || (pageErr.response && `HTTP ${pageErr.response.status}`)
+          || 'unknown error';
+        emit({ type: 'error', msg: `Page ${page} failed: ${detail}` });
         break;
       }
 
