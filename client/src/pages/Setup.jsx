@@ -141,7 +141,12 @@ function BrandCard({ brand, brandInfo }) {
     setBrandMetaStatus(brand.id, 'loading');
     appendLog(`[${brand.name}] Starting Meta pull...`);
     let combined = { campaigns: [], adsets: [], ads: [], insightsToday: [], insights7d: [], insights14d: [], insights30d: [] };
-    for (const acc of accounts) {
+    for (let i = 0; i < accounts.length; i++) {
+      const acc = accounts[i];
+      if (i > 0) {
+        appendLog(`[${brand.name}] Cooling down 10s before next account (Meta app rate limit)...`);
+        await new Promise(r => setTimeout(r, 10000));
+      }
       const r = await pullAccount(
         { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
         msg => appendLog(`[${brand.name}] ${msg}`),
@@ -877,19 +882,20 @@ export default function Setup() {
       // ── Meta ─────────────────────────────────────────────────────
       let metaOk = false;
       if (hasMeta) {
-        appendLog(`[${brand.name}] Meta: pulling ${accounts.length} account(s) in parallel...`);
+        appendLog(`[${brand.name}] Meta: pulling ${accounts.length} account(s) sequentially (10s cooldown between)...`);
         setBrandMetaStatus(brand.id, 'loading');
         try {
-          const results = await Promise.all(
-            accounts.map(acc =>
-              pullAccount(
-                { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
-                msg => appendLog(`[${brand.name}]   ${msg}`),
-              )
-            )
-          );
           const combined = { campaigns:[], adsets:[], ads:[], insightsToday:[], insights7d:[], insights14d:[], insights30d:[] };
-          results.forEach(r => {
+          for (let i = 0; i < accounts.length; i++) {
+            const acc = accounts[i];
+            if (i > 0) {
+              appendLog(`[${brand.name}]   Cooling down 10s before next account...`);
+              await new Promise(r => setTimeout(r, 10000));
+            }
+            const r = await pullAccount(
+              { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
+              msg => appendLog(`[${brand.name}]   ${msg}`),
+            );
             combined.campaigns.push(...r.campaigns);
             combined.adsets.push(...r.adsets);
             combined.ads.push(...r.ads);
@@ -897,7 +903,7 @@ export default function Setup() {
             combined.insights7d.push(...r.insights7d);
             combined.insights14d.push(...r.insights14d);
             combined.insights30d.push(...r.insights30d);
-          });
+          }
           setBrandMetaData(brand.id, combined);
           appendLog(`[${brand.name}] ✅ Meta done — ${combined.insights7d.length} ads (7D)`);
           metaOk = true;

@@ -26,18 +26,25 @@ app.use((req, res, next) => {
 /* ─── HELPERS ─────────────────────────────────────────────────────── */
 
 // Exponential backoff retry — handles Meta 80004 / Shopify 429 gracefully
-async function withRetry(fn, maxAttempts = 4, baseDelayMs = 500) {
+async function withRetry(fn, maxAttempts = 5, baseDelayMs = 500) {
   let lastErr;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try { return await fn(); }
     catch (err) {
       lastErr = err;
-      const status = err.response?.status;
-      const code   = err.response?.data?.error?.code;
-      // Retry on: 429 rate limit, 503 service unavailable, Meta transient (80004, 1, 2)
-      const retryable = [429, 503, 500].includes(status) || [1, 2, 80004, 17, 613].includes(code);
+      const status  = err.response?.status;
+      const code    = err.response?.data?.error?.code;        // Meta error code
+      const errCode = err.code;                               // axios/node network code
+      const isAppLimit     = code === 4;                      // Meta "Application request limit reached" — transient
+      const isRateOrServer = [429, 503, 500, 502, 504].includes(status);
+      const isMetaTransient = [1, 2, 17, 613, 80004].includes(code);
+      const isNetwork      = ['ETIMEDOUT', 'ECONNRESET', 'ECONNABORTED', 'EAI_AGAIN', 'ENETUNREACH'].includes(errCode);
+      const retryable = isAppLimit || isRateOrServer || isMetaTransient || isNetwork;
       if (!retryable || attempt === maxAttempts) throw err;
-      const delay = baseDelayMs * Math.pow(2, attempt - 1);
+      // App-level rate limit needs to wait much longer for the bucket to refill
+      const delay = isAppLimit
+        ? 15000 * Math.pow(2, attempt - 1)     // 15s, 30s, 60s, 120s
+        : baseDelayMs * Math.pow(2, attempt - 1);
       await new Promise(r => setTimeout(r, delay));
     }
   }
