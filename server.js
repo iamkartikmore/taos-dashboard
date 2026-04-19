@@ -593,7 +593,10 @@ app.post('/api/shopify/orders/stream', async (req, res) => {
       'tags','fulfillment_status','financial_status',
     ].join(',');
 
-    let qs = `limit=250&status=any&fields=${fields}`;
+    // Smaller page size = faster per-page response = fewer TCP timeouts over long pulls.
+    // For 60 days TAOS volume (~5k orders) this means ~50 pages at 1-2s each vs 20 pages at 5-10s each.
+    const PAGE_LIMIT = 100;
+    let qs = `limit=${PAGE_LIMIT}&status=any&fields=${fields}`;
     if (since) qs += `&created_at_min=${encodeURIComponent(since)}`;
     if (until) qs += `&created_at_max=${encodeURIComponent(until)}`;
 
@@ -607,7 +610,8 @@ app.post('/api/shopify/orders/stream', async (req, res) => {
 
       let resp;
       try {
-        resp = await withRetry(() => axios.get(url, { headers, timeout: 90000 }));
+        // 60s is plenty for a 100-row page; withRetry handles ETIMEDOUT / 429 / 5xx with backoff.
+        resp = await withRetry(() => axios.get(url, { headers, timeout: 60000 }));
       } catch (pageErr) {
         const detail = pageErr.message
           || pageErr.code
@@ -620,13 +624,14 @@ app.post('/api/shopify/orders/stream', async (req, res) => {
       const batch = resp.data.orders || [];
       totalOrders += batch.length;
 
-      emit({ type: 'batch', orders: batch, offset: (page - 1) * 250 });
+      emit({ type: 'batch', orders: batch, offset: (page - 1) * PAGE_LIMIT });
       emit({ type: 'page', page, batchCount: batch.length, total: totalOrders,
         msg: `✓ Page ${page}: +${batch.length} orders → ${totalOrders} total` });
 
       const m = (resp.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
       url = m ? m[1] : null;
-      if (url) await new Promise(r => setTimeout(r, 300));
+      // Shopify REST bucket leaks at 2 req/s — 250ms keeps us just under.
+      if (url) await new Promise(r => setTimeout(r, 250));
     }
 
     emit({ type: 'done', count: totalOrders, pages: page, fetchMs: Date.now() - startMs });
