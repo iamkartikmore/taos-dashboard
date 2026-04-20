@@ -1944,17 +1944,30 @@ function ordersInRange(allOrders, startISO, endISO) {
     return d >= startISO && d <= endISO;
   });
 }
+/**
+ * Enriched rows carry per-ad 7D + 30D aggregates (no daily breakdown).
+ * To get spend/revenue for an arbitrary date range we pro-rate the 30D total
+ * by the number of days that overlap with the rolling [today-30, today] window.
+ * Ranges fully outside that window return 0.
+ */
+function _windowOverlapDays(startISO, endISO) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const winEnd   = today.getTime();
+  const winStart = winEnd - 30 * 86400000;
+  const rStart = new Date(`${startISO}T00:00:00`).getTime();
+  const rEnd   = new Date(`${endISO}T23:59:59`).getTime();
+  const overlapMs = Math.max(0, Math.min(winEnd, rEnd) - Math.max(winStart, rStart));
+  return overlapMs / 86400000;
+}
 function spendInRange(rows, startISO, endISO) {
-  return (rows || []).filter(r => {
-    const d = (r.date || '').slice(0, 10);
-    return d >= startISO && d <= endISO;
-  }).reduce((s, r) => s + parseFloat(r.spend || 0), 0);
+  const total30 = (rows || []).reduce((s, r) => s + parseFloat(r.spend30d || r.spend || 0), 0);
+  const days = _windowOverlapDays(startISO, endISO);
+  return days > 0 ? total30 * (days / 30) : 0;
 }
 function revenueInRange(rows, startISO, endISO) {
-  return (rows || []).filter(r => {
-    const d = (r.date || '').slice(0, 10);
-    return d >= startISO && d <= endISO;
-  }).reduce((s, r) => s + parseFloat(r.purchase_value || r.revenue || r.purchaseValue || 0), 0);
+  const total30 = (rows || []).reduce((s, r) => s + parseFloat(r.revenue30d || r.revenue || 0), 0);
+  const days = _windowOverlapDays(startISO, endISO);
+  return days > 0 ? total30 * (days / 30) : 0;
 }
 function pctStatus(pct, isPartial = false) {
   const threshold = isPartial ? 80 : 90;
