@@ -1,12 +1,9 @@
 import { useStore } from '../store';
-import { useAuth } from '../contexts/AuthContext';
 
 export default function BrandSelector() {
   const { brands, activeBrandIds, brandData, toggleBrandActive, setAllBrandsActive, setNoBrandsActive } = useStore();
-  const { canAccessBrand } = useAuth();
 
-  // Filter to brands the logged-in user is allowed to see
-  const allowedBrands = (brands || []).filter(b => canAccessBrand(b.id));
+  const allowedBrands = brands || [];
 
   if (!allowedBrands || allowedBrands.length <= 1) return null;
 
