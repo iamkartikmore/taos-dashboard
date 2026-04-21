@@ -11,6 +11,24 @@ import { buildProductLookup, productFor } from '../lib/retention/productLookup';
 import { downloadCsv } from '../lib/retention/exportCsv';
 import { publishPlanToListmonk } from '../lib/retention/publish';
 import { OPP_TEMPLATES, renderPreview } from '../lib/retention/emailTemplates';
+import { fitBrandSurvival, makeCustomerHazard, makeSkuHazard } from '../lib/retention/survival';
+import { buildRecommender } from '../lib/retention/recommender';
+import { attributeOrders } from '../lib/retention/attribution';
+import { buildUpliftTable, indexUplift, lookupLift } from '../lib/retention/uplift';
+import { updateBandit, makeBanditWeight } from '../lib/retention/bandit';
+import { buildSuppressionSet } from '../lib/suppression';
+
+const BANDIT_KEY = 'retention:bandit:v1';
+const BRAND_WEIGHTS_KEY = 'retention:brandWeights:v1';
+const PER_BRAND_FATIGUE_KEY = 'retention:perBrandFatigue:v1';
+
+function loadJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+}
+function saveJson(key, v) { try { localStorage.setItem(key, JSON.stringify(v)); } catch {} }
 
 const OPP_LABEL = {
   REPLENISH: 'Replenish', COMPLEMENT: 'Complement', WINBACK: 'Winback',
@@ -37,16 +55,43 @@ export default function SendPlanner() {
   const [publishOpen, setPublishOpen] = useState(false);
   const [previewOpp, setPreviewOpp] = useState(null);
   const [startNow, setStartNow] = useState(false);
+  const [brandWeights, setBrandWeights] = useState(() => loadJson(BRAND_WEIGHTS_KEY, {}));
+  const [perBrandFatigue, setPerBrandFatigue] = useState(() => loadJson(PER_BRAND_FATIGUE_KEY, {}));
+  const [killedCells, setKilledCells] = useState([]);   // uplift auto-kill log
+  const [banditSummary, setBanditSummary] = useState(null);
 
   const run = async () => {
     setComputing(true);
     setPlan(null);
     setConfirmStatus(null);
 
-    // Hydrate fatigue/cooldown state from the persisted send log
+    // Hydrate fatigue/cooldown state + bandit posteriors from persisted history.
+    // Uplift table is re-derived each run from attributed sends so new learning
+    // lands immediately without a manual rebuild step.
     const sendsLog = await loadAllSends();
     setLogCount(sendsLog.length);
     const customerState = buildCustomerStateFromSends(sendsLog);
+
+    // Re-attribute all sends against all known orders so the uplift table
+    // reflects the most recent week of deliveries.
+    const allOrders = [];
+    for (const b of activeBrands) {
+      const list = brandData[b.id]?.orders || [];
+      for (const o of list) allOrders.push({ ...o, _brandId: b.id });
+    }
+    const attributed = attributeOrders(sendsLog, allOrders, { windowDays: 7 });
+    const { rows: upliftRows } = buildUpliftTable(attributed);
+    const upliftIndex = indexUplift(upliftRows);
+    setKilledCells(upliftRows.filter(r => r.kill));
+
+    // Bandit state: load previous posteriors, fold in new attributed sends.
+    let banditState = loadJson(BANDIT_KEY, null);
+    banditState = updateBandit(banditState, attributed);
+    saveJson(BANDIT_KEY, banditState);
+    const banditWeightFn = makeBanditWeight(banditState);
+
+    // Load suppression registry once (cross-brand).
+    const suppressionSet = await buildSuppressionSet();
 
     await new Promise(r => setTimeout(r, 20));
     const allFlat = [];
@@ -60,6 +105,14 @@ export default function SendPlanner() {
       applyTaxonomy(orders, taxonomy.skuLabel);
       const { features, replenish } = buildAllFeatures(orders, customers);
       const affinity = buildAffinity(orders);
+
+      // ML primitives per brand (fit once, reuse across all scorers).
+      const survivalFits = fitBrandSurvival(orders);
+      const customerHazard = makeCustomerHazard(survivalFits);
+      const skuHazard = makeSkuHazard(survivalFits);
+      const recommender = buildRecommender(orders);
+      const lookup = buildProductLookup(b, bd.inventoryMap);
+
       const { flat } = rankAllOpportunities({
         features,
         replenishClock: replenish,
@@ -67,23 +120,36 @@ export default function SendPlanner() {
         taxonomy,
         newLaunches: affinity.newLaunches,
         orders,
+        skuHazard,
+        customerHazard,
+        recommender,
+        lookup,
       });
-      ctx[b.id] = { features, lookup: buildProductLookup(b, bd.inventoryMap) };
+      ctx[b.id] = { features, lookup, survivalFits, recommender };
       for (const row of flat) {
+        const f = features[row.email];
         allFlat.push({
           ...row,
           brand: b.name,
           brand_id: b.id,
-          accepts_email_marketing: features[row.email]?.accepts_email_marketing,
-          consent: features[row.email]?.accepts_email_marketing ? true : false,
+          accepts_email_marketing: f?.accepts_email_marketing,
+          consent: f?.accepts_email_marketing ? true : false,
+          value_tier: f?.value_tier || 'unknown',
+          lifecycle_stage: f?.lifecycle_stage || 'unknown',
         });
       }
     }
     setBrandCtx(ctx);
     const result = planSends(allFlat, customerState, {
       dailyCap, holdoutPct, fatigueMax, cooldownHours, minScore,
+      upliftIndex, lookupLift,
+      banditWeight: banditWeightFn,
+      suppressionSet,
+      brandWeights,
+      perBrandFatigue,
     });
     setPlan(result);
+    setBanditSummary({ arms: Object.keys(banditState.arms || {}).length, updated_at: banditState.updated_at });
     setComputing(false);
   };
 
@@ -330,6 +396,99 @@ export default function SendPlanner() {
         <Knob label="Fatigue / 7d" value={fatigueMax} onChange={v => setFatigueMax(parseInt(v, 10) || 0)} min={0} max={7} step={1} />
         <Knob label="Cooldown (h)" value={cooldownHours} onChange={v => setCooldownHours(parseInt(v, 10) || 0)} min={0} step={6} />
         <Knob label="Min score" value={minScore} onChange={v => setMinScore(parseFloat(v) || 0)} min={0} max={1} step={0.05} />
+      </div>
+
+      {/* Governance: brand weights, per-brand fatigue override, uplift kill log, bandit */}
+      <div className="grid grid-cols-3 gap-4">
+        <div className="rounded-xl bg-gray-900/50 border border-gray-800 p-4">
+          <div className="text-xs uppercase tracking-wide text-slate-500 mb-3">
+            Brand weights
+            <span className="block normal-case text-[10px] text-slate-600 mt-0.5">
+              Multiplier on expected revenue. 1.0 = neutral; raise to bias the cap toward a brand.
+            </span>
+          </div>
+          <div className="space-y-1.5">
+            {activeBrands.map(b => (
+              <div key={b.id} className="flex items-center justify-between gap-2 text-sm">
+                <span className="text-slate-300 truncate">{b.name}</span>
+                <input
+                  type="number" step="0.1" min="0" max="5"
+                  value={brandWeights[b.id] ?? 1}
+                  onChange={e => {
+                    const v = parseFloat(e.target.value);
+                    const next = { ...brandWeights, [b.id]: isFinite(v) ? v : 1 };
+                    setBrandWeights(next); saveJson(BRAND_WEIGHTS_KEY, next);
+                  }}
+                  className="w-20 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-xs text-slate-200 tabular-nums"
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="rounded-xl bg-gray-900/50 border border-gray-800 p-4">
+          <div className="text-xs uppercase tracking-wide text-slate-500 mb-3">
+            Per-brand fatigue override
+            <span className="block normal-case text-[10px] text-slate-600 mt-0.5">
+              Blank = use global {fatigueMax}/{cooldownHours}h.
+            </span>
+          </div>
+          <div className="space-y-1.5">
+            {activeBrands.map(b => {
+              const pb = perBrandFatigue[b.id] || {};
+              const set = (patch) => {
+                const next = { ...perBrandFatigue, [b.id]: { ...pb, ...patch } };
+                setPerBrandFatigue(next); saveJson(PER_BRAND_FATIGUE_KEY, next);
+              };
+              return (
+                <div key={b.id} className="flex items-center justify-between gap-2 text-xs">
+                  <span className="text-slate-300 truncate flex-1">{b.name}</span>
+                  <input
+                    type="number" min="0" max="7" placeholder="7d"
+                    value={pb.fatigueMax ?? ''}
+                    onChange={e => set({ fatigueMax: e.target.value ? parseInt(e.target.value, 10) : undefined })}
+                    className="w-14 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-slate-200 tabular-nums"
+                    title="Max sends per 7d"
+                  />
+                  <input
+                    type="number" min="0" step="6" placeholder="hr"
+                    value={pb.cooldownHours ?? ''}
+                    onChange={e => set({ cooldownHours: e.target.value ? parseInt(e.target.value, 10) : undefined })}
+                    className="w-16 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-slate-200 tabular-nums"
+                    title="Cooldown hours"
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="rounded-xl bg-gray-900/50 border border-gray-800 p-4">
+          <div className="text-xs uppercase tracking-wide text-slate-500 mb-3">Governance signal</div>
+          <div className="space-y-1.5 text-xs">
+            {banditSummary && (
+              <div className="text-slate-400">
+                Bandit arms: <span className="text-slate-200 font-medium">{banditSummary.arms}</span>
+                <span className="text-slate-600"> · updated {new Date(banditSummary.updated_at).toLocaleString()}</span>
+              </div>
+            )}
+            {killedCells.length === 0 ? (
+              <div className="text-slate-500">No (brand × opp × tier) cells auto-killed by uplift data.</div>
+            ) : (
+              <>
+                <div className="text-rose-400 font-medium">Auto-killed cells ({killedCells.length}):</div>
+                <div className="max-h-32 overflow-auto space-y-0.5 pr-2">
+                  {killedCells.slice(0, 20).map(k => (
+                    <div key={k.brand_id + k.opportunity + k.value_tier} className="text-slate-400 tabular-nums">
+                      {k.brand_id} · {k.opportunity} · {k.value_tier}
+                      <span className="text-rose-400 ml-1">lift {k.shrunk_lift.toFixed(3)}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       </div>
 
       {plan && (

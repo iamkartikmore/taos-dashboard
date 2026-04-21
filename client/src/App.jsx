@@ -41,6 +41,7 @@ const CustomerBrain      = lazy(() => import('./pages/CustomerBrain'));
 const SendPlanner        = lazy(() => import('./pages/SendPlanner'));
 const CampaignPerformance = lazy(() => import('./pages/CampaignPerformance'));
 const RetentionSheets    = lazy(() => import('./pages/RetentionSheets'));
+const ModelDiagnostics   = lazy(() => import('./pages/ModelDiagnostics'));
 
 function PageFallback() {
   return (
@@ -111,6 +112,7 @@ function PrefetchAllPages() {
       import('./pages/SendPlanner');
       import('./pages/CampaignPerformance');
       import('./pages/RetentionSheets');
+      import('./pages/ModelDiagnostics');
     }, 800);
     return () => clearTimeout(t);
   }, []);
@@ -132,6 +134,7 @@ export default function App() {
             <Route path="/send-planner"     element={<SendPlanner />} />
             <Route path="/campaign-perf"    element={<CampaignPerformance />} />
             <Route path="/retention-sheets" element={<RetentionSheets />} />
+            <Route path="/model-diagnostics" element={<ModelDiagnostics />} />
             <Route path="/decisions"        element={<DecisionQueue />} />
             <Route path="/scale"            element={<Board />} />
             <Route path="/fix"              element={<Board />} />
