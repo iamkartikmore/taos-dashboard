@@ -2,13 +2,14 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
   Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck, ClipboardList,
-  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, Search, Mail, Users, Sparkles, Star,
+  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, Search, Mail, Users, Sparkles, Star, Upload,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
 
 const NAV = [
   { to: '/setup',       icon: Settings,       label: 'Study Manual',       group: 'config' },
+  { to: '/bulk-import', icon: Upload,         label: 'Bulk CSV Import',    group: 'config' },
   { to: '/',            icon: LayoutDashboard, label: 'Overview',           group: 'dash', end: true },
   { to: '/decisions',   icon: ListChecks,      label: 'Decision Queue',     group: 'dash' },
   { to: '/scale',       icon: TrendingUp,      label: 'Scale Board',        group: 'boards' },

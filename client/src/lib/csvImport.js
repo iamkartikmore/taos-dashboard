@@ -7,13 +7,14 @@ export function parseCsv(text) {
   let cur = '';
   let inQuote = false;
 
-  // Normalise line endings then split char by char to handle quoted newlines
+  // Split text into logical CSV records (newlines inside quotes are kept in
+  // the same record). Preserve the quote characters so the row-level parser
+  // can do its own quoted-field handling.
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (ch === '"') {
-      // Handle escaped double-quote ""
-      if (inQuote && text[i + 1] === '"') { cur += '"'; i++; }
-      else inQuote = !inQuote;
+      if (inQuote && text[i + 1] === '"') { cur += '""'; i++; }
+      else { cur += '"'; inQuote = !inQuote; }
     } else if ((ch === '\n' || ch === '\r') && !inQuote) {
       if (cur.length || lines.length) lines.push(cur);
       cur = '';

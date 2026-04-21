@@ -3,6 +3,8 @@ import { buildEnrichedRows } from '../lib/analytics';
 import { normalizeBreakdownRow } from '../lib/breakdownAnalytics';
 import { mergeCustomerCache } from '../lib/shopifyAnalytics';
 import { saveOrders, loadAllOrders } from '../lib/orderStorage';
+import { saveCustomers } from '../lib/customerStorage';
+import { mergeOrders as mergeOrdersById, mergeCustomers as mergeCustomersByKey } from '../lib/shopifyCsvImport';
 
 /* ─── LOCALSTORAGE ──────────────────────────────────────────────── */
 const LS_BRANDS  = 'taos_brands_v2';
@@ -305,6 +307,60 @@ export const useStore = create((set, get) => {
       }
       set({ brandData: next });
       _rebuild({ brandData: next });
+    },
+
+    /* ── Bulk CSV ingest: merges with existing orders, persists to IDB ── */
+    mergeBrandOrdersFromCsv: (brandId, orders) => {
+      const cur = get().brandData[brandId] || {};
+      const merged = mergeOrdersById(cur.orders || [], orders.map(o => ({ ...o, _brandId: brandId })));
+      const brandData = { ...get().brandData, [brandId]: {
+        ...cur,
+        orders: merged,
+        ordersWindow: 'bulk-csv',
+        ordersStatus: 'success',
+        ordersFetchedAt: Date.now(),
+      }};
+      // Also refresh light customer cache used for RFM chips
+      const existingCache  = lsGet(LS_CUST, {});
+      const brandCache     = existingCache[brandId] || {};
+      const updatedBrandCache = mergeCustomerCache(brandCache, merged);
+      const newCache = { ...existingCache, [brandId]: updatedBrandCache };
+      lsSet(LS_CUST, newCache);
+      saveOrders(brandId, merged, 'bulk-csv');
+      set({ brandData, customerCache: newCache });
+      _rebuild({ brandData });
+      return { total: merged.length, added: merged.length - (cur.orders?.length || 0) };
+    },
+
+    mergeBrandCustomersFromCsv: (brandId, customers) => {
+      const cur = get().brandData[brandId] || {};
+      const merged = mergeCustomersByKey(cur.customers || [], customers);
+      const brandData = { ...get().brandData, [brandId]: {
+        ...cur,
+        customers: merged,
+        customersStatus: 'success',
+        customersFetchedAt: Date.now(),
+      }};
+      saveCustomers(brandId, merged, 'csv');
+      set({ brandData });
+      return { total: merged.length, added: merged.length - (cur.customers?.length || 0) };
+    },
+
+    hydrateCustomers: (records) => {
+      if (!records?.length) return;
+      const cur = get().brandData;
+      const next = { ...cur };
+      for (const r of records) {
+        if (!r?.brandId) continue;
+        if (next[r.brandId]?.customersFetchedAt && next[r.brandId].customersFetchedAt >= (r.fetchedAt || 0)) continue;
+        next[r.brandId] = {
+          ...(next[r.brandId] || {}),
+          customers: r.customers || [],
+          customersFetchedAt: r.fetchedAt,
+          customersStatus: 'success',
+        };
+      }
+      set({ brandData: next });
     },
 
     setBrandOrdersStatus: (brandId, status, error = null) => {

@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
 import { useStore } from './store';
 import { loadAllOrders } from './lib/orderStorage';
+import { loadAllCustomers } from './lib/customerStorage';
 import { shouldAutoPull, runDailyAutoPull } from './lib/autoPull';
 
 // Heavy pages — code-split so only the active page's JS is parsed
@@ -35,6 +36,7 @@ const CollectionSpend    = lazy(() => import('./pages/CollectionSpend'));
 const AOVAnalysis        = lazy(() => import('./pages/AOVAnalysis'));
 const BusinessPlan       = lazy(() => import('./pages/BusinessPlan'));
 const StarProducts       = lazy(() => import('./pages/StarProducts'));
+const BulkImport         = lazy(() => import('./pages/BulkImport'));
 
 function PageFallback() {
   return (
@@ -45,12 +47,13 @@ function PageFallback() {
 }
 
 function BootHydrateAndAutoPull() {
-  const { hydrateOrders, brands, setBrandOrders, setBrandOrdersStatus } = useStore();
+  const { hydrateOrders, hydrateCustomers, brands, setBrandOrders, setBrandOrdersStatus } = useStore();
 
-  // 1) Hydrate persisted orders from IndexedDB on first mount
+  // 1) Hydrate persisted orders + customers from IndexedDB on first mount
   useEffect(() => {
     loadAllOrders().then(records => hydrateOrders(records)).catch(() => {});
-  }, [hydrateOrders]);
+    loadAllCustomers().then(records => hydrateCustomers(records)).catch(() => {});
+  }, [hydrateOrders, hydrateCustomers]);
 
   // 2) Daily auto-pull at 7am IST (checked once on mount, then hourly while open)
   useEffect(() => {
@@ -116,6 +119,7 @@ export default function App() {
           <Route element={<Layout />}>
             <Route path="/"                 element={<Overview />} />
             <Route path="/setup"            element={<Setup />} />
+            <Route path="/bulk-import"      element={<BulkImport />} />
             <Route path="/decisions"        element={<DecisionQueue />} />
             <Route path="/scale"            element={<Board />} />
             <Route path="/fix"              element={<Board />} />
