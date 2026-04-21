@@ -230,6 +230,7 @@ export default function InactiveAds() {
     brandData, activeBrandIds, brands, adMap, campaignMap, manualMap,
     inactiveInsights, inactiveInsightsStatus, inactiveInsightsLastAt,
     setInactiveInsights, setInactiveInsightsStatus,
+    startPullJob, updatePullJob, finishPullJob,
   } = useStore();
 
   const [activeTab, setActiveTab]   = useState('all');
@@ -258,22 +259,36 @@ export default function InactiveAds() {
         const ver   = brand.meta.apiVersion || 'v21.0';
         const token = brand.meta.token;
         const rows  = [];
+        const accounts = brand.meta.accounts.filter(a => a.id && a.key);
 
-        for (const acc of brand.meta.accounts) {
-          if (!acc.id || !acc.key) continue;
-          log(`[${brand.name}] ${acc.key} → fetching 365 days (${since} → ${until}), chunked into 90-day windows...`);
-          try {
-            const raw = await fetchInsightsCustom(ver, token, acc.id, since, until, msg => log(`  ${msg}`));
-            const normalized = raw.map(r => normalizeInsight(r, acc.key, '365D'));
-            rows.push(...normalized);
-            log(`[${brand.name}] ${acc.key} ✓ ${normalized.length} rows`);
-          } catch (e) {
-            log(`[${brand.name}] ${acc.key} ✗ ${e.message || String(e)}`);
+        const jobId = `inactive-ads:${brand.id}:${Date.now()}`;
+        startPullJob(jobId, `Inactive Ads — ${brand.name}`, `365d · ${accounts.length} account(s)`);
+
+        try {
+          for (let i = 0; i < accounts.length; i++) {
+            const acc = accounts[i];
+            updatePullJob(jobId, { pct: (i / accounts.length) * 100, detail: `${acc.key}: fetching 365d…` });
+            log(`[${brand.name}] ${acc.key} → fetching 365 days (${since} → ${until}), chunked into 90-day windows...`);
+            try {
+              const raw = await fetchInsightsCustom(ver, token, acc.id, since, until, msg => {
+                log(`  ${msg}`);
+                updatePullJob(jobId, { detail: `${acc.key}: ${msg}` });
+              });
+              const normalized = raw.map(r => normalizeInsight(r, acc.key, '365D'));
+              rows.push(...normalized);
+              log(`[${brand.name}] ${acc.key} ✓ ${normalized.length} rows`);
+            } catch (e) {
+              log(`[${brand.name}] ${acc.key} ✗ ${e.message || String(e)}`);
+            }
           }
-        }
 
-        setInactiveInsights(brand.id, rows);
-        log(`[${brand.name}] stored ${rows.length} total rows`);
+          setInactiveInsights(brand.id, rows);
+          log(`[${brand.name}] stored ${rows.length} total rows`);
+          finishPullJob(jobId, true, `${rows.length} rows · ${accounts.length} account(s)`);
+        } catch (e) {
+          finishPullJob(jobId, false, e.message || 'Inactive ads pull failed');
+          throw e;
+        }
       }
       log('✓ Pull complete — inactive ads data loaded');
     } catch (e) {

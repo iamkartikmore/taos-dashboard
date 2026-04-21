@@ -994,47 +994,39 @@ export default function Setup() {
         appendLog(`[${brand.name}] Meta: skipped — ${!brand.meta.token ? 'no token' : 'no accounts configured'}`);
       }
 
-      // ── Shopify: inventory + orders in parallel ───────────────────
+      // ── Shopify: inventory then orders (sequential to avoid OOM on free tier) ───
       if (hasShopify) {
         const odLabel = globalOrdersDays === 'all' ? 'all time'
           : globalOrdersDays === 'yesterday' ? 'yesterday'
           : `last ${globalOrdersDays}d`;
-        appendLog(`[${brand.name}] Shopify: pulling inventory + orders (${odLabel}) in parallel...`);
+        appendLog(`[${brand.name}] Shopify: pulling inventory, then orders (${odLabel})...`);
 
-        await Promise.all([
-          // Inventory
-          (async () => {
-            setBrandInventoryStatus(brand.id, 'loading');
-            try {
-              const result = await fetchShopifyInventory(
-                brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret
-              );
-              const invMap = result.inventoryMap || result.map || result;
-              setBrandInventory(brand.id, invMap, result.locations, result.inventoryByLocation, result.skuToItemId, result.collections);
-              appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(invMap).length} SKUs`);
-            } catch (e) {
-              setBrandInventoryStatus(brand.id, 'error');
-              appendLog(`[${brand.name}] ❌ Inventory: ${e.message || e.toString()}`);
-            }
-          })(),
+        setBrandInventoryStatus(brand.id, 'loading');
+        try {
+          const result = await fetchShopifyInventory(
+            brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret
+          );
+          const invMap = result.inventoryMap || result.map || result;
+          setBrandInventory(brand.id, invMap, result.locations, result.inventoryByLocation, result.skuToItemId, result.collections);
+          appendLog(`[${brand.name}] ✅ Inventory — ${Object.keys(invMap).length} SKUs`);
+        } catch (e) {
+          setBrandInventoryStatus(brand.id, 'error');
+          appendLog(`[${brand.name}] ❌ Inventory: ${e.message || e.toString()}`);
+        }
 
-          // Orders
-          (async () => {
-            setBrandOrdersStatus(brand.id, 'loading');
-            try {
-              const { since, until } = daysToRange(globalOrdersDays);
-              const { orders: fetched, count } = await fetchShopifyOrders(
-                brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
-                since, until, msg => appendLog(`[${brand.name}]   ${msg}`),
-              );
-              setBrandOrders(brand.id, fetched, globalOrdersDays);
-              appendLog(`[${brand.name}] ✅ Orders — ${count} fetched`);
-            } catch (e) {
-              setBrandOrdersStatus(brand.id, 'error', e.message);
-              appendLog(`[${brand.name}] ❌ Orders: ${e.message || e.toString()}`);
-            }
-          })(),
-        ]);
+        setBrandOrdersStatus(brand.id, 'loading');
+        try {
+          const { since, until } = daysToRange(globalOrdersDays);
+          const { orders: fetched, count } = await fetchShopifyOrders(
+            brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
+            since, until, msg => appendLog(`[${brand.name}]   ${msg}`),
+          );
+          setBrandOrders(brand.id, fetched, globalOrdersDays);
+          appendLog(`[${brand.name}] ✅ Orders — ${count} fetched`);
+        } catch (e) {
+          setBrandOrdersStatus(brand.id, 'error', e.message);
+          appendLog(`[${brand.name}] ❌ Orders: ${e.message || e.toString()}`);
+        }
       } else {
         appendLog(`[${brand.name}] Shopify: skipped — not configured`);
       }

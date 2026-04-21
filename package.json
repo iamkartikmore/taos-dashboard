@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "concurrently \"node server.js\" \"npm --prefix client run dev\"",
     "build": "npm --prefix client run build",
-    "start": "NODE_ENV=production node server.js",
+    "start": "NODE_ENV=production node --max-old-space-size=400 server.js",
     "install:all": "npm install && npm --prefix client install"
   },
   "dependencies": {

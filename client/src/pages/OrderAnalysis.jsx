@@ -194,6 +194,7 @@ export default function OrderAnalysis() {
     rawAccounts, shopifyOrders, inventoryMap, manualMap,
     brandData, brands, activeBrandIds,
     setBrandOrders,
+    startPullJob, updatePullJob, finishPullJob,
   } = useStore();
 
   const [period,     setPeriod]     = useState('yesterday');
@@ -239,21 +240,28 @@ export default function OrderAnalysis() {
     const since = dates.priorSince + 'T00:00:00';
     const until = new Date().toISOString();
     for (const brand of shopifyBrands) {
+      const jobId = `shopify-orders:${brand.id}:order-analysis:${Date.now()}`;
+      startPullJob(jobId, `Shopify Orders — ${brand.name}`, `backfill ${daysNeeded}d`);
       try {
         setFetchMsg(`Fetching ${brand.name}...`);
         const result = await fetchShopifyOrders(
           brand.shopify.shop, brand.shopify.clientId, brand.shopify.clientSecret,
-          since, until, msg => setFetchMsg(msg),
+          since, until, msg => {
+            setFetchMsg(msg);
+            updatePullJob(jobId, { detail: msg });
+          },
         );
         setBrandOrders(brand.id, result.orders, `${daysNeeded}d`);
+        finishPullJob(jobId, true, `${(result.count || result.orders?.length || 0).toLocaleString()} orders`);
       } catch (e) {
         setFetchMsg(`Error: ${e.message}`);
+        finishPullJob(jobId, false, e.message || 'Orders failed');
         await new Promise(r => setTimeout(r, 1500));
       }
     }
     setFetching(false);
     setFetchMsg('');
-  }, [brands, activeBrandIds, dates, daysNeeded, setBrandOrders]);
+  }, [brands, activeBrandIds, dates, daysNeeded, setBrandOrders, startPullJob, updatePullJob, finishPullJob]);
 
   /* filtered order sets */
   const curOrders   = useMemo(() => filterByDate(shopifyOrders, dates.curSince,   dates.curUntil),   [shopifyOrders, dates]);

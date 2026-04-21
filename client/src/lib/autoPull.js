@@ -5,6 +5,7 @@
    ──────────────────────────────────────────────────────────────────── */
 
 import { fetchShopifyOrders } from './api';
+import { useStore } from '../store';
 
 const LS_LAST_PULL = 'taos_last_auto_pull';   // unix ms
 const AUTO_PULL_HOUR_IST = 7;                 // 7am IST
@@ -48,10 +49,12 @@ export async function pullBrandOrders90d(brand, setBrandOrders, setBrandOrdersSt
   const { shop, clientId, clientSecret } = brand.shopify || {};
   if (!shop || !clientId || !clientSecret) return { ok: false, reason: 'no-config' };
 
+  const { startPullJob, updatePullJob, finishPullJob } = useStore.getState();
+  const jobId = `shopify-orders:${brand.id}:90d:${Date.now()}`;
+  startPullJob(jobId, `Shopify Orders — ${brand.name}`, `last ${AUTO_PULL_WINDOW_DAYS}d`);
+
   const untilDate = new Date();
   const sinceDate = new Date(untilDate.getTime() - AUTO_PULL_WINDOW_DAYS * 86400000);
-  const since = sinceDate.toISOString();
-  const until = untilDate.toISOString();
 
   setBrandOrdersStatus?.(brand.id, 'loading');
 
@@ -67,10 +70,15 @@ export async function pullBrandOrders90d(brand, setBrandOrders, setBrandOrdersSt
 
   try {
     const all = [];
-    for (const [cStart, cEnd] of chunks) {
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const [cStart, cEnd] = chunks[ci];
       let done = false;
       for (let attempt = 0; attempt < 3 && !done; attempt++) {
         if (attempt > 0) await new Promise(r => setTimeout(r, 4000 * attempt));
+        updatePullJob(jobId, {
+          pct: (ci / chunks.length) * 100,
+          detail: `chunk ${ci + 1}/${chunks.length}${attempt > 0 ? ` · retry ${attempt}` : ''} · ${all.length} orders so far`,
+        });
         try {
           const res = await fetchShopifyOrders(shop, clientId, clientSecret, cStart, cEnd);
           all.push(...(res.orders || []));
@@ -81,9 +89,11 @@ export async function pullBrandOrders90d(brand, setBrandOrders, setBrandOrdersSt
       }
     }
     setBrandOrders(brand.id, all, `${AUTO_PULL_WINDOW_DAYS}d`);
+    finishPullJob(jobId, true, `${all.length} orders`);
     return { ok: true, count: all.length };
   } catch (e) {
     setBrandOrdersStatus?.(brand.id, 'error', e.message);
+    finishPullJob(jobId, false, e.message || 'Orders failed');
     return { ok: false, reason: 'fetch-failed', error: e.message };
   }
 }

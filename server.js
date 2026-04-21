@@ -276,50 +276,6 @@ app.post('/api/shopify/inventory', async (req, res) => {
   }
 });
 
-/* ─── SHOPIFY ORDERS (non-streaming, legacy) ──────────────────────── */
-
-app.post('/api/shopify/orders', async (req, res) => {
-  const { shop, clientId, clientSecret, since, until } = req.body;
-  if (!shop || !clientId || !clientSecret) return res.status(400).json({ error: 'shop, clientId, clientSecret required' });
-  const startMs = Date.now();
-  try {
-    const shopDomain = shop.replace(/\.myshopify\.com$/, '');
-    const accessToken = await shopifyToken(shopDomain, clientId, clientSecret);
-    const headers = { 'X-Shopify-Access-Token': accessToken };
-
-    const fields = [
-      'id','name','created_at','closed_at','cancelled_at','cancel_reason',
-      'financial_status','fulfillment_status',
-      'total_price','subtotal_price','total_discounts','total_tax','total_shipping_price_set',
-      'customer','line_items','discount_codes','billing_address','shipping_address',
-      'source_name','referring_site','landing_site','processing_method',
-      'payment_gateway','payment_gateway_names',
-      'refunds','tags','note_attributes','fulfillments','shipping_lines',
-    ].join(',');
-
-    let qs = `limit=250&status=any&fields=${fields}`;
-    if (since) qs += `&created_at_min=${encodeURIComponent(since)}`;
-    if (until) qs += `&created_at_max=${encodeURIComponent(until)}`;
-
-    const allOrders = [];
-    let url = `https://${shopDomain}.myshopify.com/admin/api/2024-01/orders.json?${qs}`;
-    let pageCount = 0;
-    while (url) {
-      const resp = await withRetry(() => axios.get(url, { headers, timeout: 90000 }));
-      allOrders.push(...(resp.data.orders || []));
-      pageCount++;
-      const m = (resp.headers['link'] || '').match(/<([^>]+)>;\s*rel="next"/);
-      url = m ? m[1] : null;
-      if (url) await new Promise(r => setTimeout(r, 300));
-    }
-
-    res.json({ orders: allOrders, count: allOrders.length, pages: pageCount, fetchMs: Date.now() - startMs });
-  } catch (err) {
-    const status = err.response?.status || 500;
-    res.status(status).json({ error: err.response?.data?.errors || err.message });
-  }
-});
-
 /* ─── SHOPIFY ORDERS STREAM (SSE — real-time page-by-page) ───────── */
 
 app.post('/api/shopify/orders/stream', async (req, res) => {

@@ -271,7 +271,7 @@ function CampaignDetail({ brand, campaign, onClose }) {
 
 /* ─── PAGE ────────────────────────────────────────────────────────── */
 export default function EmailCampaigns() {
-  const { brands, activeBrandIds } = useStore();
+  const { brands, activeBrandIds, startPullJob, finishPullJob } = useStore();
   const configured = brands.filter(b => b.listmonk?.url && b.listmonk?.username && b.listmonk?.password);
 
   const [brandId, setBrandId] = useState(configured[0]?.id || null);
@@ -287,6 +287,8 @@ export default function EmailCampaigns() {
   async function load() {
     if (!brand) return;
     setLoading(true); setErr('');
+    const jobId = `listmonk-campaigns:${brand.id}:${Date.now()}`;
+    startPullJob(jobId, `Listmonk — ${brand.name}`, 'campaigns + lists');
     try {
       const [c, l] = await Promise.all([
         fetchListmonkCampaigns(brand.listmonk),
@@ -296,7 +298,11 @@ export default function EmailCampaigns() {
       setLists((l.lists || []).map(x => ({
         id: x.id, name: x.name, subscriberCount: x.subscriber_count,
       })));
-    } catch (e) { setErr(e.message); }
+      finishPullJob(jobId, true, `${(c.campaigns || []).length} campaigns · ${(l.lists || []).length} lists`);
+    } catch (e) {
+      setErr(e.message);
+      finishPullJob(jobId, false, e.message || 'Listmonk fetch failed');
+    }
     finally { setLoading(false); }
   }
 

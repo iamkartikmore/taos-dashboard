@@ -2072,7 +2072,8 @@ function PullPanel({ isPulling, pullLog, pullProgress, onPull, lastPullAt, stats
 /* ─── MAIN PAGE ──────────────────────────────────────────────────────── */
 export default function BusinessPlan() {
   const { brandData, manualMap, brands, activeBrandIds,
-    setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders } = useStore();
+    setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders,
+    startPullJob, updatePullJob, finishPullJob } = useStore();
 
   // ── viewingBrandId: which brand this page is showing — independent of global selector ──
   // Defaults to the first brand in brands config (alphabetical order, not activeBrandIds order)
@@ -2140,14 +2141,20 @@ export default function BusinessPlan() {
     // ── Meta accounts: up to 3 attempts each ──
     if (token && valid.length) {
       setBrandMetaStatus(brand.id, 'loading');
+      const metaJobId = `meta:${brand.id}:bp:${Date.now()}`;
+      startPullJob(metaJobId, `Meta — ${brand.name}`, `0 / ${valid.length} accounts`);
       const results = [];
-      for (const acc of valid) {
+      let failures = 0;
+      for (let i = 0; i < valid.length; i++) {
+        const acc = valid[i];
         let accDone = false;
         setPullLog(prev => [...prev, { msg: `Meta ${acc.key}…`, status: 'loading', ts: ts() }]);
+        updatePullJob(metaJobId, { pct: (i / valid.length) * 100, detail: `${acc.key}: fetching…` });
         for (let attempt = 0; attempt < 3 && !accDone; attempt++) {
           if (attempt > 0) {
             await new Promise(r => setTimeout(r, 6000 * attempt)); // 6s, 12s
             setPullLog(prev => [...prev.slice(0, -1), { msg: `Meta ${acc.key} retry ${attempt}…`, status: 'loading', ts: ts() }]);
+            updatePullJob(metaJobId, { detail: `${acc.key}: retry ${attempt}` });
           }
           try {
             const r = await pullAccount({ ver: ver || 'v21.0', token, accountKey: acc.key, accountId: acc.id });
@@ -2155,8 +2162,10 @@ export default function BusinessPlan() {
             setPullLog(prev => [...prev.slice(0, -1), { msg: `${acc.key}: ${r.ads?.length || 0} ads`, count: r.ads?.length, status: 'done', ts: ts() }]);
             accDone = true;
           } catch (e) {
-            if (attempt >= 2)
+            if (attempt >= 2) {
+              failures++;
               setPullLog(prev => [...prev.slice(0, -1), { msg: `${acc.key} failed (3 tries): ${e.message}`, status: 'error', ts: ts() }]);
+            }
           }
         }
         tick();
@@ -2165,28 +2174,38 @@ export default function BusinessPlan() {
         setBrandMetaData(brand.id, { campaigns: results.flatMap(r => r.campaigns), adsets: results.flatMap(r => r.adsets), ads: results.flatMap(r => r.ads), insightsToday: results.flatMap(r => r.insightsToday), insights7d: results.flatMap(r => r.insights7d), insights14d: results.flatMap(r => r.insights14d), insights30d: results.flatMap(r => r.insights30d) });
         setBrandMetaStatus(brand.id, 'success');
       }
+      finishPullJob(metaJobId, failures === 0, failures === 0
+        ? `${results.length}/${valid.length} accounts`
+        : `${results.length}/${valid.length} ok · ${failures} failed`);
     }
 
     const { shop, clientId, clientSecret } = brand.shopify || {};
     if (shop && clientId && clientSecret) {
       // ── Inventory: 3 attempts, 8s / 15s delays ──
+      const invJobId = `inventory:${brand.id}:bp:${Date.now()}`;
+      startPullJob(invJobId, `Inventory — ${brand.name}`, 'fetching SKUs');
       setPullLog(prev => [...prev, { msg: `Shopify inventory…`, status: 'loading', ts: ts() }]);
       let invDone = false;
+      let invError = null;
       for (let invAttempt = 0; invAttempt < 3 && !invDone; invAttempt++) {
         if (invAttempt > 0) {
           const delay = invAttempt === 1 ? 8000 : 15000;
           await new Promise(r => setTimeout(r, delay));
           setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory retry ${invAttempt}/2 (${delay/1000}s wait)…`, status: 'loading', ts: ts() }]);
+          updatePullJob(invJobId, { detail: `retry ${invAttempt}/2` });
         }
         try {
           const { map, locations, skuToItemId, collections } = await fetchShopifyInventory(shop, clientId, clientSecret);
           setBrandInventory(brand.id, map, locations, null, skuToItemId, collections);
           const skuCount = Object.keys(map).length;
           setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory: ${skuCount} SKUs${collections?.length ? `, ${collections.length} collections` : ''}`, count: skuCount, status: 'done', ts: ts() }]);
+          finishPullJob(invJobId, true, `${skuCount} SKUs · ${(locations || []).length} locations`);
           invDone = true;
         } catch (e) {
+            invError = e.message;
             if (invAttempt >= 2) {
               setPullLog(prev => [...prev.slice(0, -1), { msg: `Inventory failed after 3 tries: ${e.message}`, status: 'error', ts: ts() }]);
+              finishPullJob(invJobId, false, e.message || 'Inventory failed');
             }
           }
         }
@@ -2194,6 +2213,9 @@ export default function BusinessPlan() {
 
         // Orders — chunked with per-chunk retry (up to 2 retries per chunk)
         let allFetched = [];
+        const ordersJobId = `shopify-orders:${brand.id}:bp:${Date.now()}`;
+        startPullJob(ordersJobId, `Shopify Orders — ${brand.name}`, `${pullPeriod}${isChunked ? ` · ${chunks.length} chunks` : ''}`);
+        let ordersError = null;
         if (isChunked) {
           setPullLog(prev => [...prev, { msg: `Orders (${pullPeriod}, ${chunks.length} chunks)…`, status: 'loading', ts: ts() }]);
           let chunkErrors = 0;
@@ -2206,6 +2228,10 @@ export default function BusinessPlan() {
                 msg: `Orders chunk ${ci+1}/${chunks.length}${attempt > 0 ? ` (retry ${attempt})` : ''}…`,
                 status: 'loading', ts: ts(),
               }]);
+              updatePullJob(ordersJobId, {
+                pct: (ci / chunks.length) * 100,
+                detail: `chunk ${ci+1}/${chunks.length}${attempt > 0 ? ` · retry ${attempt}` : ''} · ${allFetched.length} so far`,
+              });
               try {
                 const res = await fetchShopifyOrders(shop, clientId, clientSecret, cStart, cEnd);
                 allFetched = [...allFetched, ...(res.orders || [])];
@@ -2213,6 +2239,7 @@ export default function BusinessPlan() {
               } catch (e) {
                 if (attempt >= 2) {
                   chunkErrors++;
+                  ordersError = e.message;
                   setPullLog(prev => [...prev.slice(0, -1), { msg: `Chunk ${ci+1} failed (3 tries): ${e.message}`, status: 'error', ts: ts() }]);
                 }
               }
@@ -2223,6 +2250,9 @@ export default function BusinessPlan() {
             msg: `Orders: ${allFetched.length} (${pullPeriod}${chunkErrors ? `, ${chunkErrors} chunk errors` : ''})`,
             count: allFetched.length, status: chunkErrors > 0 ? 'error' : 'done', ts: ts(),
           }]);
+          finishPullJob(ordersJobId, chunkErrors === 0, chunkErrors === 0
+            ? `${allFetched.length} orders`
+            : `${allFetched.length} orders · ${chunkErrors} chunk errors`);
         } else {
           // Single chunk (≤ 30d) — still retry on failure
           let singleDone = false;
@@ -2231,6 +2261,7 @@ export default function BusinessPlan() {
             if (attempt > 0) {
               await new Promise(r => setTimeout(r, 4000 * attempt));
               setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders retry ${attempt}/2…`, status: 'loading', ts: ts() }]);
+              updatePullJob(ordersJobId, { detail: `retry ${attempt}/2` });
             }
             try {
               const res = await fetchShopifyOrders(shop, clientId, clientSecret, chunks[0][0], chunks[0][1]);
@@ -2239,15 +2270,19 @@ export default function BusinessPlan() {
               singleDone = true;
             } catch (e) {
               if (attempt >= 2) {
+                ordersError = e.message;
                 setPullLog(prev => [...prev.slice(0, -1), { msg: `Orders failed after 3 tries: ${e.message}`, status: 'error', ts: ts() }]);
               }
             }
           }
           tick();
+          finishPullJob(ordersJobId, singleDone, singleDone
+            ? `${allFetched.length} orders`
+            : (ordersError || 'Orders failed'));
         }
         if (allFetched.length > 0) setBrandOrders(brand.id, allFetched, pullPeriod);
       }
-  }, [pullPeriod, setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders]);
+  }, [pullPeriod, setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders, startPullJob, updatePullJob, finishPullJob]);
 
   // Pull all active brands
   const handlePull = useCallback(async () => {

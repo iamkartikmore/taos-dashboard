@@ -773,6 +773,7 @@ export default function CollectionSpend() {
   const {
     brandData, brands, activeBrandIds,
     enrichedRows, manualMap, campaignMap, adsetMap, adMap,
+    startPullJob, updatePullJob, finishPullJob,
   } = useStore();
 
   const [period, setPeriod] = useState('7d');
@@ -791,6 +792,12 @@ export default function CollectionSpend() {
     setLazyMsg(s => ({ ...s, [pid]: 'Connecting…' }));
     const collected = [];
     const active = (brands || []).filter(b => (activeBrandIds || []).includes(b.id));
+    const jobId = `collection-spend:${pid}:${Date.now()}`;
+    startPullJob(jobId, `Collection Spend — ${meta.label || pid}`, `${active.length} brand(s)`);
+    const accountUnits = active.flatMap(b =>
+      (b.meta?.accounts || []).filter(a => a.id && a.key && b.meta?.token).map(a => ({ brand: b, acc: a })),
+    );
+    let done = 0;
     try {
       for (const brand of active) {
         const { token, apiVersion = 'v21.0', accounts = [] } = brand.meta || {};
@@ -798,18 +805,25 @@ export default function CollectionSpend() {
         for (const acc of accounts) {
           if (!acc.id || !acc.key) continue;
           setLazyMsg(s => ({ ...s, [pid]: `Fetching ${acc.key}…` }));
+          updatePullJob(jobId, {
+            pct: accountUnits.length ? (done / accountUnits.length) * 100 : null,
+            detail: `${brand.name} · ${acc.key}: fetching ${meta.preset}`,
+          });
           const raw = await fetchInsights(apiVersion, token, acc.id, meta.preset);
           collected.push(...raw.map(r => ({ ...normalizeInsight(r, acc.key, pid), _brandId: brand.id })));
+          done++;
         }
       }
       setLazyData(d => ({ ...d, [pid]: collected }));
       setLazyStatus(s => ({ ...s, [pid]: 'done' }));
       setLazyMsg(s => ({ ...s, [pid]: '' }));
+      finishPullJob(jobId, true, `${collected.length} rows · ${accountUnits.length} account(s)`);
     } catch (e) {
       setLazyStatus(s => ({ ...s, [pid]: 'error' }));
       setLazyMsg(s => ({ ...s, [pid]: e.message }));
+      finishPullJob(jobId, false, e.message || 'Collection spend fetch failed');
     }
-  }, [brands, activeBrandIds]);
+  }, [brands, activeBrandIds, startPullJob, updatePullJob, finishPullJob]);
 
   /* ── Clear lazy cache whenever the active brand set changes ── */
   useEffect(() => {

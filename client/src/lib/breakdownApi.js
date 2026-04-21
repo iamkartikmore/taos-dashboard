@@ -44,15 +44,37 @@ export const WINDOW_PRESETS = {
   '30D':   'last_30d',
 };
 
+// Retries on transient network failures (Render free-tier restarts, cold starts, brief 502s).
+// Backoff: 2s, 6s — gives Render time to bring the instance back up after an OOM restart.
 async function proxyGet(url, params = {}) {
-  const res = await fetch('/api/meta/fetch', {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, params }),
-  });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.error?.message || JSON.stringify(json.error) || 'Meta API error');
-  return json;
+  const BACKOFFS = [0, 2000, 6000];
+  let lastErr;
+  for (const wait of BACKOFFS) {
+    if (wait) await new Promise(r => setTimeout(r, wait));
+    try {
+      const res = await fetch('/api/meta/fetch', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, params }),
+      });
+      // Retry on 5xx / 429; don't retry on 4xx auth errors.
+      if (res.status >= 500 || res.status === 429) {
+        lastErr = new Error(`HTTP ${res.status}`);
+        continue;
+      }
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error?.message || JSON.stringify(json.error) || 'Meta API error');
+      return json;
+    } catch (e) {
+      // TypeError: Failed to fetch → server unreachable (crashed/restarting). Retry.
+      if (e.name === 'TypeError' || /fetch/i.test(e.message)) {
+        lastErr = e;
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr || new Error('Meta proxy unreachable');
 }
 
 function actId(id) {
@@ -68,7 +90,7 @@ async function fetchBreakdownPages(ver, token, accountId, spec, windowKey, dateR
     access_token: token,
     level: 'ad',
     fields: INSIGHT_FIELDS,
-    limit: 500,
+    limit: 250,
     action_report_time: 'mixed',
     action_attribution_windows: "['7d_click','1d_view']",
   };

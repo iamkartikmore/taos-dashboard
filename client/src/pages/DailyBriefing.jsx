@@ -166,7 +166,7 @@ function AdDriverRow({ d }) {
 
 /* ─── Main page ─── */
 export default function DailyBriefing() {
-  const { brands, brandData, shopifyOrders, activeBrandIds } = useStore();
+  const { brands, brandData, shopifyOrders, activeBrandIds, startPullJob, updatePullJob, finishPullJob } = useStore();
 
   // Last-30d cross-channel spend context (from the auto-pulled Google Ads data)
   const channelContext = useMemo(() => {
@@ -216,18 +216,35 @@ export default function DailyBriefing() {
         const ver   = b.apiVersion || 'v21.0';
         const token = b.accessToken;
 
-        log(`[${acc.key}] Fetching ${ydDate} (yesterday)...`);
-        const rawYd = await fetchInsightsCustom(ver, token, acc.id, ydDate, ydDate, msg => log(`  ${msg}`));
-        const ydRows = rawYd.map(r => normalizeInsight(r, acc.key, 'YD'));
+        const jobId = `daily-briefing:${b.id || b.name}:${acc.key}:${Date.now()}`;
+        startPullJob(jobId, `Daily Briefing — ${b.name || acc.key}`, `${acc.key}: YD vs DB`);
 
-        log(`[${acc.key}] Fetching ${dbDate} (day before)...`);
-        const rawDb = await fetchInsightsCustom(ver, token, acc.id, dbDate, dbDate, msg => log(`  ${msg}`));
-        const dbRows = rawDb.map(r => normalizeInsight(r, acc.key, 'DB'));
+        try {
+          log(`[${acc.key}] Fetching ${ydDate} (yesterday)...`);
+          updatePullJob(jobId, { pct: 10, detail: `${acc.key}: YD ${ydDate}` });
+          const rawYd = await fetchInsightsCustom(ver, token, acc.id, ydDate, ydDate, msg => {
+            log(`  ${msg}`);
+            updatePullJob(jobId, { detail: `${acc.key} YD: ${msg}` });
+          });
+          const ydRows = rawYd.map(r => normalizeInsight(r, acc.key, 'YD'));
 
-        log(`[${acc.key}] ✓ YD:${ydRows.length} ads · DB:${dbRows.length} ads`);
+          log(`[${acc.key}] Fetching ${dbDate} (day before)...`);
+          updatePullJob(jobId, { pct: 55, detail: `${acc.key}: DB ${dbDate}` });
+          const rawDb = await fetchInsightsCustom(ver, token, acc.id, dbDate, dbDate, msg => {
+            log(`  ${msg}`);
+            updatePullJob(jobId, { detail: `${acc.key} DB: ${msg}` });
+          });
+          const dbRows = rawDb.map(r => normalizeInsight(r, acc.key, 'DB'));
 
-        const analysis = buildDayOverDayAnalysis(ydRows, dbRows, shopifyOrders, { yd: ydDate, db: dbDate });
-        results.push({ brandName: b.name || acc.key, accKey: acc.key, analysis });
+          log(`[${acc.key}] ✓ YD:${ydRows.length} ads · DB:${dbRows.length} ads`);
+
+          const analysis = buildDayOverDayAnalysis(ydRows, dbRows, shopifyOrders, { yd: ydDate, db: dbDate });
+          results.push({ brandName: b.name || acc.key, accKey: acc.key, analysis });
+          finishPullJob(jobId, true, `YD:${ydRows.length} · DB:${dbRows.length}`);
+        } catch (e) {
+          finishPullJob(jobId, false, e.message || 'Briefing fetch failed');
+          throw e;
+        }
       }
 
       setAnalyses(results);

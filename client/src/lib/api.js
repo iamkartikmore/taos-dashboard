@@ -4,24 +4,46 @@ const META_BASE = 'https://graph.facebook.com';
 
 /* ─── PROXY FETCHER ──────────────────────────────────────────────── */
 
+// Retries on transient network failures (server restarts, cold starts, brief 502/5xx/429).
+// Backoff: 2s, 6s — lets Render bring the instance back up after an OOM restart.
 async function proxyGet(url, params = {}, endpoint = '/api/meta/fetch') {
-  const res = await fetch(endpoint, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ url, params }),
-  });
-  let json;
-  try { json = await res.json(); }
-  catch { throw new Error(`Meta proxy returned non-JSON (HTTP ${res.status})`); }
-  if (!res.ok) {
-    const e = json?.error;
-    const msg = (typeof e === 'string' && e) ||
-                e?.message ||
-                (e && JSON.stringify(e)) ||
-                `Meta proxy HTTP ${res.status}`;
-    throw new Error(msg);
+  const BACKOFFS = [0, 2000, 6000];
+  let lastErr;
+  for (const wait of BACKOFFS) {
+    if (wait) await new Promise(r => setTimeout(r, wait));
+    let res;
+    try {
+      res = await fetch(endpoint, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ url, params }),
+      });
+    } catch (e) {
+      // TypeError: Failed to fetch → server unreachable. Retry.
+      if (e.name === 'TypeError' || /fetch/i.test(e.message)) {
+        lastErr = e;
+        continue;
+      }
+      throw e;
+    }
+    if (res.status >= 500 || res.status === 429) {
+      lastErr = new Error(`Meta proxy HTTP ${res.status}`);
+      continue;
+    }
+    let json;
+    try { json = await res.json(); }
+    catch { throw new Error(`Meta proxy returned non-JSON (HTTP ${res.status})`); }
+    if (!res.ok) {
+      const e = json?.error;
+      const msg = (typeof e === 'string' && e) ||
+                  e?.message ||
+                  (e && JSON.stringify(e)) ||
+                  `Meta proxy HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    return json;
   }
-  return json;
+  throw lastErr || new Error('Meta proxy unreachable');
 }
 
 /* ─── PAGINATED FETCHER ──────────────────────────────────────────── */

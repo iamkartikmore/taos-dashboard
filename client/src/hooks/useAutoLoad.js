@@ -31,32 +31,37 @@ export function useAutoLoad() {
     setBrandGoogleAdsStatus,
   } = useStore();
 
-  /* ── Core pull function — reusable for initial load & brand-switch ── */
+  /* ── Core pull function — reusable for initial load & brand-switch ──
+     Serialized across brands and across accounts within a brand to keep
+     server memory low on Render's 512MB free tier. */
   const pullBrands = useCallback(async (brandsToPull) => {
-    const results = await Promise.all(brandsToPull.map(async brand => {
+    const results = [];
+    for (const brand of brandsToPull) {
       const { token, apiVersion: ver, accounts } = brand.meta || {};
-      if (!token || !accounts?.length) return;
+      if (!token || !accounts?.length) { results.push(undefined); continue; }
 
       setBrandMetaStatus(brand.id, 'loading');
 
-      const acctResults = await Promise.all(
-        accounts.filter(a => a.id && a.key).map(acc =>
-          pullAccount({
+      const acctResults = [];
+      for (const acc of accounts.filter(a => a.id && a.key)) {
+        try {
+          const r = await pullAccount({
             ver: ver || 'v21.0',
             token,
             accountKey: acc.key,
             accountId:  acc.id,
-          }).catch(err => {
-            console.warn('[AutoLoad] account pull failed:', acc.key, err.message);
-            return null;
-          })
-        )
-      );
+          });
+          acctResults.push(r);
+        } catch (err) {
+          console.warn('[AutoLoad] account pull failed:', acc.key, err.message);
+          acctResults.push(null);
+        }
+      }
 
       const valid = acctResults.filter(Boolean);
       if (!valid.length) {
         setBrandMetaStatus(brand.id, 'error', 'No accounts could be fetched');
-        return;
+        continue;
       }
 
       const merged = {
@@ -105,7 +110,8 @@ export function useAutoLoad() {
           setBrandGoogleAdsStatus(brand.id, 'error', e.message);
         }
       }
-    }));
+      results.push(true);
+    }
     return results;
   }, [setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders, setBrandGoogleAdsData, setBrandGoogleAdsStatus]);
 

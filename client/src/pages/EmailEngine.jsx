@@ -278,7 +278,7 @@ function SegmentCard({
 /* ─── MAIN ─────────────────────────────────────────── */
 
 export default function EmailEngine() {
-  const { brands, shopifyOrders, customerCache, brandData } = useStore();
+  const { brands, shopifyOrders, customerCache, brandData, startPullJob, finishPullJob } = useStore();
   const configured = brands.filter(b => b.listmonk?.url && b.listmonk?.username && b.listmonk?.password);
   const [selectedBrand, setSelectedBrand] = useState(configured[0]?.id || null);
   const [campaigns, setCampaigns] = useState([]);
@@ -312,11 +312,15 @@ export default function EmailEngine() {
   async function loadCampaigns() {
     if (!brand?.listmonk) return;
     setLoadingCamps(true); setCampErr('');
+    const jobId = `listmonk-engine:${brand.id}:${Date.now()}`;
+    startPullJob(jobId, `Listmonk — ${brand.name}`, 'engine campaigns');
     try {
       const { campaigns } = await fetchListmonkCampaigns(brand.listmonk);
       setCampaigns(campaigns || []);
+      finishPullJob(jobId, true, `${(campaigns || []).length} campaigns`);
     } catch (e) {
       setCampErr(e.message || 'Failed to load campaigns');
+      finishPullJob(jobId, false, e.message || 'Failed to load campaigns');
     } finally {
       setLoadingCamps(false);
     }

@@ -212,6 +212,7 @@ export default function ShopifyOrders() {
     brands, shopifyOrders, shopifyOrdersWindow,
     setShopifyOrdersStatus, inventoryMap, brandData, activeBrandIds,
     setBrandOrders,
+    startPullJob, updatePullJob, finishPullJob,
   } = useStore();
 
   // ALL Shopify-configured brands (not filtered by activeBrandIds)
@@ -295,19 +296,28 @@ export default function ShopifyOrders() {
     try {
       for (const brand of targetBrands) {
         const sh = brand.shopify;
+        const jobId = `shopify-orders:${brand.id}:${win}:${Date.now()}`;
+        startPullJob(jobId, `Shopify Orders — ${brand.name}`, `${win} · ${since.slice(0,10)} → ${(until||'').slice(0,10)}`);
         addLog(`── ${brand.name}: fetching...`);
         try {
           const result = await fetchShopifyOrders(
             sh.shop, sh.clientId, sh.clientSecret,
             since, until,
-            msg => addLog(`  ${msg}`),
+            msg => {
+              addLog(`  ${msg}`);
+              const m = msg.match(/page\s+(\d+).*?(\d+)\s+orders/i);
+              if (m) updatePullJob(jobId, { detail: `page ${m[1]} · ${m[2]} orders` });
+              else updatePullJob(jobId, { detail: msg });
+            },
           );
           addLog(`  ${brand.name}: ${result.count.toLocaleString()} orders — processing...`);
           setBrandOrders(brand.id, result.orders, win);
           addLog(`  ✓ ${brand.name} done`);
+          finishPullJob(jobId, true, `${result.count.toLocaleString()} orders`);
         } catch (e) {
           anyError = e.message;
           addLog(`  ✗ ${brand.name}: ${e.message}`);
+          finishPullJob(jobId, false, e.message || 'Orders failed');
         }
       }
       setShopifyOrdersStatus(anyError ? 'error' : 'success');
