@@ -73,6 +73,8 @@ function PresetToggle({ value, onChange }) {
 
 function WindowToggle({ value, onChange }) {
   const opts = [
+    { id: 7,   label: '7d' },
+    { id: 14,  label: '14d' },
     { id: 30,  label: '30d' },
     { id: 60,  label: '60d' },
     { id: 90,  label: '90d' },
@@ -505,7 +507,7 @@ export default function StarProducts() {
             <AlertTriangle size={13} className="text-amber-500/80 shrink-0 mt-0.5" />
             <div>
               Margin proxy: <span className="text-slate-300 font-semibold">{(summary.marginPctUsed * 100).toFixed(0)}%</span> (from Business Plan). For per-SKU COGS precision, enter cost per SKU in the plan later.
-              Thin-data SKUs (&lt; 60 days of history or &lt; 5 orders) are flagged INVESTIGATE — excluded from quadrant placement but shown in the table.
+              Thin-data SKUs (&lt; {Math.min(60, Math.max(3, Math.round(windowDays * 0.4)))} days of history or &lt; 5 orders) are flagged INVESTIGATE — excluded from quadrant placement but shown in the table.
             </div>
           </div>
 

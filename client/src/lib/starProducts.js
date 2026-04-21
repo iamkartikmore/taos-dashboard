@@ -154,7 +154,10 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
     const velocity30 = s.units30d / 30;
     const momentum   = velocity30 > 0 ? (velocity14 - velocity30) / velocity30 : 0;   // -1..+∞
     const daysSince  = s.lastSeen ? Math.ceil((now - s.lastSeen) / 86400000) : null;
-    const hasHistory = s.firstSeen ? (now - s.firstSeen) / 86400000 >= 60 : false;
+    // History threshold scales with the window so short windows (7d/14d) don't
+    // flag every SKU as thin. Cap at 60d for long windows.
+    const historyThreshold = Math.min(60, Math.max(3, windowDays * 0.4));
+    const hasHistory = s.firstSeen ? (now - s.firstSeen) / 86400000 >= historyThreshold : false;
     const revenueShare = totalRevenueInWindow > 0 ? s.revenueWindow / totalRevenueInWindow : 0;
     const gatewayRate  = s.ordersWindow > 0 ? s.newOrders / s.ordersWindow : 0;
     const repeatRate   = s.ordersWindow > 0 ? s.repeatOrders / s.ordersWindow : 0;
