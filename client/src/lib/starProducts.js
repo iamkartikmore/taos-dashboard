@@ -194,9 +194,14 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
                   / Math.SQRT2 * 100;
   });
 
-  /* ── pass 4: quadrant action labels via median splits ── */
-  const econMedian  = median(skus.map(s => s.econRank));
-  const stratMedian = median(skus.map(s => s.stratRank));
+  /* ── pass 4: quadrant action labels via median splits ──
+     Medians are computed only over non-thin SKUs so the "playable" portfolio
+     actually splits into four quadrants. Including thin-data SKUs drags the
+     econ median down (they have tiny revenue shares), causing every real SKU
+     to land hiEcon and collapse into DOUBLE DOWN / MILK. */
+  const playable = skus.filter(s => !s.thinData);
+  const econMedian  = median(playable.map(s => s.econRank));
+  const stratMedian = median(playable.map(s => s.stratRank));
   skus.forEach(s => {
     if (s.thinData) { s.action = 'INVESTIGATE'; s.quadrant = 'thin'; return; }
     const hiEcon  = s.econRank  >= econMedian;
