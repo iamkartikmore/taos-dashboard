@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
   Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck, ClipboardList,
-  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, Search, Mail, Users, Sparkles, Star, Upload, Brain, Send as SendIcon,
+  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, Search, Mail, Users, Sparkles, Star, Upload, Brain, Send as SendIcon, Target,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -43,6 +43,7 @@ const NAV = [
   { to: '/segments',         icon: Users,       label: 'Customer Segments',  group: 'shopify' },
   { to: '/customer-brain',   icon: Brain,       label: 'Customer Brain',     group: 'retention' },
   { to: '/send-planner',     icon: SendIcon,    label: 'Send Planner',       group: 'retention' },
+  { to: '/campaign-perf',    icon: Target,      label: 'Campaign Performance', group: 'retention' },
 ];
 
 const GROUP_LABELS = {

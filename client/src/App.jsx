@@ -39,6 +39,7 @@ const StarProducts       = lazy(() => import('./pages/StarProducts'));
 const BulkImport         = lazy(() => import('./pages/BulkImport'));
 const CustomerBrain      = lazy(() => import('./pages/CustomerBrain'));
 const SendPlanner        = lazy(() => import('./pages/SendPlanner'));
+const CampaignPerformance = lazy(() => import('./pages/CampaignPerformance'));
 
 function PageFallback() {
   return (
@@ -107,6 +108,7 @@ function PrefetchAllPages() {
       import('./pages/Segments');
       import('./pages/CustomerBrain');
       import('./pages/SendPlanner');
+      import('./pages/CampaignPerformance');
     }, 800);
     return () => clearTimeout(t);
   }, []);
@@ -126,6 +128,7 @@ export default function App() {
             <Route path="/bulk-import"      element={<BulkImport />} />
             <Route path="/customer-brain"   element={<CustomerBrain />} />
             <Route path="/send-planner"     element={<SendPlanner />} />
+            <Route path="/campaign-perf"    element={<CampaignPerformance />} />
             <Route path="/decisions"        element={<DecisionQueue />} />
             <Route path="/scale"            element={<Board />} />
             <Route path="/fix"              element={<Board />} />

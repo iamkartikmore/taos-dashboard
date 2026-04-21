@@ -1,11 +1,12 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Send, AlertCircle, Shield, Download } from 'lucide-react';
+import { Send, AlertCircle, Shield, Download, CheckCircle2 } from 'lucide-react';
 import { useStore } from '../store';
 import { buildAllFeatures } from '../lib/retention/features';
 import { buildAffinity } from '../lib/retention/affinity';
 import { buildTaxonomy, applyTaxonomy } from '../lib/retention/taxonomy';
 import { rankAllOpportunities } from '../lib/retention/opportunities';
 import { planSends } from '../lib/retention/planner';
+import { appendSends, loadAllSends, buildCustomerStateFromSends } from '../lib/sendLog';
 
 const OPP_LABEL = {
   REPLENISH: 'Replenish', COMPLEMENT: 'Complement', WINBACK: 'Winback',
@@ -23,45 +24,97 @@ export default function SendPlanner() {
   const [minScore, setMinScore] = useState(0.2);
   const [computing, setComputing] = useState(false);
   const [plan, setPlan] = useState(null);
+  const [logCount, setLogCount] = useState(0);
+  const [confirmStatus, setConfirmStatus] = useState(null);
 
-  const run = () => {
+  const run = async () => {
     setComputing(true);
     setPlan(null);
-    setTimeout(() => {
-      const allFlat = [];
-      for (const b of activeBrands) {
-        const bd = brandData[b.id] || {};
-        const orders = bd.orders || [];
-        if (!orders.length) continue;
-        const customers = bd.customers || [];
-        const taxonomy = buildTaxonomy(orders);
-        applyTaxonomy(orders, taxonomy.skuLabel);
-        const { features, replenish } = buildAllFeatures(orders, customers);
-        const affinity = buildAffinity(orders);
-        const { flat } = rankAllOpportunities({
-          features,
-          replenishClock: replenish,
-          copurchase: affinity.copurchase,
-          taxonomy,
-          newLaunches: affinity.newLaunches,
-          orders,
-        });
-        for (const row of flat) {
-          allFlat.push({
-            ...row,
-            brand: b.name,
-            brand_id: b.id,
-            accepts_email_marketing: features[row.email]?.accepts_email_marketing,
-            consent: features[row.email]?.accepts_email_marketing ? true : false,
-          });
-        }
-      }
-      const result = planSends(allFlat, {}, {
-        dailyCap, holdoutPct, fatigueMax, cooldownHours, minScore,
+    setConfirmStatus(null);
+
+    // Hydrate fatigue/cooldown state from the persisted send log
+    const sendsLog = await loadAllSends();
+    setLogCount(sendsLog.length);
+    const customerState = buildCustomerStateFromSends(sendsLog);
+
+    await new Promise(r => setTimeout(r, 20));
+    const allFlat = [];
+    for (const b of activeBrands) {
+      const bd = brandData[b.id] || {};
+      const orders = bd.orders || [];
+      if (!orders.length) continue;
+      const customers = bd.customers || [];
+      const taxonomy = buildTaxonomy(orders);
+      applyTaxonomy(orders, taxonomy.skuLabel);
+      const { features, replenish } = buildAllFeatures(orders, customers);
+      const affinity = buildAffinity(orders);
+      const { flat } = rankAllOpportunities({
+        features,
+        replenishClock: replenish,
+        copurchase: affinity.copurchase,
+        taxonomy,
+        newLaunches: affinity.newLaunches,
+        orders,
       });
-      setPlan(result);
-      setComputing(false);
-    }, 50);
+      for (const row of flat) {
+        allFlat.push({
+          ...row,
+          brand: b.name,
+          brand_id: b.id,
+          accepts_email_marketing: features[row.email]?.accepts_email_marketing,
+          consent: features[row.email]?.accepts_email_marketing ? true : false,
+        });
+      }
+    }
+    const result = planSends(allFlat, customerState, {
+      dailyCap, holdoutPct, fatigueMax, cooldownHours, minScore,
+    });
+    setPlan(result);
+    setComputing(false);
+  };
+
+  const confirmPlan = async () => {
+    if (!plan?.picks?.length) return;
+    const campaignId = `plan_${new Date().toISOString().slice(0, 10)}_${Date.now().toString(36)}`;
+    const now = Date.now();
+    const records = plan.picks.map(p => ({
+      id:             `${p.brand_id}|${p.email}|${now}`,
+      brand_id:       p.brand_id,
+      email:          p.email,
+      opportunity:    p.opportunity,
+      score:          p.score,
+      expected_rev:   p.expected_incremental_revenue,
+      skus:           p.recommended_skus || [],
+      reason:         p.reason,
+      sent_at:        now,
+      was_holdout:    false,
+      channel:        'email',
+      campaign_id:    campaignId,
+      converted:      null,
+      converted_at:   null,
+      attributed_rev: null,
+    }));
+    // Also log the holdout slice (picks that would have been sent but held out)
+    // so performance can measure send-vs-holdout uplift.
+    const holdouts = plan.deferred.filter(d => d.skip_reason === 'holdout').map(p => ({
+      id:             `${p.brand_id}|${p.email}|${now}|h`,
+      brand_id:       p.brand_id,
+      email:          p.email,
+      opportunity:    p.opportunity,
+      score:          p.score,
+      expected_rev:   p.expected_incremental_revenue,
+      skus:           p.recommended_skus || [],
+      reason:         p.reason,
+      sent_at:        now,
+      was_holdout:    true,
+      channel:        'none',
+      campaign_id:    campaignId,
+      converted:      null,
+      converted_at:   null,
+      attributed_rev: null,
+    }));
+    const res = await appendSends([...records, ...holdouts]);
+    setConfirmStatus({ ok: true, added: res.added, campaignId });
   };
 
   useEffect(() => { run(); /* eslint-disable-next-line */ }, []);
@@ -114,6 +167,15 @@ export default function SendPlanner() {
             {computing ? 'Computing…' : 'Recompute'}
           </button>
           <button
+            onClick={confirmPlan}
+            disabled={!plan?.picks?.length || confirmStatus?.ok}
+            className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-sm text-white font-medium flex items-center gap-2"
+            title="Persist this plan to the send log so fatigue/cooldown apply to future runs and performance tracking can attribute orders."
+          >
+            <CheckCircle2 className="w-4 h-4" />
+            {confirmStatus?.ok ? `Confirmed (${confirmStatus.added})` : 'Confirm Plan'}
+          </button>
+          <button
             onClick={exportCsv}
             disabled={!plan?.picks.length}
             className="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-sm text-slate-200 flex items-center gap-2"
@@ -122,6 +184,12 @@ export default function SendPlanner() {
           </button>
         </div>
       </div>
+
+      {logCount > 0 && (
+        <div className="text-xs text-slate-500">
+          Send log has <span className="text-slate-300 font-medium">{logCount.toLocaleString()}</span> records applied for fatigue + cooldown.
+        </div>
+      )}
 
       {/* Knobs */}
       <div className="grid grid-cols-5 gap-3">
