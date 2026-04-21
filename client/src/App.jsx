@@ -37,6 +37,8 @@ const AOVAnalysis        = lazy(() => import('./pages/AOVAnalysis'));
 const BusinessPlan       = lazy(() => import('./pages/BusinessPlan'));
 const StarProducts       = lazy(() => import('./pages/StarProducts'));
 const BulkImport         = lazy(() => import('./pages/BulkImport'));
+const CustomerBrain      = lazy(() => import('./pages/CustomerBrain'));
+const SendPlanner        = lazy(() => import('./pages/SendPlanner'));
 
 function PageFallback() {
   return (
@@ -103,6 +105,8 @@ function PrefetchAllPages() {
       import('./pages/EmailCampaigns');
       import('./pages/EmailEngine');
       import('./pages/Segments');
+      import('./pages/CustomerBrain');
+      import('./pages/SendPlanner');
     }, 800);
     return () => clearTimeout(t);
   }, []);
@@ -120,6 +124,8 @@ export default function App() {
             <Route path="/"                 element={<Overview />} />
             <Route path="/setup"            element={<Setup />} />
             <Route path="/bulk-import"      element={<BulkImport />} />
+            <Route path="/customer-brain"   element={<CustomerBrain />} />
+            <Route path="/send-planner"     element={<SendPlanner />} />
             <Route path="/decisions"        element={<DecisionQueue />} />
             <Route path="/scale"            element={<Board />} />
             <Route path="/fix"              element={<Board />} />

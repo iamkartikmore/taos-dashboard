@@ -134,12 +134,16 @@ export function orderRowsToApiShape(rows) {
       });
     }
 
-    // Attach line-item (one per row)
+    // Attach line-item (one per row). Copy order-level vendor/tags/title
+    // onto the line item so downstream taxonomy has fields to classify on
+    // (Shopify's default export keeps Vendor/Tags at order level).
     if (sku || liName) {
       const order = byId.get(orderId);
+      const title = str(liName);
       order.line_items.push({
         sku,
-        name:                str(liName),
+        name:                title,
+        title,
         quantity:            num(row['Lineitem quantity']) || 1,
         price:               String(num(row['Lineitem price'])),
         compare_at_price:    num(row['Lineitem compare at price']) > 0
@@ -151,6 +155,9 @@ export function orderRowsToApiShape(rows) {
         fulfillment_status:  lower(row['Lineitem fulfillment status']) || null,
         product_id:          null,
         variant_id:          null,
+        vendor:              str(row['Vendor']),
+        tags:                str(row['Tags']),
+        product_type:        str(row['Lineitem product type']) || str(row['Product Type']),
       });
     }
   }
