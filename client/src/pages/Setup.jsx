@@ -865,6 +865,9 @@ export default function Setup() {
   const [csvStatus, setCsvStatus]       = useState(null);
   const [savedFlash, setSavedFlash]     = useState(false);
   const csvRef    = useRef(null);
+  // Synchronous re-entry guard — state updates are async, so a rapid double-click
+  // can fire handlePullEverything twice before megaFetching flips to true.
+  const megaRunning = useRef(false);
 
   // Flash "Saved" indicator when a manual label is updated
   const flashSaved = useCallback(() => {
@@ -887,7 +890,10 @@ export default function Setup() {
 
   /* ── Pull Everything — pre-flight check then sequential brands ── */
   const handlePullEverything = async () => {
+    if (megaRunning.current) return;
+    megaRunning.current = true;
     setMegaFetching(true);
+    try {
     clearLog();
     setActiveTab('log');
 
@@ -927,7 +933,6 @@ export default function Setup() {
     if (!active.length) {
       appendLog('─────────────────────────────────────────');
       appendLog('Nothing to fetch. Add credentials in Brands & Connections.');
-      setMegaFetching(false);
       return;
     }
 
@@ -1078,7 +1083,10 @@ export default function Setup() {
     appendLog('─────────────────────────────────────────');
     appendLog(`✅ All ${active.length} brand(s) fetched`);
     setMegaStep('');
-    setMegaFetching(false);
+    } finally {
+      setMegaFetching(false);
+      megaRunning.current = false;
+    }
   };
 
   const TABS = [

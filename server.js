@@ -62,16 +62,37 @@ async function shopifyToken(shopDomain, clientId, clientSecret) {
 
 /* ─── META PROXY ──────────────────────────────────────────────────── */
 
+// Serialize Meta proxy calls so response buffers don't stack and OOM the 512MB instance.
+// Concurrency of 2 keeps throughput reasonable while capping peak memory.
+const META_MAX_CONCURRENT = 2;
+let metaInFlight = 0;
+const metaQueue = [];
+function acquireMetaSlot() {
+  if (metaInFlight < META_MAX_CONCURRENT) {
+    metaInFlight++;
+    return Promise.resolve();
+  }
+  return new Promise(resolve => metaQueue.push(resolve));
+}
+function releaseMetaSlot() {
+  const next = metaQueue.shift();
+  if (next) next();
+  else metaInFlight--;
+}
+
 // Standard Meta Graph API proxy (avoids browser CORS)
 app.post('/api/meta/fetch', async (req, res) => {
   const { url, params } = req.body;
   if (!url) return res.status(400).json({ error: 'url is required' });
+  await acquireMetaSlot();
   try {
     const response = await withRetry(() => axios.get(url, { params, timeout: 45000 }));
     res.json(response.data);
   } catch (err) {
     const status = err.response?.status || 500;
     res.status(status).json({ error: err.response?.data || err.message });
+  } finally {
+    releaseMetaSlot();
   }
 });
 
@@ -80,6 +101,7 @@ app.post('/api/meta/fetch', async (req, res) => {
 app.post('/api/meta/insights-range', async (req, res) => {
   const { url, params } = req.body;
   if (!url) return res.status(400).json({ error: 'url is required' });
+  await acquireMetaSlot();
   try {
     // May take longer for large accounts / long ranges — extend timeout
     const response = await withRetry(() => axios.get(url, { params, timeout: 90000 }));
@@ -87,6 +109,8 @@ app.post('/api/meta/insights-range', async (req, res) => {
   } catch (err) {
     const status = err.response?.status || 500;
     res.status(status).json({ error: err.response?.data || err.message });
+  } finally {
+    releaseMetaSlot();
   }
 });
 
