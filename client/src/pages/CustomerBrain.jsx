@@ -1,10 +1,12 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Search, TrendingUp, Clock, Gift, PackageCheck, Heart, Zap, DollarSign, Users } from 'lucide-react';
+import { Search, TrendingUp, Clock, Gift, PackageCheck, Heart, Zap, DollarSign, Users, Download } from 'lucide-react';
 import { useStore } from '../store';
 import { buildAllFeatures } from '../lib/retention/features';
 import { buildAffinity } from '../lib/retention/affinity';
 import { buildTaxonomy, applyTaxonomy } from '../lib/retention/taxonomy';
 import { rankAllOpportunities } from '../lib/retention/opportunities';
+import { buildProductLookup, productFor } from '../lib/retention/productLookup';
+import { downloadCsv } from '../lib/retention/exportCsv';
 
 const OPP_META = {
   REPLENISH:   { icon: PackageCheck, color: 'text-emerald-400 bg-emerald-500/10', label: 'Replenish' },
@@ -79,6 +81,39 @@ export default function CustomerBrain() {
     return out.slice(0, 500);
   }, [result, search, filterOpp, filterTier]);
 
+  const lookup = useMemo(() => buildProductLookup(brand, bd.inventoryMap), [brand, bd.inventoryMap]);
+
+  const exportAll = () => {
+    if (!result?.flat?.length) return;
+    const rows = result.flat.map(r => {
+      const f = result.features[r.email] || {};
+      const firstSku = r.recommended_skus?.[0] || '';
+      const p = productFor(firstSku, lookup);
+      return {
+        email: r.email,
+        first_name: f.first_name || '',
+        last_name: f.last_name || '',
+        value_tier: f.value_tier || '',
+        lifecycle_stage: f.lifecycle_stage || '',
+        rfm_segment: f.rfm_segment || '',
+        orders_lifetime: f.true_orders_lifetime || 0,
+        spend_lifetime: Math.round(f.true_spend_lifetime || 0),
+        aov: Math.round(f.aov_lifetime || 0),
+        days_since_last: f.days_since_last_order ?? '',
+        opportunity: r.opportunity,
+        score: Number(r.score?.toFixed(3) || 0),
+        expected_incremental_revenue: Math.round(r.expected_incremental_revenue || 0),
+        recommended_skus: (r.recommended_skus || []).join('|'),
+        primary_sku: firstSku,
+        primary_sku_name: p.name,
+        primary_product_url: p.url,
+        reason: r.reason || '',
+      };
+    });
+    const name = `${(brand?.name || 'brand').toLowerCase().replace(/\s+/g,'-')}-opportunities`;
+    downloadCsv(rows, name);
+  };
+
   const stats = useMemo(() => {
     if (!result) return null;
     const feats = Object.values(result.features).filter(f => f.orders_lifetime > 0);
@@ -130,6 +165,14 @@ export default function CustomerBrain() {
             className="px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-500 disabled:opacity-40 disabled:cursor-not-allowed text-sm text-white font-medium"
           >
             {computing ? 'Computing…' : 'Recompute'}
+          </button>
+          <button
+            onClick={exportAll}
+            disabled={!result?.flat?.length}
+            className="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed text-sm text-slate-200 font-medium flex items-center gap-2"
+            title="Export all opportunities with customer features + SKU name + product URL"
+          >
+            <Download className="w-4 h-4" /> Export CSV
           </button>
         </div>
       </div>

@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Send, AlertCircle, Shield, Download, CheckCircle2 } from 'lucide-react';
+import { Send, AlertCircle, Shield, Download, CheckCircle2, Info } from 'lucide-react';
 import { useStore } from '../store';
 import { buildAllFeatures } from '../lib/retention/features';
 import { buildAffinity } from '../lib/retention/affinity';
@@ -7,6 +7,8 @@ import { buildTaxonomy, applyTaxonomy } from '../lib/retention/taxonomy';
 import { rankAllOpportunities } from '../lib/retention/opportunities';
 import { planSends } from '../lib/retention/planner';
 import { appendSends, loadAllSends, buildCustomerStateFromSends } from '../lib/sendLog';
+import { buildProductLookup, productFor } from '../lib/retention/productLookup';
+import { downloadCsv } from '../lib/retention/exportCsv';
 
 const OPP_LABEL = {
   REPLENISH: 'Replenish', COMPLEMENT: 'Complement', WINBACK: 'Winback',
@@ -26,6 +28,7 @@ export default function SendPlanner() {
   const [plan, setPlan] = useState(null);
   const [logCount, setLogCount] = useState(0);
   const [confirmStatus, setConfirmStatus] = useState(null);
+  const [brandCtx, setBrandCtx] = useState({});   // brand_id → { lookup, features, shop }
 
   const run = async () => {
     setComputing(true);
@@ -39,6 +42,7 @@ export default function SendPlanner() {
 
     await new Promise(r => setTimeout(r, 20));
     const allFlat = [];
+    const ctx = {};
     for (const b of activeBrands) {
       const bd = brandData[b.id] || {};
       const orders = bd.orders || [];
@@ -56,6 +60,7 @@ export default function SendPlanner() {
         newLaunches: affinity.newLaunches,
         orders,
       });
+      ctx[b.id] = { features, lookup: buildProductLookup(b, bd.inventoryMap) };
       for (const row of flat) {
         allFlat.push({
           ...row,
@@ -66,6 +71,7 @@ export default function SendPlanner() {
         });
       }
     }
+    setBrandCtx(ctx);
     const result = planSends(allFlat, customerState, {
       dailyCap, holdoutPct, fatigueMax, cooldownHours, minScore,
     });
@@ -128,25 +134,57 @@ export default function SendPlanner() {
     return m;
   }, [plan]);
 
+  // Columns in the export line up 1:1 with Listmonk `{{ .Attribs.xxx }}`
+  // merge fields. Upload this CSV as a subscriber list and each subscriber
+  // carries the right attributes for mail-merge.
+  const MAIL_MERGE_COLUMNS = [
+    'email','brand','first_name','last_name',
+    'opportunity','reason',
+    'primary_sku','sku_name','product_url','product_image','price',
+    'recommended_skus','recommended_names','recommended_urls',
+    'days_since_last','value_tier','lifecycle_stage',
+    'score','expected_rev','campaign_tag',
+  ];
+
+  const buildMailMergeRows = () => {
+    if (!plan?.picks?.length) return [];
+    const campaignTag = `plan_${new Date().toISOString().slice(0, 10)}`;
+    return plan.picks.map(p => {
+      const c = brandCtx[p.brand_id] || {};
+      const f = c.features?.[p.email] || {};
+      const lookup = c.lookup || {};
+      const skus = p.recommended_skus || [];
+      const primary = skus[0] || '';
+      const primaryProd = productFor(primary, lookup);
+      return {
+        email: p.email,
+        brand: p.brand || '',
+        first_name: f.first_name || '',
+        last_name:  f.last_name  || '',
+        opportunity: p.opportunity,
+        reason: p.reason || '',
+        primary_sku: primary,
+        sku_name: primaryProd.name,
+        product_url: primaryProd.url,
+        product_image: primaryProd.image || '',
+        price: primaryProd.price || 0,
+        recommended_skus: skus.join('|'),
+        recommended_names: skus.map(s => productFor(s, lookup).name).filter(Boolean).join('|'),
+        recommended_urls:  skus.map(s => productFor(s, lookup).url ).filter(Boolean).join('|'),
+        days_since_last: f.days_since_last_order ?? '',
+        value_tier: f.value_tier || '',
+        lifecycle_stage: f.lifecycle_stage || '',
+        score: Number(p.score?.toFixed(3) || 0),
+        expected_rev: Math.round(p.expected_incremental_revenue || 0),
+        campaign_tag: campaignTag,
+      };
+    });
+  };
+
   const exportCsv = () => {
-    if (!plan?.picks.length) return;
-    const header = ['brand','email','opportunity','score','expected_incremental_revenue','recommended_skus','reason'];
-    const rows = plan.picks.map(p => [
-      p.brand || '',
-      p.email,
-      p.opportunity,
-      p.score,
-      p.expected_incremental_revenue,
-      (p.recommended_skus || []).join('|'),
-      (p.reason || '').replace(/"/g, '""'),
-    ]);
-    const csv = [header.join(','), ...rows.map(r => r.map(v => `"${v}"`).join(','))].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `send-plan-${new Date().toISOString().slice(0,10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const rows = buildMailMergeRows();
+    if (!rows.length) return;
+    downloadCsv(rows, 'send-plan', MAIL_MERGE_COLUMNS);
   };
 
   return (
@@ -190,6 +228,34 @@ export default function SendPlanner() {
           Send log has <span className="text-slate-300 font-medium">{logCount.toLocaleString()}</span> records applied for fatigue + cooldown.
         </div>
       )}
+
+      {/* Mail-merge doc */}
+      <div className="rounded-xl bg-sky-500/5 border border-sky-500/20 p-4">
+        <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-sky-300 mb-2">
+          <Info className="w-3.5 h-3.5" /> How to personalize emails in Listmonk
+        </div>
+        <div className="text-xs text-slate-300 leading-relaxed space-y-2">
+          <div>
+            The exported CSV contains one row per subscriber + per-row attributes ready for mail-merge.
+            Import it in Listmonk (<em className="text-slate-400">Subscribers → Import</em>) — each
+            column becomes an attribute you can reference in the campaign template:
+          </div>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-1 pl-2 font-mono text-[11px] text-slate-400">
+            <div><code className="text-emerald-300">{'{{ .Attribs.first_name }}'}</code> — greeting</div>
+            <div><code className="text-emerald-300">{'{{ .Attribs.sku_name }}'}</code> — recommended product</div>
+            <div><code className="text-emerald-300">{'{{ .Attribs.product_url }}'}</code> — deep link</div>
+            <div><code className="text-emerald-300">{'{{ .Attribs.product_image }}'}</code> — hero image</div>
+            <div><code className="text-emerald-300">{'{{ .Attribs.reason }}'}</code> — why this pick</div>
+            <div><code className="text-emerald-300">{'{{ .Attribs.opportunity }}'}</code> — bucket label</div>
+            <div><code className="text-emerald-300">{'{{ .Attribs.value_tier }}'}</code> — VIP / Core / Emerging</div>
+            <div><code className="text-emerald-300">{'{{ .Attribs.campaign_tag }}'}</code> — stable id to segment later</div>
+          </div>
+          <div className="text-slate-500">
+            Build one template per <code className="text-slate-300">opportunity</code> (REPLENISH, WINBACK…) or
+            segment the list by <code className="text-slate-300">opportunity</code>/<code className="text-slate-300">value_tier</code> and send each cohort its own creative.
+          </div>
+        </div>
+      </div>
 
       {/* Knobs */}
       <div className="grid grid-cols-5 gap-3">

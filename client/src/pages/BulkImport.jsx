@@ -1,7 +1,12 @@
-import { useState, useCallback, useRef } from 'react';
-import { Upload, FileText, CheckCircle2, AlertCircle, X, Loader2, Package, Users } from 'lucide-react';
+import { useState, useCallback, useRef, useMemo } from 'react';
+import { Link } from 'react-router-dom';
+import { Upload, FileText, CheckCircle2, AlertCircle, X, Loader2, Package, Users, Sparkles, Table2, Brain } from 'lucide-react';
 import { useStore } from '../store';
 import { parseBulkCsvFiles } from '../lib/shopifyCsvImport';
+import { buildAllFeatures } from '../lib/retention/features';
+import { buildAffinity } from '../lib/retention/affinity';
+import { buildTaxonomy, applyTaxonomy } from '../lib/retention/taxonomy';
+import { rankAllOpportunities } from '../lib/retention/opportunities';
 
 function fmtBytes(n) {
   if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB';
@@ -24,6 +29,48 @@ export default function BulkImport() {
   const brandCounts = brand ? brandData[brand.id] || {} : {};
   const currentOrders = brandCounts.orders?.length || 0;
   const currentCustomers = brandCounts.customers?.length || 0;
+
+  // Auto-compute a compact retention summary once an import has just landed.
+  // Recomputes whenever the brand's orders array identity changes (which it
+  // does after mergeBrandOrdersFromCsv), so this reflects the post-import data.
+  const retentionSummary = useMemo(() => {
+    if (!result || result.error) return null;
+    const orders = brandCounts.orders || [];
+    const customers = brandCounts.customers || [];
+    if (!orders.length) return null;
+    try {
+      const taxonomy = buildTaxonomy(orders);
+      applyTaxonomy(orders, taxonomy.skuLabel);
+      const { features, replenish } = buildAllFeatures(orders, customers);
+      const affinity = buildAffinity(orders);
+      const { flat } = rankAllOpportunities({
+        features, replenishClock: replenish,
+        copurchase: affinity.copurchase, taxonomy,
+        newLaunches: affinity.newLaunches, orders,
+      });
+      const feats = Object.values(features).filter(f => f.orders_lifetime > 0);
+      const byTier = { VIP: 0, Core: 0, Emerging: 0 };
+      for (const f of feats) byTier[f.value_tier] = (byTier[f.value_tier] || 0) + 1;
+      const byOpp = {};
+      let totalExp = 0;
+      for (const r of flat) {
+        byOpp[r.opportunity] = (byOpp[r.opportunity] || 0) + 1;
+        totalExp += r.expected_incremental_revenue || 0;
+      }
+      return {
+        buyers: feats.length,
+        vips: byTier.VIP,
+        replenish_skus: Object.keys(replenish).length,
+        copurchase_pairs: affinity.copurchase.pairs.length,
+        new_launches: affinity.newLaunches.length,
+        collections: Object.keys(taxonomy.collections).length,
+        opportunities: flat.length,
+        byOpp,
+        expected_rev: totalExp,
+      };
+    } catch { return null; }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result, brandCounts.orders, brandCounts.customers]);
 
   const addFiles = newFiles => {
     const arr = Array.from(newFiles).filter(f => f.name.toLowerCase().endsWith('.csv'));
@@ -199,6 +246,62 @@ export default function BulkImport() {
         </div>
       )}
 
+      {/* Retention summary (auto-computed after import) */}
+      {retentionSummary && (
+        <div className="bg-gradient-to-br from-fuchsia-500/5 to-brand-500/5 rounded-xl border border-fuchsia-500/20 p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Sparkles size={16} className="text-fuchsia-400" />
+              <div className="text-sm font-semibold text-white">Retention data — auto-computed</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Link
+                to="/retention-sheets"
+                className="px-3 py-1.5 rounded-lg bg-gray-900/70 hover:bg-gray-800 border border-gray-800 text-xs text-slate-200 flex items-center gap-1.5"
+              >
+                <Table2 size={13} /> Open sheets
+              </Link>
+              <Link
+                to="/customer-brain"
+                className="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-xs text-white font-medium flex items-center gap-1.5"
+              >
+                <Brain size={13} /> Customer Brain
+              </Link>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-4 gap-3 mb-4">
+            <SummaryTile label="Buyers"          value={retentionSummary.buyers.toLocaleString()} />
+            <SummaryTile label="VIPs"            value={retentionSummary.vips.toLocaleString()} />
+            <SummaryTile label="Opportunities"   value={retentionSummary.opportunities.toLocaleString()} />
+            <SummaryTile label="Est. ₹"
+              value={'₹' + Math.round(retentionSummary.expected_rev).toLocaleString('en-IN')} />
+          </div>
+          <div className="grid grid-cols-4 gap-3">
+            <SummaryTile label="Replenish SKUs"  value={retentionSummary.replenish_skus.toLocaleString()} />
+            <SummaryTile label="Co-purchase pairs" value={retentionSummary.copurchase_pairs.toLocaleString()} />
+            <SummaryTile label="New launches"    value={retentionSummary.new_launches.toLocaleString()} />
+            <SummaryTile label="Auto collections" value={retentionSummary.collections.toLocaleString()} />
+          </div>
+
+          {Object.keys(retentionSummary.byOpp).length > 0 && (
+            <div className="mt-4 flex flex-wrap gap-2">
+              {Object.entries(retentionSummary.byOpp).sort((a,b)=>b[1]-a[1]).map(([k, v]) => (
+                <span key={k} className="px-2.5 py-1 rounded-full bg-gray-900/60 border border-gray-800 text-[11px] text-slate-300">
+                  <span className="text-slate-500">{k.replace(/_/g,' ').toLowerCase()}</span> <span className="text-slate-100 font-medium ml-1">{v.toLocaleString()}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
+          <div className="mt-4 text-[11px] text-slate-500 leading-relaxed">
+            Features, replenish clocks, co-purchase graph, category transitions, and taxonomy are all recomputed
+            from the current orders set. Every sheet is exportable as CSV with SKU name + product URL joined
+            from the Shopify inventory map.
+          </div>
+        </div>
+      )}
+
       {/* Per-file breakdown */}
       {result?.perFile?.length > 0 && (
         <div className="bg-gray-900/60 rounded-xl border border-gray-800/60 overflow-hidden">
@@ -233,6 +336,15 @@ export default function BulkImport() {
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+function SummaryTile({ label, value }) {
+  return (
+    <div className="bg-gray-950/60 rounded-lg px-3 py-2.5 border border-gray-800/60">
+      <div className="text-[10px] text-slate-500 uppercase tracking-wide">{label}</div>
+      <div className="text-lg font-bold text-white tabular-nums mt-0.5">{value}</div>
     </div>
   );
 }
