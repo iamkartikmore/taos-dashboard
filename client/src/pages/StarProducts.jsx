@@ -1,16 +1,17 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect, useCallback } from 'react';
 import {
   ScatterChart, Scatter, XAxis, YAxis, ZAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, Cell, Legend,
 } from 'recharts';
 import {
   Star, TrendingUp, Package, AlertTriangle, Award, Target,
-  Layers, GitMerge, ChevronRight, Search,
+  Layers, GitMerge, ChevronRight, Search, RefreshCw,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
 import { fmt } from '../lib/analytics';
 import { buildStarProducts, PRESETS, ACTION_STYLES } from '../lib/starProducts';
+import { pullBrandOrders90d } from '../lib/autoPull';
 import MetricCard from '../components/ui/MetricCard';
 
 /* ─── persisted plan margin (mirrors BusinessPlan storage key) ─── */
@@ -369,9 +370,22 @@ function DecisionTable({ skus, search, actionFilter }) {
   );
 }
 
+/* ─── "X minutes ago" ──────────────────────────────────────────── */
+function timeAgo(ts) {
+  if (!ts) return null;
+  const diff = Date.now() - ts;
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min} min ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const d = Math.floor(hr / 24);
+  return `${d}d ago`;
+}
+
 /* ─── MAIN PAGE ────────────────────────────────────────────────── */
 export default function StarProducts() {
-  const { brands, activeBrandIds, brandData } = useStore();
+  const { brands, activeBrandIds, brandData, setBrandOrders, setBrandOrdersStatus } = useStore();
 
   const defaultViewId = brands.find(b => activeBrandIds.includes(b.id))?.id || activeBrandIds[0] || brands[0]?.id;
   const [viewingBrandId, setViewingBrandId] = useState(defaultViewId);
@@ -379,6 +393,8 @@ export default function StarProducts() {
   const [windowDays, setWindowDays] = useState(90);
   const [actionFilter, setActionFilter] = useState('all');
   const [search, setSearch]         = useState('');
+  const [fetching, setFetching]     = useState(false);
+  const [fetchErr, setFetchErr]     = useState(null);
 
   useEffect(() => {
     if (viewingBrandId && !brands.some(b => b.id === viewingBrandId)) {
@@ -389,6 +405,18 @@ export default function StarProducts() {
   const bData = brandData?.[viewingBrandId] || {};
   const orders       = bData.orders || [];
   const inventoryMap = bData.inventoryMap || {};
+  const ordersFetchedAt = bData.ordersFetchedAt;
+  const ordersStatus    = bData.ordersStatus;
+
+  const selectedBrandObj = brands.find(b => b.id === viewingBrandId);
+
+  const handleFetch = useCallback(async () => {
+    if (!selectedBrandObj) return;
+    setFetching(true); setFetchErr(null);
+    const res = await pullBrandOrders90d(selectedBrandObj, setBrandOrders, setBrandOrdersStatus);
+    setFetching(false);
+    if (!res.ok) setFetchErr(res.error || res.reason || 'Fetch failed');
+  }, [selectedBrandObj, setBrandOrders, setBrandOrdersStatus]);
 
   const plan = useMemo(() => ({ grossMarginPct: loadPlanMargin(viewingBrandId) }), [viewingBrandId]);
 
@@ -399,8 +427,7 @@ export default function StarProducts() {
 
   const { skus, summary, concentration, bundles, medians } = analysis;
 
-  const selectedBrand = brands.find(b => b.id === viewingBrandId);
-  const hasShopifyConfig = selectedBrand?.shopify?.shop && selectedBrand?.shopify?.clientId;
+  const hasShopifyConfig = selectedBrandObj?.shopify?.shop && selectedBrandObj?.shopify?.clientId;
 
   return (
     <div className="space-y-5">
@@ -413,6 +440,25 @@ export default function StarProducts() {
           <p className="text-xs text-slate-500 mt-1">
             Per-brand portfolio decisions · Economic Value × Strategic Value · {summary.totalSkus} SKUs · {windowDays}d window
           </p>
+          <div className="flex items-center gap-2 mt-1.5">
+            <button
+              onClick={handleFetch}
+              disabled={fetching || !hasShopifyConfig}
+              className={clsx(
+                'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-all',
+                fetching
+                  ? 'border-amber-700 text-amber-400 bg-amber-900/20'
+                  : 'border-amber-700/60 text-amber-300 bg-amber-900/10 hover:bg-amber-900/30 disabled:opacity-40',
+              )}
+            >
+              <RefreshCw size={11} className={fetching ? 'animate-spin' : ''} />
+              {fetching ? 'Fetching 90d…' : 'Fetch 90 days'}
+            </button>
+            {ordersFetchedAt && !fetching && (
+              <span className="text-[10px] text-slate-500">Last fetched {timeAgo(ordersFetchedAt)} · {orders.length.toLocaleString()} orders</span>
+            )}
+            {fetchErr && <span className="text-[10px] text-red-400">{fetchErr}</span>}
+          </div>
         </div>
         <div className="flex flex-col gap-2 items-end">
           <BrandPicker brands={brands} selected={viewingBrandId} onChange={setViewingBrandId} />

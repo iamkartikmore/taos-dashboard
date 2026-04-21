@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { buildEnrichedRows } from '../lib/analytics';
 import { normalizeBreakdownRow } from '../lib/breakdownAnalytics';
 import { mergeCustomerCache } from '../lib/shopifyAnalytics';
+import { saveOrders, loadAllOrders } from '../lib/orderStorage';
 
 /* ─── LOCALSTORAGE ──────────────────────────────────────────────── */
 const LS_BRANDS  = 'taos_brands_v2';
@@ -272,15 +273,38 @@ export const useStore = create((set, get) => {
 
     setBrandOrders: (brandId, orders, window) => {
       const tagged = (orders || []).map(o => ({ ...o, _brandId: brandId }));
-      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), orders: tagged, ordersWindow: window, ordersStatus: 'success' } };
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), orders: tagged, ordersWindow: window, ordersStatus: 'success', ordersFetchedAt: Date.now() } };
       // Merge customer data into persistent cache
       const existingCache  = lsGet(LS_CUST, {});
       const brandCache     = existingCache[brandId] || {};
       const updatedBrandCache = mergeCustomerCache(brandCache, orders || []);
       const newCache = { ...existingCache, [brandId]: updatedBrandCache };
       lsSet(LS_CUST, newCache);
+      // Persist full orders to IndexedDB (fire-and-forget)
+      saveOrders(brandId, tagged, window);
       set({ brandData, customerCache: newCache });
       _rebuild({ brandData });
+    },
+
+    // Called by the boot hydration hook once IDB data is read
+    hydrateOrders: (records) => {
+      if (!records?.length) return;
+      const cur = get().brandData;
+      const next = { ...cur };
+      for (const r of records) {
+        if (!r?.brandId) continue;
+        // Don't overwrite fresher in-memory orders
+        if (next[r.brandId]?.ordersFetchedAt && next[r.brandId].ordersFetchedAt >= (r.fetchedAt || 0)) continue;
+        next[r.brandId] = {
+          ...(next[r.brandId] || {}),
+          orders: r.orders || [],
+          ordersWindow: r.window,
+          ordersFetchedAt: r.fetchedAt,
+          ordersStatus: 'success',
+        };
+      }
+      set({ brandData: next });
+      _rebuild({ brandData: next });
     },
 
     setBrandOrdersStatus: (brandId, status, error = null) => {

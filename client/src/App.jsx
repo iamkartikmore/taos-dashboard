@@ -1,6 +1,9 @@
 import { lazy, Suspense, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
+import { useStore } from './store';
+import { loadAllOrders } from './lib/orderStorage';
+import { shouldAutoPull, runDailyAutoPull } from './lib/autoPull';
 
 // Heavy pages — code-split so only the active page's JS is parsed
 const Setup          = lazy(() => import('./pages/Setup'));
@@ -39,6 +42,30 @@ function PageFallback() {
       <div className="w-6 h-6 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
     </div>
   );
+}
+
+function BootHydrateAndAutoPull() {
+  const { hydrateOrders, brands, setBrandOrders, setBrandOrdersStatus } = useStore();
+
+  // 1) Hydrate persisted orders from IndexedDB on first mount
+  useEffect(() => {
+    loadAllOrders().then(records => hydrateOrders(records)).catch(() => {});
+  }, [hydrateOrders]);
+
+  // 2) Daily auto-pull at 7am IST (checked once on mount, then hourly while open)
+  useEffect(() => {
+    const check = () => {
+      if (shouldAutoPull()) {
+        runDailyAutoPull(useStore.getState().brands, setBrandOrders, setBrandOrdersStatus);
+      }
+    };
+    // Wait 3s after mount so the app has time to render, then check
+    const boot = setTimeout(check, 3000);
+    const interval = setInterval(check, 60 * 60 * 1000); // hourly
+    return () => { clearTimeout(boot); clearInterval(interval); };
+  }, [setBrandOrders, setBrandOrdersStatus]);
+
+  return null;
 }
 
 function PrefetchAllPages() {
@@ -82,6 +109,7 @@ function PrefetchAllPages() {
 export default function App() {
   return (
     <BrowserRouter>
+      <BootHydrateAndAutoPull />
       <PrefetchAllPages />
       <Suspense fallback={<PageFallback />}>
         <Routes>
