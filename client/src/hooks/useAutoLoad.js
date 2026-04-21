@@ -65,13 +65,15 @@ export function useAutoLoad() {
       }
 
       const merged = {
-        campaigns:     valid.flatMap(r => r.campaigns),
-        adsets:        valid.flatMap(r => r.adsets),
-        ads:           valid.flatMap(r => r.ads),
-        insightsToday: valid.flatMap(r => r.insightsToday),
-        insights7d:    valid.flatMap(r => r.insights7d),
-        insights14d:   valid.flatMap(r => r.insights14d),
-        insights30d:   valid.flatMap(r => r.insights30d),
+        campaigns:         valid.flatMap(r => r.campaigns),
+        adsets:            valid.flatMap(r => r.adsets),
+        ads:               valid.flatMap(r => r.ads),
+        insightsToday:     valid.flatMap(r => r.insightsToday),
+        insightsYesterday: valid.flatMap(r => r.insightsYesterday || []),
+        insights3d:        valid.flatMap(r => r.insights3d || []),
+        insights7d:        valid.flatMap(r => r.insights7d),
+        insights14d:       valid.flatMap(r => r.insights14d),
+        insights30d:       valid.flatMap(r => r.insights30d),
       };
       setBrandMetaData(brand.id, merged);
 

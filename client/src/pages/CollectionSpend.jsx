@@ -832,28 +832,35 @@ export default function CollectionSpend() {
     setLazyMsg({});
   }, [activeBrandIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── Auto-fetch when a lazy period is selected and has no data yet ── */
-  useEffect(() => {
-    const meta = PERIODS.find(p => p.id === period);
-    if (!meta?.lazy) return;
-    const status = lazyStatus[period];
-    if (status === 'loading' || status === 'done' || status === 'error') return;
-    doFetch(period);
-  }, [period, lazyStatus, doFetch]);
-
-  /* ── Period rows — use brandData directly (no rawAccounts, avoids ×N bug) ── */
+  /* ── Period rows — prefer brandData (cached by standard pull); fall back to lazy ── */
   const periodMeta = PERIODS.find(p => p.id === period) || PERIODS[2];
-  const periodRows = useMemo(() => {
+  const cachedRows = useMemo(() => {
     const active = (brands || []).filter(b => (activeBrandIds || []).includes(b.id));
-    if (periodMeta.lazy) {
+    if (period === 'yesterday') return active.flatMap(b => brandData[b.id]?.insightsYesterday || []);
+    if (period === '3d')        return active.flatMap(b => brandData[b.id]?.insights3d        || []);
+    if (period === '7d')        return active.flatMap(b => brandData[b.id]?.insights7d        || []);
+    if (period === '14d')       return active.flatMap(b => brandData[b.id]?.insights14d       || []);
+    if (period === '30d')       return active.flatMap(b => brandData[b.id]?.insights30d       || []);
+    return active.flatMap(b => brandData[b.id]?.insightsToday || []);
+  }, [period, brands, activeBrandIds, brandData]);
+
+  const periodRows = useMemo(() => {
+    if (periodMeta.lazy && !cachedRows.length) {
       const ids = new Set(activeBrandIds || []);
       return (lazyData[period] || []).filter(r => !r._brandId || ids.has(r._brandId));
     }
-    if (period === '7d')  return active.flatMap(b => brandData[b.id]?.insights7d   || []);
-    if (period === '14d') return active.flatMap(b => brandData[b.id]?.insights14d  || []);
-    if (period === '30d') return active.flatMap(b => brandData[b.id]?.insights30d  || []);
-    return active.flatMap(b => brandData[b.id]?.insightsToday || []);
-  }, [period, periodMeta.lazy, brands, activeBrandIds, brandData, lazyData]);
+    return cachedRows;
+  }, [periodMeta.lazy, cachedRows, period, lazyData, activeBrandIds]);
+
+  /* ── Auto-fetch when a lazy period is selected AND brandData has no cached rows ── */
+  useEffect(() => {
+    const meta = PERIODS.find(p => p.id === period);
+    if (!meta?.lazy) return;
+    if (cachedRows.length) return;                    // already have data from standard pull
+    const status = lazyStatus[period];
+    if (status === 'loading' || status === 'done' || status === 'error') return;
+    doFetch(period);
+  }, [period, lazyStatus, doFetch, cachedRows.length]);
 
   /* ── Build groups ── */
   const groups = useMemo(
@@ -892,10 +899,11 @@ export default function CollectionSpend() {
     };
   }, [groups]);
 
-  const lazyNeedsLoad = periodMeta.lazy && !lazyStatus[period] || lazyStatus[period] === 'idle';
-  const lazyLoading   = lazyStatus[period] === 'loading';
-  const lazyError     = lazyStatus[period] === 'error';
-  const lazyReady     = lazyStatus[period] === 'done';
+  const lazyFallback  = periodMeta.lazy && !cachedRows.length;
+  const lazyNeedsLoad = lazyFallback && (!lazyStatus[period] || lazyStatus[period] === 'idle');
+  const lazyLoading   = lazyFallback && lazyStatus[period] === 'loading';
+  const lazyError     = lazyFallback && lazyStatus[period] === 'error';
+  const lazyReady     = lazyFallback && lazyStatus[period] === 'done';
 
   return (
     <div className="space-y-5">
@@ -943,8 +951,8 @@ export default function CollectionSpend() {
         )}
       </div>
 
-      {/* Lazy: needs fetch */}
-      {periodMeta.lazy && (lazyNeedsLoad || lazyLoading || lazyError) && (
+      {/* Lazy fallback panel — only if brandData has no cached rows for this period */}
+      {lazyFallback && (lazyNeedsLoad || lazyLoading || lazyError) && (
         <LazyFetchPanel
           period={period}
           status={lazyStatus[period] || 'idle'}
@@ -954,7 +962,7 @@ export default function CollectionSpend() {
       )}
 
       {/* Budget not loaded notice */}
-      {!periodMeta.lazy && !lazyNeedsLoad && groups.length > 0 && !T.hasBudget && (
+      {!lazyNeedsLoad && !lazyLoading && groups.length > 0 && !T.hasBudget && (
         <div className="flex items-center gap-2 text-xs text-slate-500 bg-gray-800/30 border border-gray-700/30 rounded-xl px-4 py-3">
           <Info size={13} className="shrink-0" />
           Budget data not loaded — pull Meta structure (campaigns/adsets) from Setup to see budgets and pacing

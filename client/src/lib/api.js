@@ -211,18 +211,22 @@ export async function pullAccount({ ver, token, accountKey, accountId }, onProgr
 
   // Phase 2: insights (big payloads) — run sequentially so Render memory stays flat
   log('fetching insight windows sequentially...');
-  const rawToday = await fetchInsights(ver, token, accountId, 'today',    msg => log(`Today ${msg}`));
-  const raw7d    = await fetchInsights(ver, token, accountId, 'last_7d',  msg => log(`7D ${msg}`));
-  const raw14d   = await fetchInsights(ver, token, accountId, 'last_14d', msg => log(`14D ${msg}`));
-  const raw30d   = await fetchInsights(ver, token, accountId, 'last_30d', msg => log(`30D ${msg}`));
+  const rawToday     = await fetchInsights(ver, token, accountId, 'today',     msg => log(`Today ${msg}`));
+  const rawYesterday = await fetchInsights(ver, token, accountId, 'yesterday', msg => log(`Yesterday ${msg}`));
+  const raw3d        = await fetchInsights(ver, token, accountId, 'last_3d',   msg => log(`3D ${msg}`));
+  const raw7d        = await fetchInsights(ver, token, accountId, 'last_7d',   msg => log(`7D ${msg}`));
+  const raw14d       = await fetchInsights(ver, token, accountId, 'last_14d',  msg => log(`14D ${msg}`));
+  const raw30d       = await fetchInsights(ver, token, accountId, 'last_30d',  msg => log(`30D ${msg}`));
 
-  const insightsToday = rawToday.map(r => normalizeInsight(r, accountKey, 'Today'));
-  const insights7d    = raw7d.map(r    => normalizeInsight(r, accountKey, '7D'));
-  const insights14d   = raw14d.map(r   => normalizeInsight(r, accountKey, '14D'));
-  const insights30d   = raw30d.map(r   => normalizeInsight(r, accountKey, '30D'));
+  const insightsToday     = rawToday.map(r     => normalizeInsight(r, accountKey, 'Today'));
+  const insightsYesterday = rawYesterday.map(r => normalizeInsight(r, accountKey, 'Yesterday'));
+  const insights3d        = raw3d.map(r        => normalizeInsight(r, accountKey, '3D'));
+  const insights7d        = raw7d.map(r        => normalizeInsight(r, accountKey, '7D'));
+  const insights14d       = raw14d.map(r       => normalizeInsight(r, accountKey, '14D'));
+  const insights30d       = raw30d.map(r       => normalizeInsight(r, accountKey, '30D'));
 
-  log(`✓ Done — Today:${insightsToday.length} 7D:${insights7d.length} 14D:${insights14d.length} 30D:${insights30d.length}`);
-  return { accountKey, accountId, campaigns, adsets, ads, insightsToday, insights7d, insights14d, insights30d };
+  log(`✓ Done — Today:${insightsToday.length} Yd:${insightsYesterday.length} 3D:${insights3d.length} 7D:${insights7d.length} 14D:${insights14d.length} 30D:${insights30d.length}`);
+  return { accountKey, accountId, campaigns, adsets, ads, insightsToday, insightsYesterday, insights3d, insights7d, insights14d, insights30d };
 }
 
 /* ─── CUSTOM DATE RANGE FULL PULL ────────────────────────────────── */

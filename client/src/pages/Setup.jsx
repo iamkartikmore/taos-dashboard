@@ -144,7 +144,7 @@ function BrandCard({ brand, brandInfo }) {
     const jobId = `meta:${brand.id}`;
     startPullJob(jobId, `Meta — ${brand.name}`, `0 / ${accounts.length} accounts`);
 
-    const combined = { campaigns: [], adsets: [], ads: [], insightsToday: [], insights7d: [], insights14d: [], insights30d: [] };
+    const combined = { campaigns: [], adsets: [], ads: [], insightsToday: [], insightsYesterday: [], insights3d: [], insights7d: [], insights14d: [], insights30d: [] };
     const failures = [];
     for (let i = 0; i < accounts.length; i++) {
       const acc = accounts[i];
@@ -163,6 +163,8 @@ function BrandCard({ brand, brandInfo }) {
         combined.adsets.push(...r.adsets);
         combined.ads.push(...r.ads);
         combined.insightsToday.push(...r.insightsToday);
+        combined.insightsYesterday.push(...(r.insightsYesterday || []));
+        combined.insights3d.push(...(r.insights3d || []));
         combined.insights7d.push(...r.insights7d);
         combined.insights14d.push(...r.insights14d);
         combined.insights30d.push(...r.insights30d);
@@ -951,7 +953,7 @@ export default function Setup() {
         appendLog(`[${brand.name}] Meta: pulling ${accounts.length} account(s) sequentially (10s cooldown between)...`);
         setBrandMetaStatus(brand.id, 'loading');
         try {
-          const combined = { campaigns:[], adsets:[], ads:[], insightsToday:[], insights7d:[], insights14d:[], insights30d:[] };
+          const combined = { campaigns:[], adsets:[], ads:[], insightsToday:[], insightsYesterday:[], insights3d:[], insights7d:[], insights14d:[], insights30d:[] };
           for (let i = 0; i < accounts.length; i++) {
             const acc = accounts[i];
             if (i > 0) {
@@ -966,6 +968,8 @@ export default function Setup() {
             combined.adsets.push(...r.adsets);
             combined.ads.push(...r.ads);
             combined.insightsToday.push(...r.insightsToday);
+            combined.insightsYesterday.push(...(r.insightsYesterday || []));
+            combined.insights3d.push(...(r.insights3d || []));
             combined.insights7d.push(...r.insights7d);
             combined.insights14d.push(...r.insights14d);
             combined.insights30d.push(...r.insights30d);
