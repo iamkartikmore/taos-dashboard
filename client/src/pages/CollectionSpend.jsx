@@ -832,6 +832,15 @@ export default function CollectionSpend() {
     setLazyMsg({});
   }, [activeBrandIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /* ── Auto-fetch when a lazy period is selected and has no data yet ── */
+  useEffect(() => {
+    const meta = PERIODS.find(p => p.id === period);
+    if (!meta?.lazy) return;
+    const status = lazyStatus[period];
+    if (status === 'loading' || status === 'done' || status === 'error') return;
+    doFetch(period);
+  }, [period, lazyStatus, doFetch]);
+
   /* ── Period rows — use brandData directly (no rawAccounts, avoids ×N bug) ── */
   const periodMeta = PERIODS.find(p => p.id === period) || PERIODS[2];
   const periodRows = useMemo(() => {
