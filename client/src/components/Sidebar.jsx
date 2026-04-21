@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
   Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck, ClipboardList,
-  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, Search, Mail, Users, Sparkles,
+  Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, Search, Mail, Users, Sparkles, Star,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -19,6 +19,7 @@ const NAV = [
   { to: '/scorecard',    icon: Trophy,          label: 'Scorecard',          group: 'intel' },
   { to: '/video',        icon: Play,            label: 'Video Insights',     group: 'intel' },
   { to: '/sku',          icon: Package,         label: 'SKU Intelligence',   group: 'intel' },
+  { to: '/star-products',icon: Star,            label: 'Star Products',      group: 'intel' },
   { to: '/flat',         icon: Database,        label: 'Raw Flat Data',      group: 'intel' },
   { to: '/breakdowns',   icon: BarChart2,       label: 'Breakdown Analytics',group: 'intel' },
   { to: '/creative-intel', icon: Flame,         label: 'Creative Intel',     group: 'advanced' },

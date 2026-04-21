@@ -31,6 +31,7 @@ const OrderAnalysis      = lazy(() => import('./pages/OrderAnalysis'));
 const CollectionSpend    = lazy(() => import('./pages/CollectionSpend'));
 const AOVAnalysis        = lazy(() => import('./pages/AOVAnalysis'));
 const BusinessPlan       = lazy(() => import('./pages/BusinessPlan'));
+const StarProducts       = lazy(() => import('./pages/StarProducts'));
 
 function PageFallback() {
   return (
@@ -68,6 +69,7 @@ function PrefetchAllPages() {
       import('./pages/CollectionSpend');
       import('./pages/AOVAnalysis');
       import('./pages/BusinessPlan');
+      import('./pages/StarProducts');
       import('./pages/EmailCampaigns');
       import('./pages/EmailEngine');
       import('./pages/Segments');
@@ -106,6 +108,7 @@ export default function App() {
             <Route path="/collection-spend" element={<CollectionSpend />} />
             <Route path="/aov"              element={<AOVAnalysis />} />
             <Route path="/business-plan"    element={<BusinessPlan />} />
+            <Route path="/star-products"    element={<StarProducts />} />
             <Route path="/shopify"          element={<ShopifyOrders />} />
             <Route path="/shopify-insights" element={<ShopifyInsights />} />
             <Route path="/shopify-ops"      element={<ShopifyOps />} />
