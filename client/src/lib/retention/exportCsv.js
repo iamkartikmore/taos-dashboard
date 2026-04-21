@@ -33,3 +33,34 @@ export function downloadCsv(rows, name = 'export', columns = null) {
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+
+/**
+ * Bundle multiple sheets into ONE text file with section dividers.
+ * Avoids a 7-way download dialog and stays dep-free. Spreadsheet apps
+ * will see one big CSV; split by `# === <name> ===` markers to restore
+ * individual sheets.
+ *
+ * @param sheets  [{ name, rows, columns? }]
+ * @param fileName base name for the single downloaded file
+ */
+export function downloadCsvBundle(sheets, fileName = 'retention-bundle') {
+  const parts = [];
+  for (const s of sheets) {
+    if (!s.rows?.length) continue;
+    const body = rowsToCsv(s.rows, s.columns);
+    if (!body) continue;
+    parts.push(`# === ${s.name} (${s.rows.length} rows) ===`);
+    parts.push(body);
+    parts.push('');
+  }
+  if (!parts.length) return;
+  const blob = new Blob([parts.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${fileName}-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}

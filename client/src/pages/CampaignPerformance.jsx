@@ -1,8 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Target, TrendingUp, ShieldCheck, Mail, Trash2 } from 'lucide-react';
+import { Target, TrendingUp, ShieldCheck, Mail, Trash2, Package, Download } from 'lucide-react';
 import { useStore } from '../store';
 import { loadAllSends, clearSends } from '../lib/sendLog';
-import { attributeOrders, summarizeCampaigns, summarizeByOpportunity } from '../lib/retention/attribution';
+import { attributeOrders, summarizeCampaigns, summarizeByOpportunity, summarizeBySku } from '../lib/retention/attribution';
+import { buildProductLookup, productFor } from '../lib/retention/productLookup';
+import { downloadCsv } from '../lib/retention/exportCsv';
 
 const OPP_LABEL = {
   REPLENISH: 'Replenish', COMPLEMENT: 'Complement', WINBACK: 'Winback',
@@ -35,6 +37,45 @@ export default function CampaignPerformance() {
 
   const campaigns = useMemo(() => summarizeCampaigns(attributed), [attributed]);
   const byOpp     = useMemo(() => summarizeByOpportunity(attributed), [attributed]);
+
+  // One combined lookup across every brand the app knows about, so SKU
+  // rows can carry human names + product URLs regardless of which brand
+  // the send belonged to.
+  const combinedLookup = useMemo(() => {
+    const out = {};
+    for (const b of brands) {
+      const bd = brandData[b.id] || {};
+      Object.assign(out, buildProductLookup(b, bd.inventoryMap));
+    }
+    return out;
+  }, [brands, brandData]);
+
+  const bySku = useMemo(
+    () => summarizeBySku(attributed, ordersAll).slice(0, 200),
+    [attributed, ordersAll],
+  );
+
+  const exportSku = () => {
+    if (!bySku.length) return;
+    const rows = bySku.map(s => {
+      const p = productFor(s.sku, combinedLookup);
+      return {
+        sku: s.sku,
+        name: p.name,
+        url: p.url,
+        recommended_sent: s.recommended_sent,
+        recommended_holdout: s.recommended_holdout,
+        converted_sent: s.converted_sent,
+        sku_in_order_sent: s.sku_in_order_sent,
+        hit_rate_sent: s.hit_rate_sent,
+        conv_rate_sent: s.conv_rate_sent,
+        rev_per_rec_sent: s.rev_per_rec_sent,
+        rev_sent: Math.round(s.rev_sent),
+        rev_holdout: Math.round(s.rev_holdout),
+      };
+    });
+    downloadCsv(rows, 'sku-performance');
+  };
 
   const totals = useMemo(() => {
     let sent = 0, holdout = 0, sentConv = 0, holdoutConv = 0, sentRev = 0, holdoutRev = 0;
@@ -196,6 +237,59 @@ export default function CampaignPerformance() {
                   </tr>
                 ))}
                 {!campaigns.length && <tr><td colSpan={8} className="p-6 text-center text-slate-500">No campaigns logged</td></tr>}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Per SKU */}
+          <div className="rounded-xl bg-gray-900/50 border border-gray-800 overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+              <div className="text-xs uppercase tracking-wide text-slate-500 flex items-center gap-1.5">
+                <Package className="w-3.5 h-3.5" /> Performance by recommended SKU ({bySku.length})
+              </div>
+              <button
+                onClick={exportSku}
+                disabled={!bySku.length}
+                className="px-2.5 py-1 rounded-md bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-[11px] text-slate-200 flex items-center gap-1"
+              >
+                <Download className="w-3 h-3" /> CSV
+              </button>
+            </div>
+            <table className="w-full text-sm">
+              <thead className="bg-gray-900 text-left text-xs uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="p-3 font-medium">SKU</th>
+                  <th className="p-3 font-medium text-right">Rec. sent</th>
+                  <th className="p-3 font-medium text-right">In-order</th>
+                  <th className="p-3 font-medium text-right">Hit rate</th>
+                  <th className="p-3 font-medium text-right">Converted</th>
+                  <th className="p-3 font-medium text-right">Conv rate</th>
+                  <th className="p-3 font-medium text-right">₹ / rec</th>
+                  <th className="p-3 font-medium text-right">Revenue</th>
+                </tr>
+              </thead>
+              <tbody>
+                {bySku.map(s => {
+                  const p = productFor(s.sku, combinedLookup);
+                  return (
+                    <tr key={s.sku} className="border-b border-gray-800/50">
+                      <td className="p-3 text-slate-200 max-w-[280px]">
+                        <div className="text-xs font-mono text-slate-400">{s.sku}</div>
+                        {p.name && <div className="text-[11px] text-slate-300 truncate">{p.url
+                          ? <a href={p.url} target="_blank" rel="noreferrer" className="hover:text-brand-300">{p.name}</a>
+                          : p.name}</div>}
+                      </td>
+                      <td className="p-3 text-right tabular-nums text-slate-300">{s.recommended_sent.toLocaleString()}</td>
+                      <td className="p-3 text-right tabular-nums text-slate-300">{s.sku_in_order_sent.toLocaleString()}</td>
+                      <td className="p-3 text-right tabular-nums text-emerald-400">{(s.hit_rate_sent * 100).toFixed(1)}%</td>
+                      <td className="p-3 text-right tabular-nums text-slate-300">{s.converted_sent.toLocaleString()}</td>
+                      <td className="p-3 text-right tabular-nums text-slate-300">{(s.conv_rate_sent * 100).toFixed(2)}%</td>
+                      <td className="p-3 text-right tabular-nums text-slate-300">₹{s.rev_per_rec_sent.toFixed(0)}</td>
+                      <td className="p-3 text-right tabular-nums text-amber-400">₹{Math.round(s.rev_sent).toLocaleString('en-IN')}</td>
+                    </tr>
+                  );
+                })}
+                {!bySku.length && <tr><td colSpan={8} className="p-6 text-center text-slate-500">Not enough data — log a few plans + let orders flow in.</td></tr>}
               </tbody>
             </table>
           </div>

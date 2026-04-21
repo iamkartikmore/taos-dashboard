@@ -120,6 +120,63 @@ export function summarizeCampaigns(attributedSends) {
   return out;
 }
 
+/* ─── ROLL UP BY RECOMMENDED SKU ────────────────────────────────
+   For each SKU that appeared in a send's `skus` array, count:
+     - times_recommended_sent / _holdout
+     - converted_sent / converted_holdout (was the send → ordered anything)
+     - sku_in_order_sent   — how often the recommended SKU actually showed up
+                             in the converting order's line_items (true "hit")
+     - rev from orders that converted
+   This tells you which SKUs *as recommendations* actually move revenue.
+   ──────────────────────────────────────────────────────────────── */
+export function summarizeBySku(attributedSends, orders) {
+  // Index orders by id → line_items SKUs for quick lookup
+  const orderSkus = new Map();
+  for (const o of orders) {
+    if (!o?.id) continue;
+    const skus = new Set();
+    for (const li of (o.line_items || [])) {
+      if (li?.sku) skus.add(String(li.sku).toUpperCase());
+    }
+    orderSkus.set(o.id, skus);
+  }
+
+  const map = {};
+  for (const s of attributedSends) {
+    const skus = s.skus || [];
+    if (!skus.length) continue;
+    const converted = !!s.converted;
+    const orderLineSet = converted && s.attributed_order_id ? (orderSkus.get(s.attributed_order_id) || new Set()) : null;
+
+    for (const skuRaw of skus) {
+      const sku = String(skuRaw).toUpperCase();
+      if (!map[sku]) map[sku] = {
+        sku, recommended_sent: 0, recommended_holdout: 0,
+        converted_sent: 0, converted_holdout: 0,
+        sku_in_order_sent: 0, sku_in_order_holdout: 0,
+        rev_sent: 0, rev_holdout: 0,
+      };
+      const m = map[sku];
+      if (s.was_holdout) {
+        m.recommended_holdout++;
+        if (converted) { m.converted_holdout++; m.rev_holdout += s.attributed_rev || 0; }
+        if (converted && orderLineSet?.has(sku)) m.sku_in_order_holdout++;
+      } else {
+        m.recommended_sent++;
+        if (converted) { m.converted_sent++; m.rev_sent += s.attributed_rev || 0; }
+        if (converted && orderLineSet?.has(sku)) m.sku_in_order_sent++;
+      }
+    }
+  }
+
+  return Object.values(map).map(m => ({
+    ...m,
+    hit_rate_sent:   m.recommended_sent    ? +(m.sku_in_order_sent / m.recommended_sent).toFixed(4) : 0,
+    conv_rate_sent:  m.recommended_sent    ? +(m.converted_sent    / m.recommended_sent).toFixed(4) : 0,
+    rev_per_rec_sent: m.recommended_sent   ? +(m.rev_sent          / m.recommended_sent).toFixed(2) : 0,
+  })).sort((a, b) => b.rev_sent - a.rev_sent);
+}
+
 export function summarizeByOpportunity(attributedSends) {
   const map = {};
   for (const s of attributedSends) {

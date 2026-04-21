@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Send, AlertCircle, Shield, Download, CheckCircle2, Info } from 'lucide-react';
+import { Send, AlertCircle, Shield, Download, CheckCircle2, Info, Upload, X, FileText, Eye } from 'lucide-react';
 import { useStore } from '../store';
 import { buildAllFeatures } from '../lib/retention/features';
 import { buildAffinity } from '../lib/retention/affinity';
@@ -9,6 +9,8 @@ import { planSends } from '../lib/retention/planner';
 import { appendSends, loadAllSends, buildCustomerStateFromSends } from '../lib/sendLog';
 import { buildProductLookup, productFor } from '../lib/retention/productLookup';
 import { downloadCsv } from '../lib/retention/exportCsv';
+import { publishPlanToListmonk } from '../lib/retention/publish';
+import { OPP_TEMPLATES, renderPreview } from '../lib/retention/emailTemplates';
 
 const OPP_LABEL = {
   REPLENISH: 'Replenish', COMPLEMENT: 'Complement', WINBACK: 'Winback',
@@ -29,6 +31,12 @@ export default function SendPlanner() {
   const [logCount, setLogCount] = useState(0);
   const [confirmStatus, setConfirmStatus] = useState(null);
   const [brandCtx, setBrandCtx] = useState({});   // brand_id → { lookup, features, shop }
+  const [publishing, setPublishing] = useState(false);
+  const [publishLog, setPublishLog] = useState([]);
+  const [publishResults, setPublishResults] = useState(null);
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [previewOpp, setPreviewOpp] = useState(null);
+  const [startNow, setStartNow] = useState(false);
 
   const run = async () => {
     setComputing(true);
@@ -187,6 +195,56 @@ export default function SendPlanner() {
     downloadCsv(rows, 'send-plan', MAIL_MERGE_COLUMNS);
   };
 
+  // Unique brand/opportunity pairs present in the plan, used for
+  // the publish preview ("N lists to touch in Listmonk").
+  const brandOppPairs = useMemo(() => {
+    if (!plan?.picks) return [];
+    const map = {};
+    for (const p of plan.picks) {
+      const key = `${p.brand_id}|${p.opportunity}`;
+      if (!map[key]) map[key] = { brand: p.brand, brand_id: p.brand_id, opportunity: p.opportunity, count: 0 };
+      map[key].count++;
+    }
+    return Object.values(map).sort((a, b) => b.count - a.count);
+  }, [plan]);
+
+  // Per-brand readiness — user sees which brands are wired up.
+  const publishReadiness = useMemo(() => {
+    const map = {};
+    for (const b of brands) {
+      const cfg = b.listmonk || {};
+      map[b.id] = {
+        name: b.name,
+        configured: !!(cfg.url && cfg.username && cfg.password && cfg.fromEmail),
+      };
+    }
+    return map;
+  }, [brands]);
+
+  const runPublish = async ({ dryRun }) => {
+    if (!plan?.picks?.length) return;
+    setPublishing(true);
+    setPublishLog([]);
+    setPublishResults(null);
+    try {
+      const campaignTag = `plan_${new Date().toISOString().slice(0, 10)}_${Date.now().toString(36)}`;
+      const results = await publishPlanToListmonk(
+        plan.picks, brands, brandCtx,
+        {
+          dryRun,
+          startNow: !dryRun && startNow,
+          campaignTag,
+          onProgress: ({ msg }) => setPublishLog(prev => [...prev, { t: Date.now(), msg }]),
+        },
+      );
+      setPublishResults(results);
+    } catch (e) {
+      setPublishLog(prev => [...prev, { t: Date.now(), msg: `❌ ${e.message}` }]);
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between gap-4">
@@ -219,6 +277,14 @@ export default function SendPlanner() {
             className="px-4 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-sm text-slate-200 flex items-center gap-2"
           >
             <Download className="w-4 h-4" /> Export CSV
+          </button>
+          <button
+            onClick={() => setPublishOpen(true)}
+            disabled={!plan?.picks?.length}
+            className="px-4 py-2 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-40 disabled:cursor-not-allowed text-sm text-white font-medium flex items-center gap-2"
+            title="Push subscribers + campaign drafts directly to Listmonk"
+          >
+            <Upload className="w-4 h-4" /> Publish to Listmonk
           </button>
         </div>
       </div>
@@ -359,6 +425,184 @@ export default function SendPlanner() {
           </div>
         </>
       )}
+
+      {publishOpen && (
+        <PublishModal
+          onClose={() => setPublishOpen(false)}
+          pairs={brandOppPairs}
+          readiness={publishReadiness}
+          running={publishing}
+          log={publishLog}
+          results={publishResults}
+          startNow={startNow}
+          setStartNow={setStartNow}
+          onPreview={(opp) => setPreviewOpp(opp)}
+          onRun={runPublish}
+        />
+      )}
+
+      {previewOpp && (
+        <PreviewModal opp={previewOpp} onClose={() => setPreviewOpp(null)} />
+      )}
+    </div>
+  );
+}
+
+function PublishModal({ onClose, pairs, readiness, running, log, results, startNow, setStartNow, onPreview, onRun }) {
+  const totalRecipients = pairs.reduce((s, p) => s + p.count, 0);
+  const groupsByBrand = useMemo(() => {
+    const m = {};
+    for (const p of pairs) (m[p.brand_id] ||= []).push(p);
+    return m;
+  }, [pairs]);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-gray-950 border border-gray-800 rounded-xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
+          <div>
+            <div className="text-white font-semibold">Publish plan to Listmonk</div>
+            <div className="text-xs text-slate-500 mt-0.5">
+              {totalRecipients.toLocaleString()} recipients · {pairs.length} campaign{pairs.length !== 1 ? 's' : ''} across {Object.keys(groupsByBrand).length} brand{Object.keys(groupsByBrand).length !== 1 ? 's' : ''}
+            </div>
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-200"><X className="w-4 h-4" /></button>
+        </div>
+
+        <div className="p-5 space-y-4 overflow-auto flex-1">
+          {/* Brand × opportunity preview */}
+          <div className="rounded-lg bg-gray-900/60 border border-gray-800">
+            <div className="px-3 py-2 text-[11px] uppercase tracking-wide text-slate-500 border-b border-gray-800">
+              Campaigns to be created
+            </div>
+            <div className="divide-y divide-gray-800">
+              {Object.entries(groupsByBrand).map(([brandId, rows]) => {
+                const r = readiness[brandId] || {};
+                return (
+                  <div key={brandId} className="px-3 py-2">
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm text-slate-200 font-medium">{r.name || brandId}</div>
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full ${r.configured ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>
+                        {r.configured ? 'Listmonk ready' : 'Not configured — skipped'}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 mt-1.5">
+                      {rows.map(p => {
+                        const tpl = OPP_TEMPLATES[p.opportunity];
+                        return (
+                          <button
+                            key={p.brand_id + p.opportunity}
+                            onClick={() => onPreview(p.opportunity)}
+                            className="px-2 py-1 rounded-md bg-gray-800 hover:bg-gray-700 border border-gray-700 text-[11px] text-slate-200 flex items-center gap-1.5"
+                            title="Preview template"
+                          >
+                            <Eye className="w-3 h-3 text-slate-500" />
+                            {tpl?.label || p.opportunity}
+                            <span className="text-slate-500">· {p.count.toLocaleString()}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+              {!pairs.length && <div className="px-3 py-6 text-sm text-slate-500 text-center">No picks to publish.</div>}
+            </div>
+          </div>
+
+          {/* Options */}
+          <label className="flex items-start gap-2 text-sm text-slate-200 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={startNow}
+              onChange={e => setStartNow(e.target.checked)}
+              className="mt-0.5"
+              disabled={running}
+            />
+            <div>
+              <div>Start campaigns immediately</div>
+              <div className="text-[11px] text-slate-500">
+                Unchecked creates drafts — you can review and launch from Listmonk. Recommended for the first run.
+              </div>
+            </div>
+          </label>
+
+          {/* Run log */}
+          {log.length > 0 && (
+            <div className="rounded-lg bg-black/40 border border-gray-800 p-3 font-mono text-[11px] text-slate-300 max-h-56 overflow-auto">
+              {log.map(l => <div key={l.t + l.msg}>{l.msg}</div>)}
+            </div>
+          )}
+
+          {/* Results summary */}
+          {results && (
+            <div className="rounded-lg bg-gray-900/60 border border-gray-800 p-3">
+              <div className="text-[11px] uppercase tracking-wide text-slate-500 mb-2">Results</div>
+              <div className="grid grid-cols-3 gap-2 text-xs">
+                <SmallStat label="Succeeded" value={results.filter(r => r.ok).length} accent="text-emerald-400" />
+                <SmallStat label="Failed"    value={results.filter(r => !r.ok).length} accent="text-red-400" />
+                <SmallStat label="Total subs" value={results.reduce((s, r) => s + (r.recipients || 0), 0)} />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="px-5 py-3 border-t border-gray-800 flex items-center justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-xs text-slate-200" disabled={running}>
+            Close
+          </button>
+          <button
+            onClick={() => onRun({ dryRun: true })}
+            disabled={running || !pairs.length}
+            className="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-xs text-slate-200 flex items-center gap-1.5"
+            title="Walk the pipeline without writing anything to Listmonk"
+          >
+            <FileText className="w-3.5 h-3.5" /> Dry-run
+          </button>
+          <button
+            onClick={() => onRun({ dryRun: false })}
+            disabled={running || !pairs.length}
+            className="px-3 py-1.5 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-40 text-xs text-white font-medium flex items-center gap-1.5"
+          >
+            <Upload className="w-3.5 h-3.5" /> {running ? 'Publishing…' : (startNow ? 'Publish + send' : 'Publish drafts')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PreviewModal({ opp, onClose }) {
+  const tpl = OPP_TEMPLATES[opp];
+  if (!tpl) return null;
+  const rendered = renderPreview(tpl.body);
+  return (
+    <div className="fixed inset-0 z-[60] bg-black/80 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-gray-950 border border-gray-800 rounded-xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="px-5 py-3 border-b border-gray-800 flex items-center justify-between">
+          <div>
+            <div className="text-white font-semibold">{tpl.label} — preview</div>
+            <div className="text-[11px] text-slate-500 mt-0.5">{tpl.rationale}</div>
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-200"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="overflow-auto">
+          <div className="px-5 py-3 bg-gray-900/60 border-b border-gray-800 text-xs">
+            <span className="text-slate-500">Subject: </span>
+            <span className="text-slate-200 font-medium">{renderPreview(tpl.subject)}</span>
+          </div>
+          <div className="p-6 bg-white text-gray-900" dangerouslySetInnerHTML={{ __html: rendered }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SmallStat({ label, value, accent = 'text-slate-100' }) {
+  return (
+    <div className="px-2 py-1.5 rounded-md bg-black/30 border border-gray-800">
+      <div className="text-[10px] text-slate-500">{label}</div>
+      <div className={`text-sm font-bold tabular-nums ${accent}`}>{value.toLocaleString()}</div>
     </div>
   );
 }

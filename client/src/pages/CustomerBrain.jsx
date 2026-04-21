@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Search, TrendingUp, Clock, Gift, PackageCheck, Heart, Zap, DollarSign, Users, Download } from 'lucide-react';
+import { Search, TrendingUp, Clock, Gift, PackageCheck, Heart, Zap, DollarSign, Users, Download, X, ShoppingBag, Send, ExternalLink } from 'lucide-react';
 import { useStore } from '../store';
 import { buildAllFeatures } from '../lib/retention/features';
 import { buildAffinity } from '../lib/retention/affinity';
@@ -7,6 +7,7 @@ import { buildTaxonomy, applyTaxonomy } from '../lib/retention/taxonomy';
 import { rankAllOpportunities } from '../lib/retention/opportunities';
 import { buildProductLookup, productFor } from '../lib/retention/productLookup';
 import { downloadCsv } from '../lib/retention/exportCsv';
+import { loadBrandSends } from '../lib/sendLog';
 
 const OPP_META = {
   REPLENISH:   { icon: PackageCheck, color: 'text-emerald-400 bg-emerald-500/10', label: 'Replenish' },
@@ -26,6 +27,8 @@ export default function CustomerBrain() {
   const [filterTier, setFilterTier] = useState('ALL');
   const [computing, setComputing] = useState(false);
   const [result, setResult] = useState(null);
+  const [activeEmail, setActiveEmail] = useState(null);
+  const [brandSends, setBrandSends] = useState([]);
 
   const brand = brands.find(b => b.id === targetBrandId);
   const bd = brand ? brandData[brand.id] || {} : {};
@@ -64,6 +67,12 @@ export default function CustomerBrain() {
     if (ordersCount && !result) run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetBrandId, ordersCount]);
+
+  // Load this brand's send log for the detail drawer
+  useEffect(() => {
+    if (!targetBrandId) { setBrandSends([]); return; }
+    loadBrandSends(targetBrandId).then(setBrandSends).catch(() => setBrandSends([]));
+  }, [targetBrandId]);
 
   const rows = useMemo(() => {
     if (!result) return [];
@@ -271,7 +280,11 @@ export default function CustomerBrain() {
                 const meta = OPP_META[top.opportunity] || {};
                 const Icon = meta.icon || TrendingUp;
                 return (
-                  <tr key={email} className="border-b border-gray-800/50 hover:bg-gray-800/30">
+                  <tr
+                    key={email}
+                    onClick={() => setActiveEmail(email)}
+                    className="border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer"
+                  >
                     <td className="p-3">
                       <div className="text-slate-200">{f.first_name || '—'} {f.last_name || ''}</div>
                       <div className="text-[11px] text-slate-500">{email}</div>
@@ -320,6 +333,173 @@ export default function CustomerBrain() {
           )}
         </div>
       )}
+
+      {activeEmail && result && (
+        <CustomerDrawer
+          email={activeEmail}
+          features={result.features[activeEmail]}
+          opps={result.byCustomer[activeEmail] || []}
+          orders={bd.orders || []}
+          sends={brandSends.filter(s => s.email === activeEmail)}
+          lookup={lookup}
+          onClose={() => setActiveEmail(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function CustomerDrawer({ email, features, opps, orders, sends, lookup, onClose }) {
+  const f = features || {};
+  const myOrders = useMemo(
+    () => orders
+      .filter(o => (o.email || o.customer?.email || '').toLowerCase() === email.toLowerCase() && !o.cancelled_at)
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+      .slice(0, 30),
+    [orders, email],
+  );
+
+  const sortedSends = useMemo(
+    () => [...sends].sort((a, b) => b.sent_at - a.sent_at).slice(0, 20),
+    [sends],
+  );
+
+  return (
+    <div className="fixed inset-0 z-40 bg-black/70 flex justify-end" onClick={onClose}>
+      <div
+        className="bg-gray-950 border-l border-gray-800 h-full w-full max-w-2xl overflow-auto"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="sticky top-0 bg-gray-950 border-b border-gray-800 px-5 py-4 flex items-center justify-between z-10">
+          <div>
+            <div className="text-white font-semibold">{f.first_name || '—'} {f.last_name || ''}</div>
+            <div className="text-xs text-slate-500">{email}</div>
+          </div>
+          <button onClick={onClose} className="text-slate-500 hover:text-slate-200"><X className="w-4 h-4" /></button>
+        </div>
+
+        <div className="p-5 space-y-5">
+          {/* Vitals */}
+          <div className="grid grid-cols-4 gap-2">
+            <MiniStat label="Tier"      value={f.value_tier || '—'} />
+            <MiniStat label="Stage"     value={(f.lifecycle_stage || '—').replace(/_/g,' ')} />
+            <MiniStat label="Orders"    value={(f.true_orders_lifetime || 0).toLocaleString()} />
+            <MiniStat label="Spend"     value={'₹' + Math.round(f.true_spend_lifetime || 0).toLocaleString('en-IN')} />
+            <MiniStat label="AOV"       value={'₹' + Math.round(f.aov_lifetime || 0).toLocaleString('en-IN')} />
+            <MiniStat label="Last order" value={f.days_since_last_order != null ? `${f.days_since_last_order}d` : '—'} />
+            <MiniStat label="Cadence"   value={f.gap_median != null ? `${f.gap_median}d` : '—'} />
+            <MiniStat label="RFM"       value={f.rfm_segment || '—'} />
+          </div>
+
+          {/* Ranked opportunities */}
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-slate-500 mb-2">Ranked opportunities</div>
+            <div className="space-y-2">
+              {opps.map((o, i) => {
+                const p = productFor(o.recommended_skus?.[0], lookup);
+                return (
+                  <div key={o.opportunity + i} className="rounded-lg bg-gray-900/60 border border-gray-800 p-3">
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm text-slate-200 font-medium">{(OPP_META[o.opportunity]?.label) || o.opportunity}</div>
+                      <div className="text-xs text-emerald-400 tabular-nums">₹{Math.round(o.expected_incremental_revenue).toLocaleString('en-IN')}</div>
+                    </div>
+                    <div className="text-[12px] text-slate-400 mt-1">{o.reason}</div>
+                    {o.recommended_skus?.length > 0 && (
+                      <div className="text-[11px] text-slate-500 mt-1 flex items-center gap-1 flex-wrap">
+                        {o.recommended_skus.slice(0, 4).map(s => {
+                          const pr = productFor(s, lookup);
+                          return (
+                            <a
+                              key={s}
+                              href={pr.url || '#'}
+                              target="_blank" rel="noreferrer"
+                              className="text-slate-300 hover:text-brand-300 inline-flex items-center gap-1"
+                              onClick={e => !pr.url && e.preventDefault()}
+                            >
+                              {pr.name ? `${s} · ${pr.name}` : s}
+                              {pr.url && <ExternalLink className="w-3 h-3" />}
+                            </a>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {!opps.length && <div className="text-slate-500 text-sm">No active opportunities.</div>}
+            </div>
+          </div>
+
+          {/* Send history */}
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-slate-500 mb-2 flex items-center gap-1">
+              <Send className="w-3 h-3" /> Send history ({sortedSends.length})
+            </div>
+            {sortedSends.length ? (
+              <div className="rounded-lg bg-gray-900/60 border border-gray-800 divide-y divide-gray-800">
+                {sortedSends.map(s => (
+                  <div key={s.id} className="px-3 py-2 text-xs flex items-center justify-between">
+                    <div>
+                      <div className="text-slate-200">{(OPP_META[s.opportunity]?.label) || s.opportunity}</div>
+                      <div className="text-slate-500 text-[10px]">{new Date(s.sent_at).toLocaleString()}</div>
+                    </div>
+                    <div className="text-right">
+                      {s.was_holdout
+                        ? <span className="text-[10px] text-slate-500">holdout</span>
+                        : <span className="text-[10px] text-emerald-400">sent</span>}
+                      {s.converted && <div className="text-[10px] text-amber-400">converted ₹{Math.round(s.attributed_rev||0)}</div>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-slate-500 text-sm">No sends logged for this customer yet.</div>
+            )}
+          </div>
+
+          {/* Recent orders */}
+          <div>
+            <div className="text-[11px] uppercase tracking-wide text-slate-500 mb-2 flex items-center gap-1">
+              <ShoppingBag className="w-3 h-3" /> Orders ({myOrders.length})
+            </div>
+            {myOrders.length ? (
+              <div className="rounded-lg bg-gray-900/60 border border-gray-800 divide-y divide-gray-800">
+                {myOrders.map(o => (
+                  <div key={o.id} className="px-3 py-2 text-xs">
+                    <div className="flex items-center justify-between">
+                      <div className="text-slate-200">#{o.name || o.id}</div>
+                      <div className="text-slate-300 tabular-nums">₹{Math.round(parseFloat(o.total_price || 0)).toLocaleString('en-IN')}</div>
+                    </div>
+                    <div className="text-slate-500 text-[10px] mt-0.5">
+                      {new Date(o.created_at).toLocaleDateString()} · {(o.line_items || []).length} item(s)
+                    </div>
+                    {(o.line_items || []).slice(0, 3).length > 0 && (
+                      <div className="text-slate-400 text-[11px] mt-1 flex flex-wrap gap-1">
+                        {(o.line_items || []).slice(0, 3).map((li, i) => {
+                          const pr = productFor(li.sku, lookup);
+                          return <span key={i} className="text-slate-400">{pr.name || li.title || li.sku}{i < Math.min(2, o.line_items.length - 1) ? ',' : ''}</span>;
+                        })}
+                        {o.line_items.length > 3 && <span className="text-slate-600">+{o.line_items.length - 3} more</span>}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-slate-500 text-sm">No orders on file for this customer.</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MiniStat({ label, value }) {
+  return (
+    <div className="rounded-lg bg-gray-900/60 border border-gray-800 px-2.5 py-1.5">
+      <div className="text-[10px] text-slate-500 uppercase tracking-wide">{label}</div>
+      <div className="text-sm font-semibold text-slate-100 tabular-nums">{value}</div>
     </div>
   );
 }

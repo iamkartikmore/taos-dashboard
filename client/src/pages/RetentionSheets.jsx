@@ -1,12 +1,12 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Download, Table2, Sparkles } from 'lucide-react';
+import { Download, Table2, Sparkles, Package } from 'lucide-react';
 import { useStore } from '../store';
 import { buildAllFeatures } from '../lib/retention/features';
 import { buildAffinity } from '../lib/retention/affinity';
 import { buildTaxonomy, applyTaxonomy } from '../lib/retention/taxonomy';
 import { rankAllOpportunities } from '../lib/retention/opportunities';
 import { buildProductLookup, productFor } from '../lib/retention/productLookup';
-import { downloadCsv } from '../lib/retention/exportCsv';
+import { downloadCsv, downloadCsvBundle } from '../lib/retention/exportCsv';
 
 /**
  * One-stop view of every auto-computed retention dataset for the
@@ -82,6 +82,16 @@ export default function RetentionSheets() {
     }
   };
 
+  // Single-file bundle — avoids firing 7 download dialogs.
+  const exportBundle = () => {
+    if (!compiled) return;
+    const sheets = SHEETS
+      .map(s => ({ name: s.label, rows: buildRows(s.id, compiled, lookup) }))
+      .filter(s => s.rows.length);
+    if (!sheets.length) return;
+    downloadCsvBundle(sheets, `${(brand?.name || 'brand').toLowerCase().replace(/\s+/g,'-')}-retention`);
+  };
+
   return (
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between gap-4">
@@ -107,9 +117,17 @@ export default function RetentionSheets() {
             {computing ? 'Computing…' : 'Recompute'}
           </button>
           <button
-            onClick={exportEverything}
+            onClick={exportBundle}
             disabled={!compiled}
             className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-sm text-white font-medium flex items-center gap-1.5"
+            title="Download every sheet as one bundled CSV (sections separated by # === Name === markers)"
+          >
+            <Package className="w-4 h-4" /> Bundle
+          </button>
+          <button
+            onClick={exportEverything}
+            disabled={!compiled}
+            className="px-3 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 disabled:opacity-40 text-sm text-slate-200 font-medium flex items-center gap-1.5"
             title="Download every sheet as separate CSVs"
           >
             <Sparkles className="w-4 h-4" /> Export all
