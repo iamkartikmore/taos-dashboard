@@ -220,10 +220,16 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
 
     const stockConstrained = inventoryPosture === 'oos' || inventoryPosture === 'critical';
 
-    /* ── feed layer: does Google even serve this? ────────────────── */
-    const feedRec = merchantBySku?.get?.(s.sku) || null;
+    /* ── feed layer: does Google even serve this? ──────────────────
+       We can only assert 'absent' when we actually have a merchant feed
+       to compare against. If merchantBySku is null (feed not pulled),
+       feedPosture stays 'unknown' so the absence doesn't cascade into
+       blocking every SKU. */
+    const hasFeedData  = !!merchantBySku;
+    const feedRec      = hasFeedData ? (merchantBySku.get?.(s.sku) || null) : null;
     const inFeed       = !!feedRec;
-    const feedStatus   = feedRec?.status?.primaryStatus || (inFeed ? 'unknown' : 'absent');
+    const feedStatus   = !hasFeedData ? 'unknown'
+                        : feedRec?.status?.primaryStatus || (inFeed ? 'unknown' : 'absent');
     const feedApproved = feedStatus === 'approved';
     const feedDisapproved = feedStatus === 'disapproved';
     const feedIssues   = feedRec?.status?.itemIssues || [];
