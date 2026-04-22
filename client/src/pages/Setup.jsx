@@ -420,7 +420,12 @@ function BrandCard({ brand, brandInfo }) {
     if (!hasClarity) return;
     setPullingClarity(true);
     try { await doPullClarity(); }
-    catch (e) { setBrandClarityStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Clarity: ${e.message}`); }
+    catch (e) {
+      const is429 = /429|rate|limit|too many/i.test(e.message || '');
+      const msg = is429 ? 'Daily Clarity quota exhausted (10/day). Resets at midnight UTC.' : e.message;
+      setBrandClarityStatus(brand.id, 'error', msg);
+      appendLog(`[${brand.name}] ❌ Clarity: ${msg}`);
+    }
     finally { setPullingClarity(false); }
   };
 

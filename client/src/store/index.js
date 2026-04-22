@@ -465,6 +465,33 @@ export const useStore = create((set, get) => {
       set({ brandData });
     },
 
+    /* Re-run the Clarity normalizer on every stored snapshot without
+       hitting the API. Useful after the analytics library updates
+       (fixes old snapshots in-place without burning daily quota). */
+    reanalyzeBrandClarity: async (brandId) => {
+      const cur = get().brandData[brandId] || {};
+      if (!cur.clarityHistory?.length) return { updated: 0 };
+      const { reanalyzeSnapshot } = await import('../lib/clarityAnalytics');
+      const newHistory = cur.clarityHistory.map(h => ({
+        at: h.at,
+        snapshot: reanalyzeSnapshot(h.snapshot),
+      }));
+      const latestSnap = newHistory[newHistory.length - 1]?.snapshot;
+      const brandData = { ...get().brandData, [brandId]: {
+        ...cur,
+        clarityHistory: newHistory,
+        clarityData:    latestSnap,
+      }};
+      set({ brandData });
+      try {
+        const LS_KEY = 'taos_clarity_history_v1';
+        const all = lsGet(LS_KEY, {});
+        all[brandId] = newHistory;
+        lsSet(LS_KEY, all);
+      } catch { /* quota */ }
+      return { updated: newHistory.length };
+    },
+
     setBrandListmonkData: (brandId, data) => {
       const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), listmonkData: data, listmonkStatus: 'success', listmonkFetchAt: Date.now() } };
       set({ brandData });

@@ -3,10 +3,11 @@ import { motion } from 'framer-motion';
 import {
   MousePointerClick, AlertTriangle, Zap, Eye, Users, Globe2,
   TrendingUp as TrendingUpIcon, TrendingDown, RefreshCw, ExternalLink,
-  Flame, Bug, ArrowRight, Download, Package,
+  Flame, Bug, ArrowRight, Download, Package, Wand2,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { fetchClarity } from '../lib/api';
+import { reanalyzeSnapshot } from '../lib/clarityAnalytics';
 import {
   normalizeClaritySnapshot, claritySummary,
   rageClickHotspots, deadClickHotspots, quickBackHotspots, jsErrorHotspots,
@@ -60,11 +61,25 @@ function shortUrl(u) {
   catch { return u; }
 }
 
+function msUntilUtcMidnight() {
+  const now = new Date();
+  const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+  return midnight - now;
+}
+
+function formatCountdown(ms) {
+  if (ms < 0) return 'now';
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  return `${h}h ${m}m`;
+}
+
 export default function ClarityInsights() {
-  const { brands, activeBrandIds, brandData, setBrandClarityData, setBrandClarityStatus } = useStore();
+  const { brands, activeBrandIds, brandData, setBrandClarityData, setBrandClarityStatus, reanalyzeBrandClarity } = useStore();
   const cBrands = (brands || []).filter(b => activeBrandIds.includes(b.id) && b.clarity?.apiToken);
   const [selectedBrandId, setSelectedBrandId] = useState(() => cBrands[0]?.id || '');
   const [pulling, setPulling] = useState(false);
+  const [reanalyzing, setReanalyzing] = useState(false);
   const [tab, setTab] = useState('overview');
 
   const brand     = brands.find(b => b.id === selectedBrandId);
@@ -99,11 +114,29 @@ export default function ClarityInsights() {
       const snap = normalizeClaritySnapshot(raw);
       setBrandClarityData(brand.id, snap);
     } catch (e) {
-      setBrandClarityStatus(brand.id, 'error', e.message);
+      // Friendlier message for the daily quota case
+      const is429 = /429|rate|limit|too many/i.test(e.message || '');
+      const msg = is429
+        ? `Daily Clarity quota exhausted (10 calls/project/day). Resets in ${formatCountdown(msUntilUtcMidnight())} at midnight UTC.`
+        : e.message;
+      setBrandClarityStatus(brand.id, 'error', msg);
     } finally {
       setPulling(false);
     }
   };
+
+  const handleReanalyze = async () => {
+    if (!brand || reanalyzing) return;
+    setReanalyzing(true);
+    try {
+      await reanalyzeBrandClarity(brand.id);
+    } finally {
+      setReanalyzing(false);
+    }
+  };
+
+  const hasRaw = !!snapshot?._raw;
+  const quotaError = /quota|429|rate/i.test(bd.clarityError || '');
 
   if (!cBrands.length) {
     return (
@@ -174,12 +207,34 @@ export default function ClarityInsights() {
             {cBrands.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
           </select>
         )}
-        <button onClick={handlePull} disabled={pulling}
-          className="ml-auto px-3 py-1.5 rounded-lg bg-cyan-700/30 border border-cyan-800/40 text-cyan-300 text-xs flex items-center gap-1.5 hover:bg-cyan-700/50 disabled:opacity-40">
-          {pulling ? <RefreshCw size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-          {pulling ? 'Pulling…' : 'Pull fresh (5/10 daily calls)'}
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          {hasRaw && (
+            <button onClick={handleReanalyze} disabled={reanalyzing}
+              className="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 border border-gray-700 text-slate-300 text-xs flex items-center gap-1.5 disabled:opacity-40"
+              title="Re-run analytics on stored snapshots without using API quota. Use after a library update.">
+              {reanalyzing ? <RefreshCw size={12} className="animate-spin" /> : <Wand2 size={12} />}
+              {reanalyzing ? 'Re-analyzing…' : 'Re-analyze stored'}
+            </button>
+          )}
+          <button onClick={handlePull} disabled={pulling}
+            className="px-3 py-1.5 rounded-lg bg-cyan-700/30 border border-cyan-800/40 text-cyan-300 text-xs flex items-center gap-1.5 hover:bg-cyan-700/50 disabled:opacity-40">
+            {pulling ? <RefreshCw size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+            {pulling ? 'Pulling…' : 'Pull fresh (5/10 daily calls)'}
+          </button>
+        </div>
       </div>
+
+      {/* Quota exhausted banner */}
+      {quotaError && (
+        <div className="px-4 py-3 rounded-xl border border-amber-800/40 bg-amber-900/20 text-amber-200 text-xs flex items-start gap-2">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          <div className="flex-1">
+            <div className="font-semibold">Clarity daily quota exhausted</div>
+            <div className="text-amber-200/80 mt-0.5">{bd.clarityError}</div>
+            {hasRaw && <div className="text-amber-200/60 mt-1">Use "Re-analyze stored" above to re-process your existing {history.length} snapshot(s) with the latest algorithm — no API calls consumed.</div>}
+          </div>
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="flex gap-1 p-1 bg-gray-900 rounded-xl border border-gray-800 w-fit overflow-x-auto">

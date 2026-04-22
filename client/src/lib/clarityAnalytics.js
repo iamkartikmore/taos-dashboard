@@ -123,7 +123,9 @@ function pivotClarityResponse(metricBlocks = [], dimensionKeys = []) {
 
 /* ─── NORMALIZE SNAPSHOT ────────────────────────────────────────────
    Accepts the server response (with 5 dimension slices) and returns a
-   unified shape with per-slice rows + totals. */
+   unified shape with per-slice rows. ALSO preserves the raw response
+   under `_raw` so that if our normalizer logic changes later, we can
+   re-pivot historical snapshots without spending more API calls. */
 export function normalizeClaritySnapshot(raw) {
   if (!raw) return null;
   return {
@@ -136,7 +138,28 @@ export function normalizeClaritySnapshot(raw) {
     byChannel:      pivotClarityResponse(raw.channel || [],       ['Channel']),
     byCountry:      pivotClarityResponse(raw.country || [],       ['Country']),
     byDeviceBrowser: pivotClarityResponse(raw.deviceBrowser || [], ['Device', 'Browser']),
+    // Stash raw responses — re-normalize cheaply if the library updates
+    _raw: {
+      url:            raw.url || [],
+      urlDevice:      raw.urlDevice || [],
+      channel:        raw.channel || [],
+      country:        raw.country || [],
+      deviceBrowser:  raw.deviceBrowser || [],
+    },
   };
+}
+
+/* Re-run the pivot on a stored snapshot's preserved raw response —
+   no API call, uses only local data. Useful after library upgrades. */
+export function reanalyzeSnapshot(snapshot) {
+  if (!snapshot?._raw) return snapshot; // nothing to re-process
+  return normalizeClaritySnapshot({
+    pulledAt:  snapshot.pulledAt,
+    period:    snapshot.period,
+    numOfDays: snapshot.numOfDays,
+    errors:    snapshot.errors,
+    ...snapshot._raw,
+  });
 }
 
 /* ─── TOTALS (for KPI strip) ────────────────────────────────────── */
