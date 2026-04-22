@@ -56,7 +56,7 @@ const DEFAULT_SAFETY_DAYS    = 7;
 const OVERSTOCK_DAYS         = 180;
 
 /* ─── BUILD ─────────────────────────────────────────────────────── */
-export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, procurement = {}, preset = 'balanced', windowDays = 90 } = {}) {
+export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, procurement = {}, merchantBySku = null, preset = 'balanced', windowDays = 90 } = {}) {
   const now = new Date();
   const windowStart = new Date(now.getTime() - windowDays * 86400000);
   const cutoff30    = new Date(now.getTime() - 30 * 86400000);
@@ -218,6 +218,17 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
 
     const stockConstrained = inventoryPosture === 'oos' || inventoryPosture === 'critical';
 
+    /* ── feed layer: does Google even serve this? ────────────────── */
+    const feedRec = merchantBySku?.get?.(s.sku) || null;
+    const inFeed       = !!feedRec;
+    const feedStatus   = feedRec?.status?.primaryStatus || (inFeed ? 'unknown' : 'absent');
+    const feedApproved = feedStatus === 'approved';
+    const feedDisapproved = feedStatus === 'disapproved';
+    const feedIssues   = feedRec?.status?.itemIssues || [];
+    const feedAvail    = feedRec?.availability || null;
+    // Feed posture: 'absent' | 'disapproved' | 'pending' | 'approved' | 'unknown'
+    const feedPosture  = feedStatus;
+
     return {
       ...s,
       revenueShare, grossContribution, momentum,
@@ -226,6 +237,11 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
       inventoryPosture, inventoryAction, stockConstrained,
       gatewayRate, repeatRate, bundleRate,
       hasHistory, thinData: s.ordersWindow < 5 || !hasHistory,
+      // feed slice
+      inFeed, feedStatus, feedApproved, feedDisapproved, feedIssues, feedAvail, feedPosture,
+      feedLink:  feedRec?.link || null,
+      feedImage: feedRec?.imageLink || null,
+      feedTopIssue: feedIssues[0]?.description || null,
     };
   });
 
@@ -269,7 +285,7 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
         s.quadrant = s.bundleRate >= 0.60 ? 'bundle' : 'question';
       } else                       { s.action = 'EXIT';        s.quadrant = 'dog'; }
     }
-    s.composedAction = composeAction(s.action, s.inventoryPosture);
+    s.composedAction = composeAction(s.action, s.inventoryPosture, s.feedPosture);
     s.budgetCap      = adBudgetCap(s);
   });
 
@@ -368,8 +384,27 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
    Layer the commercial quadrant with the inventory posture. Stock
    constraints *veto* scale actions (you can't scale what you can't
    ship), and they *convert* exit actions (delist-clean vs. liquidate). */
-function composeAction(commercial, posture) {
+function composeAction(commercial, posture, feedPosture = 'unknown') {
   if (commercial === 'INVESTIGATE') return { label: 'INVESTIGATE', severity: 'info', hint: 'Thin data — revisit.' };
+
+  /* ── feed veto: if Google won't serve it, scale actions are moot ──
+     A disapproved SKU can still earn Shopify revenue organically; that's
+     why we only *degrade* the action here rather than hiding it. Absent
+     from feed = uploadable fix. Disapproved = fixable via feed/page edit. */
+  if (feedPosture === 'disapproved') {
+    if (commercial === 'DOUBLE DOWN')  return { label: 'FIX FEED · BLOCKED SCALE', severity: 'critical', hint: 'Winner SKU but feed disapproved — ads not serving. Resolve the disapproval; spend is locked out until then.' };
+    if (commercial === 'MILK')         return { label: 'FIX FEED · PROTECT CASH',  severity: 'high',     hint: 'Cash cow disapproved in feed. Organic revenue exists; fix the feed to unlock paid support.' };
+    if (commercial === 'BET')          return { label: 'FIX FEED BEFORE TEST',     severity: 'medium',   hint: 'Can\'t test ad scale with a disapproved feed listing. Fix first.' };
+    if (commercial === 'BUNDLE')       return { label: 'FIX FEED · BUNDLE',        severity: 'medium',   hint: 'Bundle attachment will still work organically; fix feed to pair with paid traffic.' };
+    // EXIT stays EXIT — no point fixing a disapproval on a SKU you're delisting.
+  }
+  if (feedPosture === 'absent' && (commercial === 'DOUBLE DOWN' || commercial === 'MILK' || commercial === 'BET')) {
+    // Not in feed at all — upload + approve before any paid scale makes sense.
+    if (commercial === 'DOUBLE DOWN')  return { label: 'LIST IN FEED · SCALE', severity: 'high',   hint: 'Winner selling organically but missing from Google Merchant feed — upload, then scale.' };
+    if (commercial === 'MILK')         return { label: 'LIST IN FEED',         severity: 'medium', hint: 'Cash cow not in merchant feed. Add it to open up a paid channel.' };
+    if (commercial === 'BET')          return { label: 'LIST IN FEED · TEST',  severity: 'medium', hint: 'Not in feed — upload before running a scale test.' };
+  }
+
   switch (commercial) {
     case 'DOUBLE DOWN':
       if (posture === 'oos')       return { label: 'HALT ADS · RESTOCK',  severity: 'critical', hint: 'Scaling was best bet but stock is out. Pause spend, expedite PO.' };

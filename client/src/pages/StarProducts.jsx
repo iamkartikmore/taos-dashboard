@@ -327,6 +327,7 @@ function DecisionTable({ skus, search, actionFilter }) {
               <th className="px-3 py-2.5">SKU</th>
               <th className="px-3 py-2.5">Quadrant</th>
               <th className="px-3 py-2.5">Stock</th>
+              <th className="px-3 py-2.5">Feed</th>
               <th className="px-3 py-2.5">Recommended Action</th>
               <th className="px-3 py-2.5 text-right">Star</th>
               <th className="px-3 py-2.5 text-right">Revenue</th>
@@ -361,6 +362,23 @@ function DecisionTable({ skus, search, actionFilter }) {
                     >
                       {posture.label}
                     </span>
+                  </td>
+                  <td className="px-3 py-2">
+                    {(() => {
+                      const fs = s.feedStatus;
+                      const cls = fs === 'approved'    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                : fs === 'disapproved' ? 'bg-red-500/15 text-red-300 border-red-500/40'
+                                : fs === 'pending'     ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                : fs === 'absent'      ? 'bg-purple-500/15 text-purple-300 border-purple-500/30'
+                                : 'bg-gray-500/10 text-slate-400 border-gray-500/20';
+                      const label = fs === 'approved' ? 'OK' : fs === 'absent' ? 'NOT IN FEED' : (fs || 'N/A').toUpperCase();
+                      const title = s.feedTopIssue ? `${fs}: ${s.feedTopIssue}` : fs === 'absent' ? 'Not in Google Merchant feed' : fs || 'Merchant data not loaded';
+                      return (
+                        <span title={title} className={clsx('inline-block px-2 py-0.5 rounded text-[10px] font-bold border', cls)}>
+                          {label}
+                        </span>
+                      );
+                    })()}
                   </td>
                   <td className="px-3 py-2">
                     <span
@@ -518,6 +536,7 @@ export default function StarProducts() {
   const inventoryMap = bData.inventoryMap || {};
   const ordersFetchedAt = bData.ordersFetchedAt;
   const ordersStatus    = bData.ordersStatus;
+  const merchantBySku   = bData.merchantData?.bySku || null;
 
   const selectedBrandObj = brands.find(b => b.id === viewingBrandId);
 
@@ -532,8 +551,8 @@ export default function StarProducts() {
   const plan = useMemo(() => ({ grossMarginPct: loadPlanMargin(viewingBrandId) }), [viewingBrandId]);
 
   const analysis = useMemo(
-    () => buildStarProducts({ orders, inventoryMap, plan, procurement, preset, windowDays }),
-    [orders, inventoryMap, plan, procurement, preset, windowDays],
+    () => buildStarProducts({ orders, inventoryMap, plan, procurement, merchantBySku, preset, windowDays }),
+    [orders, inventoryMap, plan, procurement, merchantBySku, preset, windowDays],
   );
 
   const { skus, summary, concentration, bundles, medians } = analysis;

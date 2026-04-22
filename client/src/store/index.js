@@ -37,7 +37,7 @@ export function makeBrand(name = 'New Brand', idx = 0) {
     meta:    { token: '', apiVersion: 'v21.0', accounts: [] },
     shopify: { shop: '', clientId: '', clientSecret: '' },
     ga:      { propertyId: '', serviceAccountJson: '' },
-    googleAds: { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '' },
+    googleAds: { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '', merchantId: '' },
     listmonk: { url: '', username: '', password: '', defaultListId: '', fromEmail: '' },
   };
 }
@@ -58,7 +58,8 @@ function loadBrands() {
     // Backfill missing googleAds / listmonk fields on existing brands
     return stored.map(b => {
       const u = { ...b };
-      if (!u.googleAds) u.googleAds = { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '' };
+      if (!u.googleAds) u.googleAds = { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '', merchantId: '' };
+      else if (u.googleAds.merchantId === undefined) u.googleAds.merchantId = '';
       if (!u.listmonk)  u.listmonk  = { url: '', username: '', password: '', defaultListId: '', fromEmail: '' };
       return u;
     });
@@ -386,6 +387,16 @@ export const useStore = create((set, get) => {
 
     setBrandGoogleAdsStatus: (brandId, status, error = null) => {
       const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), googleAdsStatus: status, googleAdsError: error } };
+      set({ brandData });
+    },
+
+    setBrandMerchantData: (brandId, data) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), merchantData: data, merchantStatus: 'success', merchantFetchAt: Date.now() } };
+      set({ brandData });
+    },
+
+    setBrandMerchantStatus: (brandId, status, error = null) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), merchantStatus: status, merchantError: error } };
       set({ brandData });
     },
 

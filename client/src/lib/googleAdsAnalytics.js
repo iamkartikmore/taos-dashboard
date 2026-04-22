@@ -355,6 +355,46 @@ export function normalizeShopping(rows = []) {
   }));
 }
 
+/**
+ * Same data as normalizeShopping but keyed by (campaignId, productItemId) so
+ * the merchant blend can roll up *per campaign* (which SKUs a campaign is
+ * actually spending on). normalizeShopping collapses that dimension.
+ */
+export function normalizeShoppingByCampaign(rows = []) {
+  const map = new Map();
+  rows.forEach(r => {
+    const itemId = r.segments?.productItemId;
+    if (!itemId) return;
+    const campaignId   = r.campaign?.id ? String(r.campaign.id) : '';
+    const campaignName = r.campaign?.name || '';
+    const key = `${campaignId}|${itemId}`;
+    const existing = map.get(key) || {
+      campaignId, campaignName,
+      productItemId: itemId,
+      productId:    itemId,
+      productTitle: r.segments?.productTitle,
+      productBrand: r.segments?.productBrand,
+      productType:  r.segments?.productTypeL1,
+      channel:      r.segments?.productChannel,
+      impressions: 0, clicks: 0, cost: 0, conversions: 0, conversionValue: 0,
+    };
+    const m = commonMetrics(r.metrics || {});
+    existing.impressions     += m.impressions;
+    existing.clicks          += m.clicks;
+    existing.cost            += m.cost;
+    existing.conversions     += m.conversions;
+    existing.conversionValue += m.conversionValue;
+    map.set(key, existing);
+  });
+  return Array.from(map.values()).map(p => ({
+    ...p,
+    conversionsValue: p.conversionValue, // alias for blend library compatibility
+    ctr:  p.impressions > 0 ? p.clicks / p.impressions : 0,
+    roas: p.cost > 0 ? p.conversionValue / p.cost : 0,
+    cpa:  p.conversions > 0 ? p.cost / p.conversions : 0,
+  }));
+}
+
 export function normalizeChangeEvents(rows = []) {
   return rows.map(r => {
     const e = r.changeEvent || {};
@@ -403,6 +443,7 @@ export function normalizeGoogleAdsResponse(raw = {}) {
     age:            normalizeBreakdownAge(raw.age),
     gender:         normalizeBreakdownGender(raw.gender),
     shopping:       normalizeShopping(raw.shopping),
+    shoppingByCampaign: normalizeShoppingByCampaign(raw.shopping),
     changeEvents:   normalizeChangeEvents(raw.changeEvents),
     budgets:        normalizeBudgets(raw.budgets),
     errors:         raw.errors || {},

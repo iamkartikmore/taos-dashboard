@@ -357,6 +357,32 @@ export async function fetchGoogleAds(creds, datePreset = 'last_30d', onProgress)
   return json;
 }
 
+/* ─── GOOGLE MERCHANT CENTER ─────────────────────────────────────── */
+
+export async function verifyMerchant(creds) {
+  const res = await fetch('/api/google-merchant/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(creds),
+  });
+  const json = await res.json();
+  if (!res.ok || !json.ok) throw new Error(json.error || 'Merchant Center verification failed');
+  return json;
+}
+
+export async function fetchMerchant(creds, onProgress) {
+  onProgress?.('Pulling Merchant Center feed...');
+  const res = await fetch('/api/google-merchant/pull', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(creds),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'Merchant Center API error');
+  onProgress?.(`✓ Merchant — products:${json.products?.length || 0} statuses:${json.productStatuses?.length || 0}`);
+  return json;
+}
+
 /* ─── LISTMONK ───────────────────────────────────────────────────── */
 
 async function listmonkCall(path, creds, body) {

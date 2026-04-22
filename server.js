@@ -687,7 +687,8 @@ app.post('/api/google-ads/pull', async (req, res) => {
         FROM gender_view
         WHERE segments.date DURING ${during}`,
       shopping: `
-        SELECT segments.product_item_id, segments.product_title, segments.product_brand,
+        SELECT campaign.id, campaign.name,
+          segments.product_item_id, segments.product_title, segments.product_brand,
           segments.product_type_l1, segments.product_channel,
           metrics.impressions, metrics.clicks, metrics.cost_micros,
           metrics.conversions, metrics.conversions_value
@@ -741,6 +742,94 @@ app.post('/api/google-ads/pull', async (req, res) => {
     const gErr = err.response?.data?.error;
     const msg  = gErr?.details?.[0]?.errors?.[0]?.message || gErr?.message || err.message;
     res.status(err.response?.status || 500).json({ error: msg });
+  }
+});
+
+/* ─── GOOGLE MERCHANT CENTER (Content API v2.1) ─────────────────────
+   GMC feeds power Shopping / Performance Max campaigns. The Google Ads
+   `shopping_performance_view` only tells us *which item_ids spent how
+   much*; GMC tells us *the whole picture* — approval status, per-SKU
+   disapprovals, price/availability Google actually has on file, which
+   is the gap we need to diagnose feed-level revenue leaks.
+   ──────────────────────────────────────────────────────────────────── */
+
+const GMC_BASE = 'https://shoppingcontent.googleapis.com/content/v2.1';
+
+async function gmcListAll({ accessToken, merchantId, resource, params = {} }) {
+  const all = [];
+  let pageToken;
+  for (let page = 0; page < 100; page++) {
+    const qs = new URLSearchParams({ maxResults: '250', ...params });
+    if (pageToken) qs.set('pageToken', pageToken);
+    const url = `${GMC_BASE}/${merchantId}/${resource}?${qs.toString()}`;
+    const r = await withRetry(() => axios.get(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      timeout: 60000,
+    }));
+    if (r.data.resources?.length) all.push(...r.data.resources);
+    pageToken = r.data.nextPageToken;
+    if (!pageToken) break;
+  }
+  return all;
+}
+
+// POST /api/google-merchant/verify — confirms credentials + scope, returns account info
+app.post('/api/google-merchant/verify', async (req, res) => {
+  const { clientId, clientSecret, refreshToken, merchantId } = req.body;
+  if (!clientId || !clientSecret || !refreshToken || !merchantId) {
+    return res.status(400).json({ ok: false, error: 'clientId, clientSecret, refreshToken, merchantId required' });
+  }
+  try {
+    const accessToken = await getGadsAccessToken(clientId, clientSecret, refreshToken);
+    // accounts.authinfo — user must have content scope AND access to this merchantId
+    const authInfo = await axios.get(`${GMC_BASE}/accounts/authinfo`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      timeout: 15000,
+    });
+    const accountIds = (authInfo.data?.accountIdentifiers || []).map(a => a.merchantId || a.aggregatorId);
+    const hasAccess = accountIds.some(id => String(id) === String(merchantId));
+    // Pull account details for the merchant
+    let accountName;
+    try {
+      const acct = await axios.get(`${GMC_BASE}/${merchantId}/accounts/${merchantId}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        timeout: 15000,
+      });
+      accountName = acct.data?.name;
+    } catch { /* non-aggregator accounts can't query sub-account — fine */ }
+    res.json({ ok: true, hasAccess, accountIds, accountName });
+  } catch (err) {
+    const msg = err.response?.data?.error?.message || err.message;
+    const status = err.response?.status || 500;
+    // Scope missing is the common "works but fails" case — surface it plainly
+    const scopeHint = /insufficient|scope|unauthorized/i.test(msg)
+      ? ' — re-authorize with the `content` scope. The current refresh token only has `adwords`.'
+      : '';
+    res.status(status).json({ ok: false, error: msg + scopeHint });
+  }
+});
+
+// POST /api/google-merchant/pull — products + product statuses for a single merchant
+app.post('/api/google-merchant/pull', async (req, res) => {
+  const { clientId, clientSecret, refreshToken, merchantId } = req.body;
+  if (!clientId || !clientSecret || !refreshToken || !merchantId) {
+    return res.status(400).json({ error: 'clientId, clientSecret, refreshToken, merchantId required' });
+  }
+  const startMs = Date.now();
+  try {
+    const accessToken = await getGadsAccessToken(clientId, clientSecret, refreshToken);
+    const [products, productStatuses] = await Promise.all([
+      gmcListAll({ accessToken, merchantId, resource: 'products' }),
+      gmcListAll({ accessToken, merchantId, resource: 'productstatuses', params: { destinations: 'Shopping' } }),
+    ]);
+    res.json({ products, productStatuses, fetchMs: Date.now() - startMs });
+  } catch (err) {
+    const gErr = err.response?.data?.error;
+    const msg  = gErr?.message || err.message;
+    const scopeHint = /insufficient|scope|unauthorized/i.test(msg)
+      ? ' — re-authorize with the `content` scope.'
+      : '';
+    res.status(err.response?.status || 500).json({ error: msg + scopeHint });
   }
 });
 

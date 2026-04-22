@@ -7,9 +7,11 @@ import {
 import {
   Search, TrendingUp, Monitor, Clock, Users, ShoppingBag,
   Target, RefreshCw, Zap, ChevronRight, Download, Brain,
+  Package, AlertTriangle, GhostIcon, PackageX, Link2Off,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { totalsFromNormalized } from '../lib/googleAdsAnalytics';
+import { blendAdsMerchant, shopifyBySkuFromOrders } from '../lib/googleAdsMerchantBlend';
 import GoogleAdsIntel from './GoogleAdsIntel';
 
 /* ─── FORMATTERS ─────────────────────────────────────────────────── */
@@ -139,6 +141,7 @@ function SortableTable({ rows, cols, defaultSort, maxHeight = '520px', onRowClic
 const TABS = [
   { id: 'overview',    label: 'Overview',     icon: Zap },
   { id: 'intel',       label: 'Intelligence', icon: Brain },
+  { id: 'feed',        label: 'Feed Health',  icon: Package },
   { id: 'campaigns',   label: 'Campaigns',    icon: Target },
   { id: 'adgroups',    label: 'Ad Groups',    icon: Target },
   { id: 'ads',         label: 'Ads',          icon: Target },
@@ -149,6 +152,245 @@ const TABS = [
   { id: 'demo',        label: 'Demographics', icon: Users },
   { id: 'shopping',    label: 'Shopping',     icon: ShoppingBag },
 ];
+
+/* ─── FEED HEALTH TAB ─────────────────────────────────────────────
+   Answers three questions an operator can't get from Google Ads alone:
+     1. Is my feed the reason my ROAS is soft? (leaks, OOS burn, orphans)
+     2. Which products are ACTUALLY carrying each campaign? (per-camp mix)
+     3. Which categories are my real drivers? (product-type rollup)
+   ─────────────────────────────────────────────────────────────────── */
+function FeedHealthTab({ blend, merchantData, campaignsById }) {
+  if (!blend) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center">
+        <Package size={36} className="text-slate-600 mx-auto mb-3" />
+        <p className="text-sm text-slate-400">No merchant feed or shopping data loaded.</p>
+        <p className="text-[11px] text-slate-600 mt-1">Pull Google Merchant Center in Study Manual, or confirm this account runs Shopping.</p>
+      </div>
+    );
+  }
+
+  const { bySku, byCampaign, byProductType, orphans, leaks, oosBurn, ghosts, totals } = blend;
+  const summary = merchantData?.summary;
+  const hasFeed = !!merchantData;
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-5">
+      {/* Top row: feed health KPIs */}
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
+        {hasFeed ? (
+          <>
+            <KPI label="Feed SKUs"
+              value={num(summary?.total || 0)}
+              sub={`${pct(summary?.approvalRate || 0)} approved`} color="#f59e0b" />
+            <KPI label="Disapproved"
+              value={num(summary?.disapproved || 0)}
+              sub={summary?.demoted ? `${num(summary.demoted)} demoted` : 'items Google won\'t serve'} color="#ef4444" />
+            <KPI label="Out of Stock"
+              value={num(summary?.oos || 0)} sub="in feed" color="#fb923c" />
+            <KPI label="Wasted Spend"
+              value={cur(totals.wastedSpend)}
+              sub="on disapproved SKUs" color={totals.wastedSpend > 0 ? '#ef4444' : '#22c55e'} />
+          </>
+        ) : (
+          <>
+            <KPI label="SKUs in Shopping" value={num(totals.skuCount)} sub="from shopping_performance_view" color="#f59e0b" />
+            <KPI label="Ad Spend" value={cur(totals.adSpend)} sub={`${dec(totals.adSpend > 0 ? totals.adRev / totals.adSpend : 0, 2)} ROAS`} />
+            <KPI label="Shopify Rev" value={cur(totals.shopRev)} sub={`${num(bySku.filter(r => r.shopRevenue > 0).length)} SKUs sold`} color="#22c55e" />
+            <KPI label="Orphans" value={num(orphans.length)} sub={`${cur(totals.orphanRev)} unadvertised`} color="#a78bfa" />
+          </>
+        )}
+      </div>
+
+      {!hasFeed && (
+        <div className="px-4 py-3 bg-amber-900/20 border border-amber-800/40 rounded-lg text-xs text-amber-200">
+          <div className="font-semibold mb-1">Merchant feed not connected.</div>
+          <div className="text-amber-200/70">Connect Google Merchant Center in Study Manual to see feed approval, disapprovals, and per-SKU ad economics.</div>
+        </div>
+      )}
+
+      {/* Top issues from feed */}
+      {hasFeed && summary?.topIssues?.length > 0 && (
+        <Card title={`Top Feed Issues (${summary.topIssues.length})`}>
+          <div className="overflow-auto" style={{ maxHeight: '280px' }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                <tr>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Issue</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Attribute</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Severity</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">SKUs Affected</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Example</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summary.topIssues.slice(0, 20).map((i, idx) => (
+                  <tr key={i.code} className={idx % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                    <td className="px-3 py-2 text-slate-300">{i.description || i.code}</td>
+                    <td className="px-3 py-2 text-slate-400 text-[11px]">{i.attribute || '—'}</td>
+                    <td className="px-3 py-2">
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                        i.servability === 'disapproved' ? 'bg-red-900/40 text-red-300' :
+                        i.servability === 'demoted' ? 'bg-amber-900/40 text-amber-300' :
+                        'bg-slate-800 text-slate-400'}`}>
+                        {i.servability || 'info'}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-white">{num(i.count)}</td>
+                    <td className="px-3 py-2 text-[11px] text-slate-500">{i.exampleSku}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* Leaks: ad spend on disapproved SKUs */}
+      {leaks.length > 0 && (
+        <Card title={<span className="flex items-center gap-2"><AlertTriangle size={14} className="text-red-400" /> Wasted Spend — Disapproved in Feed ({leaks.length})</span>}>
+          <p className="text-[11px] text-slate-500 mb-3">Ads ran on SKUs that Google's feed marks as disapproved. Spend, zero serving. Fix the feed, don't pause the ads.</p>
+          <SortableTable rows={leaks.slice(0, 50)} maxHeight="360px" cols={[
+            { key: 'sku', label: 'SKU', fn: r => <span className="font-mono text-[11px]">{r.sku}</span> },
+            { key: 'title', label: 'Title', fn: r => <span className="truncate max-w-[220px] inline-block">{r.title}</span> },
+            { key: 'feedStatus', label: 'Feed', fn: r => <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-900/40 text-red-300">{r.feedStatus}</span> },
+            { key: 'adSpend', label: 'Spend', align: 'right', fn: r => cur(r.adSpend) },
+            { key: 'adImpr', label: 'Impr', align: 'right', fn: r => num(r.adImpr) },
+            { key: 'feedIssues', label: 'Top Issue', fn: r => <span className="text-[10px] text-slate-500 truncate max-w-[220px] inline-block">{r.feedIssues[0]?.description || '—'}</span> },
+          ]} defaultSort={{ key: 'adSpend', dir: 'desc' }} />
+        </Card>
+      )}
+
+      {/* OOS Burn: ad spend on out-of-stock SKUs */}
+      {oosBurn.length > 0 && (
+        <Card title={<span className="flex items-center gap-2"><PackageX size={14} className="text-orange-400" /> OOS Burn — Serving While Out of Stock ({oosBurn.length})</span>}>
+          <p className="text-[11px] text-slate-500 mb-3">Ads driving traffic to pages where the product isn't available. Bad experience + wasted budget.</p>
+          <SortableTable rows={oosBurn.slice(0, 50)} maxHeight="320px" cols={[
+            { key: 'sku', label: 'SKU', fn: r => <span className="font-mono text-[11px]">{r.sku}</span> },
+            { key: 'title', label: 'Title', fn: r => <span className="truncate max-w-[220px] inline-block">{r.title}</span> },
+            { key: 'feedAvail', label: 'Feed Avail', fn: r => <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-900/40 text-orange-300">{r.feedAvail || r.inventoryPosture}</span> },
+            { key: 'adSpend', label: 'Spend', align: 'right', fn: r => cur(r.adSpend) },
+            { key: 'adClicks', label: 'Clicks', align: 'right', fn: r => num(r.adClicks) },
+            { key: 'adRev', label: 'Value', align: 'right', fn: r => cur(r.adRev) },
+          ]} defaultSort={{ key: 'adSpend', dir: 'desc' }} />
+        </Card>
+      )}
+
+      {/* Orphans: Shopify revenue but not in feed */}
+      {orphans.length > 0 && (
+        <Card title={<span className="flex items-center gap-2"><Link2Off size={14} className="text-purple-400" /> Orphan SKUs — Selling, Not in Feed ({orphans.length})</span>}>
+          <p className="text-[11px] text-slate-500 mb-3">These SKUs earn Shopify revenue but aren't in the merchant feed. You can't advertise what Google doesn't know exists.</p>
+          <SortableTable rows={orphans.slice(0, 50)} maxHeight="320px" cols={[
+            { key: 'sku', label: 'SKU', fn: r => <span className="font-mono text-[11px]">{r.sku}</span> },
+            { key: 'title', label: 'Title', fn: r => <span className="truncate max-w-[220px] inline-block">{r.title}</span> },
+            { key: 'shopRevenue', label: 'Shopify Rev', align: 'right', fn: r => cur(r.shopRevenue) },
+            { key: 'shopUnits', label: 'Units', align: 'right', fn: r => num(r.shopUnits) },
+          ]} defaultSort={{ key: 'shopRevenue', dir: 'desc' }} />
+        </Card>
+      )}
+
+      {/* Ghosts: approved + selling but 0 impressions */}
+      {ghosts.length > 0 && (
+        <Card title={<span className="flex items-center gap-2"><GhostIcon size={14} className="text-blue-400" /> Ghost SKUs — Approved but Not Serving ({ghosts.length})</span>}>
+          <p className="text-[11px] text-slate-500 mb-3">In feed, approved, earning Shopify revenue — but 0 ad impressions. Something's suppressing them (campaign filters, negative keywords, bid floors).</p>
+          <SortableTable rows={ghosts.slice(0, 50)} maxHeight="320px" cols={[
+            { key: 'sku', label: 'SKU', fn: r => <span className="font-mono text-[11px]">{r.sku}</span> },
+            { key: 'title', label: 'Title', fn: r => <span className="truncate max-w-[220px] inline-block">{r.title}</span> },
+            { key: 'shopRevenue', label: 'Shopify Rev', align: 'right', fn: r => cur(r.shopRevenue) },
+            { key: 'starAction', label: 'Action', fn: r => <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-900/40 text-blue-300">{r.starAction || '—'}</span> },
+          ]} defaultSort={{ key: 'shopRevenue', dir: 'desc' }} />
+        </Card>
+      )}
+
+      {/* Per-campaign item mix with feed-status roll-up */}
+      {byCampaign.length > 0 && (
+        <Card title={`Per-Campaign Item Mix — Feed Status Roll-up (${byCampaign.length})`}>
+          <p className="text-[11px] text-slate-500 mb-3">Each campaign's spend split by feed approval status. High "disapproved share" = fixing the feed will unlock ROAS on that campaign without touching bids.</p>
+          <div className="overflow-auto" style={{ maxHeight: '440px' }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                <tr>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Campaign</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Spend</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">ROAS</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Approved $</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Disapproved $</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">OOS $</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">SKUs</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Top Item</th>
+                </tr>
+              </thead>
+              <tbody>
+                {byCampaign.map((c, i) => {
+                  const campName = c.campaignName || campaignsById.get(c.campaignId)?.name || c.campaignId;
+                  const top = c.items?.[0];
+                  return (
+                    <tr key={c.campaignId} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                      <td className="px-3 py-2 text-slate-200 truncate max-w-[220px]">{campName}</td>
+                      <td className="px-3 py-2 text-right font-mono">{cur(c.cost)}</td>
+                      <td className="px-3 py-2 text-right font-mono">{dec(c.roas, 2)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-emerald-400">{cur(c.feedRoll?.approvedSpend || 0)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-red-400">
+                        {cur(c.feedRoll?.disapprovedSpend || 0)}
+                        {c.feedRoll?.disapprovedShare > 0.05 && <span className="text-[10px] text-red-400 ml-1">({pct(c.feedRoll.disapprovedShare)})</span>}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-orange-400">{cur(c.feedRoll?.oosSpend || 0)}</td>
+                      <td className="px-3 py-2 text-right font-mono">{num(c.items?.length || 0)}</td>
+                      <td className="px-3 py-2 text-[11px] text-slate-500 truncate max-w-[180px]">
+                        {top ? `${top.title || top.sku} (${pct(top.costShare)})` : '—'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* Per product-type ROAS */}
+      {byProductType.length > 0 && (
+        <Card title={`Product-Type ROAS Breakdown (${byProductType.length})`}>
+          <SortableTable rows={byProductType.slice(0, 30)} maxHeight="360px" cols={[
+            { key: 'productType', label: 'Product Type', fn: r => <span className="truncate max-w-[240px] inline-block">{r.productType}</span> },
+            { key: 'skus', label: 'SKUs', align: 'right', fn: r => num(r.skus) },
+            { key: 'approvalRate', label: 'Approval', align: 'right', fn: r => pct(r.approvalRate) },
+            { key: 'adSpend', label: 'Ad Spend', align: 'right', fn: r => cur(r.adSpend) },
+            { key: 'adRev', label: 'Ad Rev', align: 'right', fn: r => cur(r.adRev) },
+            { key: 'adRoas', label: 'Ad ROAS', align: 'right', fn: r => dec(r.adRoas, 2) },
+            { key: 'shopRev', label: 'Shopify Rev', align: 'right', fn: r => cur(r.shopRev) },
+            { key: 'shopToAd', label: 'Shop÷Ad', align: 'right', fn: r => r.adSpend > 0 ? dec(r.shopToAd, 2) : '—' },
+            { key: 'oosCount', label: 'OOS', align: 'right', fn: r => r.oosCount > 0 ? <span className="text-orange-400">{num(r.oosCount)}</span> : '—' },
+          ]} defaultSort={{ key: 'adSpend', dir: 'desc' }} />
+        </Card>
+      )}
+
+      {/* Full joined SKU list */}
+      {bySku.length > 0 && (
+        <Card title={`All SKUs — Feed × Ads × Shopify (${bySku.length})`}>
+          <SortableTable rows={bySku.slice(0, 200)} maxHeight="480px" cols={[
+            { key: 'sku', label: 'SKU', fn: r => <span className="font-mono text-[11px]">{r.sku}</span> },
+            { key: 'title', label: 'Title', fn: r => <span className="truncate max-w-[200px] inline-block">{r.title}</span> },
+            { key: 'feedStatus', label: 'Feed', fn: r => {
+              const s = r.feedStatus;
+              const cls = s === 'approved' ? 'bg-emerald-900/40 text-emerald-300'
+                : s === 'disapproved' ? 'bg-red-900/40 text-red-300'
+                : s === 'pending'     ? 'bg-amber-900/40 text-amber-300'
+                : s === 'absent'      ? 'bg-purple-900/40 text-purple-300'
+                : 'bg-slate-800 text-slate-400';
+              return <span className={`text-[10px] px-1.5 py-0.5 rounded ${cls}`}>{s}</span>;
+            }},
+            { key: 'feedAvail', label: 'Avail', fn: r => <span className="text-[10px] text-slate-500">{r.feedAvail || '—'}</span> },
+            { key: 'adSpend', label: 'Ad Spend', align: 'right', fn: r => cur(r.adSpend) },
+            { key: 'adRoas', label: 'Ad ROAS', align: 'right', fn: r => r.adSpend > 0 ? dec(r.adRoas, 2) : '—' },
+            { key: 'shopRevenue', label: 'Shop Rev', align: 'right', fn: r => cur(r.shopRevenue) },
+            { key: 'shopUnits', label: 'Units', align: 'right', fn: r => num(r.shopUnits) },
+          ]} defaultSort={{ key: 'adSpend', dir: 'desc' }} />
+        </Card>
+      )}
+    </motion.div>
+  );
+}
 
 /* ─── PAGE ───────────────────────────────────────────────────────── */
 export default function GoogleAds() {
@@ -167,6 +409,21 @@ export default function GoogleAds() {
   const fetchAt   = brandData?.[selectedBrandId]?.googleAdsFetchAt;
 
   const totals    = useMemo(() => data ? totalsFromNormalized(data) : null, [data]);
+
+  /* Merchant blend — joins shopping × merchant feed × shopify orders */
+  const merchantData = brandData?.[selectedBrandId]?.merchantData;
+  const orders       = brandData?.[selectedBrandId]?.orders || [];
+  const blend = useMemo(() => {
+    if (!data) return null;
+    const shoppingRows = data.shoppingByCampaign?.length ? data.shoppingByCampaign : data.shopping || [];
+    if (!merchantData && !shoppingRows.length) return null;
+    const shopifyBySku = orders.length ? shopifyBySkuFromOrders(orders) : null;
+    return blendAdsMerchant({
+      shopping: shoppingRows,
+      merchantBySku: merchantData?.bySku || null,
+      shopifyBySku,
+    });
+  }, [data, merchantData, orders]);
 
   // { [sku]: stock } derived from brand's persisted inventoryMap — used by
   // the intelligence tab's OOS kill-switch.
@@ -397,6 +654,15 @@ export default function GoogleAds() {
           monthlyTarget={active?.googleAdsMonthlyTarget}
           skuMargin={active?.skuMargin}
           defaultMarginPct={active?.defaultMarginPct || 0.25}
+        />
+      )}
+
+      {/* ── FEED HEALTH ──────────────────────────────────────────── */}
+      {tab === 'feed' && (
+        <FeedHealthTab
+          blend={blend}
+          merchantData={merchantData}
+          campaignsById={new Map((data?.campaigns || []).map(c => [String(c.id), c]))}
         />
       )}
 

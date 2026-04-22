@@ -6,7 +6,8 @@ import {
   Package, BarChart3, Calendar, Search, Mail,
 } from 'lucide-react';
 import { useStore, BRAND_COLORS } from '../store';
-import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData, fetchGoogleAds, verifyGoogleAds, pullAccountWithCustomRange, verifyListmonk, fetchListmonkCampaigns } from '../lib/api';
+import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData, fetchGoogleAds, verifyGoogleAds, fetchMerchant, verifyMerchant, pullAccountWithCustomRange, verifyListmonk, fetchListmonkCampaigns } from '../lib/api';
+import { normalizeMerchantResponse } from '../lib/googleMerchantAnalytics';
 import { normalizeGoogleAdsResponse } from '../lib/googleAdsAnalytics';
 import { BREAKDOWN_SPECS, pullAllBreakdowns } from '../lib/breakdownApi';
 import { parseCsv, csvRowsToManualMap, detectListsFromCsvRows } from '../lib/csvImport';
@@ -83,6 +84,7 @@ function BrandCard({ brand, brandInfo }) {
     setBrandOrders, setBrandOrdersStatus,
     setBrandGaData, setBrandGaStatus,
     setBrandGoogleAdsData, setBrandGoogleAdsStatus,
+    setBrandMerchantData, setBrandMerchantStatus,
     setBrandListmonkData, setBrandListmonkStatus,
     appendLog,
     startPullJob, updatePullJob, finishPullJob,
@@ -98,6 +100,9 @@ function BrandCard({ brand, brandInfo }) {
   const [pullingGa, setPullingGa]           = useState(false);
   const [pullingGAds, setPullingGAds]       = useState(false);
   const [verifyingGAds, setVerifyingGAds]   = useState(false);
+  const [pullingMerchant, setPullingMerchant]   = useState(false);
+  const [verifyingMerchant, setVerifyingMerchant] = useState(false);
+  const [verifyMerchantOk, setVerifyMerchantOk]   = useState(null);
   const [verifyGAdsOk, setVerifyGAdsOk]     = useState(null);
   const [pullingLmonk, setPullingLmonk]     = useState(false);
   const [verifyingLmonk, setVerifyingLmonk] = useState(false);
@@ -123,7 +128,7 @@ function BrandCard({ brand, brandInfo }) {
   const hasGAds    = !!(gAds.devToken && gAds.customerId && gAds.clientId && gAds.clientSecret && gAds.refreshToken);
   const lmonk      = brand.listmonk || {};
   const hasLmonk   = !!(lmonk.url && lmonk.username && lmonk.password);
-  const anyBusy    = pullingMeta || pullingInv || pullingOrders || pullingGa || pullingGAds || pullingLmonk || pullingAll;
+  const anyBusy    = pullingMeta || pullingInv || pullingOrders || pullingGa || pullingGAds || pullingMerchant || pullingLmonk || pullingAll;
 
   /* ── individual pull handlers ───────────────────────────────────── */
   const handleVerify = async () => {
@@ -311,6 +316,47 @@ function BrandCard({ brand, brandInfo }) {
     try { await doPullGoogleAds(); }
     catch (e) { setBrandGoogleAdsStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Google Ads: ${e.message}`); }
     finally { setPullingGAds(false); }
+  };
+
+  const hasMerchant = !!(gAds.merchantId && gAds.clientId && gAds.clientSecret && gAds.refreshToken);
+
+  const handleVerifyMerchant = async () => {
+    if (!hasMerchant) return;
+    setVerifyingMerchant(true); setVerifyMerchantOk(null);
+    try {
+      const info = await verifyMerchant({
+        clientId:     gAds.clientId,
+        clientSecret: gAds.clientSecret,
+        refreshToken: gAds.refreshToken,
+        merchantId:   gAds.merchantId,
+      });
+      setVerifyMerchantOk({ ok: info.hasAccess, name: info.accountName || `Merchant ${gAds.merchantId}`, accessible: info.accountIds });
+    } catch (e) { setVerifyMerchantOk({ ok: false, msg: e.message }); }
+    finally { setVerifyingMerchant(false); }
+  };
+
+  const handlePullMerchant = async () => {
+    if (!hasMerchant) return;
+    setPullingMerchant(true);
+    setBrandMerchantStatus(brand.id, 'loading');
+    const jobId = `merchant:${brand.id}`;
+    startPullJob(jobId, `Merchant Center — ${brand.name}`, gAds.merchantId);
+    try {
+      const raw = await fetchMerchant({
+        clientId:     gAds.clientId,
+        clientSecret: gAds.clientSecret,
+        refreshToken: gAds.refreshToken,
+        merchantId:   gAds.merchantId,
+      }, msg => { appendLog(`[${brand.name}] ${msg}`); updatePullJob(jobId, { detail: msg }); });
+      const normalized = normalizeMerchantResponse(raw);
+      setBrandMerchantData(brand.id, normalized);
+      finishPullJob(jobId, true, `${normalized.summary.total} products · ${normalized.summary.disapproved} disapproved`);
+      appendLog(`[${brand.name}] ✅ Merchant — ${normalized.summary.total} products · ${normalized.summary.approved} approved · ${normalized.summary.disapproved} disapproved`);
+    } catch (e) {
+      setBrandMerchantStatus(brand.id, 'error', e.message);
+      finishPullJob(jobId, false, e.message || 'Merchant failed');
+      appendLog(`[${brand.name}] ❌ Merchant: ${e.message}`);
+    } finally { setPullingMerchant(false); }
   };
 
   const handleVerifyLmonk = async () => {
@@ -716,7 +762,23 @@ function BrandCard({ brand, brandInfo }) {
                       placeholder="1//..."
                       className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-amber-500" />
                   </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">Merchant Center ID <span className="text-slate-600 font-normal normal-case">(for Shopping/PMax feed)</span></label>
+                    <input type="text"
+                      value={gAds.merchantId || ''}
+                      onChange={e => updateBrand(brand.id, { googleAds: { ...gAds, merchantId: e.target.value.replace(/\D/g, '') } })}
+                      placeholder="123456789"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-amber-500" />
+                  </div>
                 </div>
+
+                {verifyMerchantOk && (
+                  <div className={`flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-lg ${verifyMerchantOk.ok ? 'bg-emerald-900/30 text-emerald-300' : 'bg-red-900/30 text-red-300'}`}>
+                    {verifyMerchantOk.ok
+                      ? <><CheckCircle size={11} /> Merchant OK · {verifyMerchantOk.name}</>
+                      : <><AlertCircle size={11} /> {verifyMerchantOk.msg}</>}
+                  </div>
+                )}
 
                 {verifyGAdsOk && (
                   <div className={`flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-lg ${verifyGAdsOk.ok ? 'bg-emerald-900/30 text-emerald-300' : 'bg-red-900/30 text-red-300'}`}>
@@ -741,6 +803,23 @@ function BrandCard({ brand, brandInfo }) {
                       {bd.googleAdsData.campaigns?.length || 0} campaigns · {bd.googleAdsData.adGroups?.length || 0} ad groups · {bd.googleAdsData.ads?.length || 0} ads
                     </span>
                   )}
+                  <span className="mx-1 text-slate-700">|</span>
+                  <button onClick={handleVerifyMerchant} disabled={verifyingMerchant || !hasMerchant}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 rounded-lg text-xs text-slate-300 transition-all border border-gray-700">
+                    {verifyingMerchant ? <Spinner size="sm" /> : <CheckCircle size={11} />} Verify Merchant
+                  </button>
+                  <button onClick={handlePullMerchant} disabled={anyBusy || !hasMerchant}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-sky-700/30 hover:bg-sky-700/50 disabled:opacity-30 rounded-lg text-xs font-medium text-sky-300 transition-all border border-sky-700/30">
+                    {pullingMerchant ? <Spinner size="sm" /> : <Package size={11} />} Pull Merchant
+                  </button>
+                  {bd.merchantData && (
+                    <span className="px-2 py-0.5 rounded-full bg-sky-900/30 text-sky-300 text-[10px]">
+                      {bd.merchantData.summary?.total || 0} products · {bd.merchantData.summary?.disapproved || 0} disapproved
+                    </span>
+                  )}
+                </div>
+                <div className="text-[10px] text-slate-600 italic pt-1">
+                  Note: Merchant Center requires the OAuth refresh token to include the <code className="text-slate-500">content</code> scope. If verify fails with "insufficient scope", re-authorize the app with both <code className="text-slate-500">adwords</code> + <code className="text-slate-500">content</code> scopes.
                 </div>
               </div>
 
