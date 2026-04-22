@@ -75,6 +75,18 @@ function KPI({ label, value, sub, color = '#f59e0b' }) {
   );
 }
 
+function PmaxHint({ tab, onShopping }) {
+  return (
+    <div className="px-4 py-4 mb-3 bg-amber-900/20 border border-amber-800/40 rounded-lg text-xs text-amber-200">
+      <div className="font-semibold mb-1">This is a Performance Max campaign — it doesn't expose {tab}.</div>
+      <div className="text-amber-200/70 leading-relaxed">
+        Pmax uses Google's AI to match queries internally across Search, Shopping, YouTube, and Display. There are no per-ad-group {tab} to inspect — only asset groups and the SKU-level shopping mix.{' '}
+        {onShopping && <button onClick={onShopping} className="underline hover:text-amber-100">View the SKU mix instead →</button>}
+      </div>
+    </div>
+  );
+}
+
 function Card({ title, children, action }) {
   return (
     <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
@@ -699,6 +711,13 @@ export default function GoogleAds() {
     return out;
   }, [brandData, selectedBrandId]);
 
+  /* Channel of the drilled campaign — used to warn when drilling Pmax
+     into tabs it doesn't expose (ads / keywords / search terms). */
+  const drillCampaignChannel = useMemo(() => {
+    if (!drillCampaign) return null;
+    return (data?.campaigns || []).find(c => String(c.id) === String(drillCampaign.id))?.channel || null;
+  }, [drillCampaign, data]);
+
   /* Filtered rows when drilling into a campaign */
   const filteredAdGroups = useMemo(() =>
     drillCampaign ? (data?.adGroups || []).filter(a => a.campaignId === drillCampaign.id) : (data?.adGroups || []),
@@ -925,7 +944,14 @@ export default function GoogleAds() {
         <RootCauseTab
           diag={diag}
           data={data}
-          onDrillCampaign={c => { setDrillCampaign(c); setTab('searchterms'); }}
+          onDrillCampaign={c => {
+            setDrillCampaign(c);
+            // Pmax/Shopping campaigns don't expose search terms — route to
+            // shopping SKU mix instead, which is what actually matters.
+            const ch = (data?.campaigns || []).find(x => String(x.id) === String(c.id))?.channel || '';
+            const noSearch = ch === 'PERFORMANCE_MAX' || ch === 'SHOPPING';
+            setTab(noSearch ? 'shopping' : 'searchterms');
+          }}
         />
       )}
 
@@ -955,6 +981,7 @@ export default function GoogleAds() {
       {/* ── AD GROUPS ────────────────────────────────────────────── */}
       {tab === 'adgroups' && data && (
         <Card title={`${filteredAdGroups.length} ad groups${drillCampaign ? ` · ${drillCampaign.name}` : ''}`}>
+          {drillCampaignChannel === 'PERFORMANCE_MAX' && filteredAdGroups.length === 0 && <PmaxHint tab="ad groups" onShopping={() => setTab('shopping')} />}
           <SortableTable rows={filteredAdGroups} cols={adGroupCols} defaultSort={{ key: 'cost', dir: 'desc' }} />
         </Card>
       )}
@@ -962,6 +989,7 @@ export default function GoogleAds() {
       {/* ── ADS ──────────────────────────────────────────────────── */}
       {tab === 'ads' && data && (
         <Card title={`${filteredAds.length} ads${drillCampaign ? ` · ${drillCampaign.name}` : ''}`}>
+          {drillCampaignChannel === 'PERFORMANCE_MAX' && filteredAds.length === 0 && <PmaxHint tab="individual ads" onShopping={() => setTab('shopping')} />}
           <SortableTable rows={filteredAds} cols={adCols} defaultSort={{ key: 'cost', dir: 'desc' }} />
         </Card>
       )}
@@ -969,6 +997,7 @@ export default function GoogleAds() {
       {/* ── KEYWORDS ─────────────────────────────────────────────── */}
       {tab === 'keywords' && data && (
         <Card title={`${filteredKeywords.length} keywords${drillCampaign ? ` · ${drillCampaign.name}` : ''}`}>
+          {drillCampaignChannel === 'PERFORMANCE_MAX' && filteredKeywords.length === 0 && <PmaxHint tab="keywords" onShopping={() => setTab('shopping')} />}
           <SortableTable rows={filteredKeywords.map((k,i)=>({...k,_key:`${k.adGroupId}|${k.keyword}|${k.matchType}|${i}`}))} cols={kwCols} defaultSort={{ key: 'cost', dir: 'desc' }} />
         </Card>
       )}
@@ -976,6 +1005,7 @@ export default function GoogleAds() {
       {/* ── SEARCH TERMS ─────────────────────────────────────────── */}
       {tab === 'searchterms' && data && (
         <Card title={`${filteredSearchTerms.length} search terms${drillCampaign ? ` · ${drillCampaign.name}` : ''}`}>
+          {drillCampaignChannel === 'PERFORMANCE_MAX' && filteredSearchTerms.length === 0 && <PmaxHint tab="search terms" onShopping={() => setTab('shopping')} />}
           <SortableTable rows={filteredSearchTerms.map((s,i)=>({...s,_key:`${s.adGroupId}|${s.searchTerm}|${i}`}))} cols={stCols} defaultSort={{ key: 'cost', dir: 'desc' }} />
         </Card>
       )}
@@ -1057,20 +1087,26 @@ export default function GoogleAds() {
       )}
 
       {/* ── SHOPPING ─────────────────────────────────────────────── */}
-      {tab === 'shopping' && data && (
-        <Card title={`${(data.shopping || []).length} products`}>
-          {!data.shopping?.length ? (
-            <div className="text-center text-slate-500 py-8 text-xs italic">No shopping data for this account</div>
-          ) : (
-            <SortableTable rows={data.shopping.map((p,i)=>({...p,_key:`${p.productId}|${i}`}))} cols={[
-              { key: 'productTitle', label: 'Product', fn: r => <span className="truncate max-w-[220px] inline-block">{r.productTitle || r.productId}</span> },
-              { key: 'productId', label: 'Item ID', fn: r => <span className="text-[10px] text-slate-500">{r.productId}</span> },
-              { key: 'productBrand', label: 'Brand', fn: r => <span className="text-[10px] text-slate-500">{r.productBrand || '—'}</span> },
-              ...metricCols,
-            ]} defaultSort={{ key: 'cost', dir: 'desc' }} />
-          )}
-        </Card>
-      )}
+      {tab === 'shopping' && data && (() => {
+        // When drilled into a campaign, filter shopping rows to that campaign
+        const shoppingRows = drillCampaign
+          ? (data.shoppingByCampaign || []).filter(p => String(p.campaignId) === String(drillCampaign.id))
+          : (data.shopping || []);
+        return (
+          <Card title={`${shoppingRows.length} products${drillCampaign ? ` · ${drillCampaign.name}` : ''}`}>
+            {!shoppingRows.length ? (
+              <div className="text-center text-slate-500 py-8 text-xs italic">No shopping data for this {drillCampaign ? 'campaign' : 'account'}</div>
+            ) : (
+              <SortableTable rows={shoppingRows.map((p,i)=>({...p,_key:`${p.productId || p.productItemId}|${i}`}))} cols={[
+                { key: 'productTitle', label: 'Product', fn: r => <span className="truncate max-w-[260px] inline-block">{r.productTitle || r.productId || r.productItemId}</span> },
+                { key: 'productId', label: 'Item ID', fn: r => <span className="text-[10px] text-slate-500">{r.productId || r.productItemId}</span> },
+                { key: 'productBrand', label: 'Brand', fn: r => <span className="text-[10px] text-slate-500">{r.productBrand || '—'}</span> },
+                ...metricCols,
+              ]} defaultSort={{ key: 'cost', dir: 'desc' }} />
+            )}
+          </Card>
+        );
+      })()}
     </div>
   );
 }
