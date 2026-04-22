@@ -6,10 +6,11 @@ import {
 } from 'recharts';
 import {
   Search, TrendingUp, Monitor, Clock, Users, ShoppingBag,
-  Target, RefreshCw, Zap, ChevronRight, Download,
+  Target, RefreshCw, Zap, ChevronRight, Download, Brain,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { totalsFromNormalized } from '../lib/googleAdsAnalytics';
+import GoogleAdsIntel from './GoogleAdsIntel';
 
 /* ─── FORMATTERS ─────────────────────────────────────────────────── */
 const n    = v => parseFloat(v || 0);
@@ -137,6 +138,7 @@ function SortableTable({ rows, cols, defaultSort, maxHeight = '520px', onRowClic
 /* ─── TABS ───────────────────────────────────────────────────────── */
 const TABS = [
   { id: 'overview',    label: 'Overview',     icon: Zap },
+  { id: 'intel',       label: 'Intelligence', icon: Brain },
   { id: 'campaigns',   label: 'Campaigns',    icon: Target },
   { id: 'adgroups',    label: 'Ad Groups',    icon: Target },
   { id: 'ads',         label: 'Ads',          icon: Target },
@@ -165,6 +167,17 @@ export default function GoogleAds() {
   const fetchAt   = brandData?.[selectedBrandId]?.googleAdsFetchAt;
 
   const totals    = useMemo(() => data ? totalsFromNormalized(data) : null, [data]);
+
+  // { [sku]: stock } derived from brand's persisted inventoryMap — used by
+  // the intelligence tab's OOS kill-switch.
+  const inventoryBySku = useMemo(() => {
+    const inv = brandData?.[selectedBrandId]?.inventoryMap || {};
+    const out = {};
+    for (const [sku, rec] of Object.entries(inv)) {
+      if (sku && rec) out[sku] = rec.stock ?? 0;
+    }
+    return out;
+  }, [brandData, selectedBrandId]);
 
   /* Filtered rows when drilling into a campaign */
   const filteredAdGroups = useMemo(() =>
@@ -372,6 +385,19 @@ export default function GoogleAds() {
             </Card>
           </div>
         </motion.div>
+      )}
+
+      {/* ── INTELLIGENCE ─────────────────────────────────────────── */}
+      {tab === 'intel' && data && (
+        <GoogleAdsIntel
+          data={data}
+          brand={active}
+          orders={brandData?.[selectedBrandId]?.orders || []}
+          inventoryBySku={inventoryBySku}
+          monthlyTarget={active?.googleAdsMonthlyTarget}
+          skuMargin={active?.skuMargin}
+          defaultMarginPct={active?.defaultMarginPct || 0.25}
+        />
       )}
 
       {/* ── CAMPAIGNS ────────────────────────────────────────────── */}

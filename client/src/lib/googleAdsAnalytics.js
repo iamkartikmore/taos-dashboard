@@ -355,6 +355,40 @@ export function normalizeShopping(rows = []) {
   }));
 }
 
+export function normalizeChangeEvents(rows = []) {
+  return rows.map(r => {
+    const e = r.changeEvent || {};
+    return {
+      ts:          e.changeDateTime,
+      resourceType: e.changeResourceType,
+      resourceName: e.changeResourceName,
+      operation:   e.resourceChangeOperation,
+      clientType:  e.clientType,
+      userEmail:   e.userEmail,
+      changedFields: e.changedFields,
+      campaign:    e.campaign,
+      adGroup:     e.adGroup,
+      oldResource: e.oldResource,
+      newResource: e.newResource,
+    };
+  });
+}
+
+export function normalizeBudgets(rows = []) {
+  return rows.map(r => {
+    const b = r.campaignBudget || {};
+    return {
+      id:            b.id,
+      name:          b.name,
+      amount:        fromMicros(b.amountMicros),
+      status:        b.status,
+      refCount:      b.referenceCount,
+      recommended:   fromMicros(b.recommendedBudgetAmountMicros),
+      hasRecommended: b.hasRecommendedBudget,
+    };
+  });
+}
+
 // One-shot: take the full server response and return normalized buckets
 export function normalizeGoogleAdsResponse(raw = {}) {
   return {
@@ -369,6 +403,8 @@ export function normalizeGoogleAdsResponse(raw = {}) {
     age:            normalizeBreakdownAge(raw.age),
     gender:         normalizeBreakdownGender(raw.gender),
     shopping:       normalizeShopping(raw.shopping),
+    changeEvents:   normalizeChangeEvents(raw.changeEvents),
+    budgets:        normalizeBudgets(raw.budgets),
     errors:         raw.errors || {},
     fetchMs:        raw.fetchMs,
   };

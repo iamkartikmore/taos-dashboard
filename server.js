@@ -693,6 +693,31 @@ app.post('/api/google-ads/pull', async (req, res) => {
           metrics.conversions, metrics.conversions_value
         FROM shopping_performance_view
         WHERE segments.date DURING ${during}`,
+      // Operator-visible setting changes from the past 30 days. This is
+      // what lets the intel engine correlate "CPA jumped on the 14th"
+      // with "someone flipped the bidding strategy at 09:42 on the 14th".
+      // change_event has a hard 30-day cap on the API side regardless
+      // of the pull preset — so always use LAST_30_DAYS here.
+      changeEvents: `
+        SELECT change_event.change_date_time, change_event.change_resource_type,
+          change_event.change_resource_name, change_event.resource_change_operation,
+          change_event.client_type, change_event.user_email,
+          change_event.changed_fields, change_event.campaign, change_event.ad_group,
+          change_event.old_resource, change_event.new_resource
+        FROM change_event
+        WHERE change_event.change_date_time DURING LAST_30_DAYS
+        ORDER BY change_event.change_date_time DESC
+        LIMIT 1000`,
+      // Account-level daily budget utilisation — when an account is
+      // "limited by budget" impressions collapse. Pull this so the
+      // reach-collapse anomaly has a ready-made explanation.
+      budgets: `
+        SELECT campaign_budget.id, campaign_budget.name, campaign_budget.amount_micros,
+          campaign_budget.status, campaign_budget.reference_count,
+          campaign_budget.recommended_budget_amount_micros,
+          campaign_budget.has_recommended_budget
+        FROM campaign_budget
+        WHERE campaign_budget.status != 'REMOVED'`,
     };
 
     // Run in parallel; individual failures are tolerated (e.g., shopping fails on non-ecommerce accounts)
