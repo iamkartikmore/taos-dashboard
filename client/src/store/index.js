@@ -39,6 +39,7 @@ export function makeBrand(name = 'New Brand', idx = 0) {
     ga:      { propertyId: '', serviceAccountJson: '' },
     googleAds: { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '', merchantId: '' },
     listmonk: { url: '', username: '', password: '', defaultListId: '', fromEmail: '' },
+    clarity: { apiToken: '', projectId: '' },
   };
 }
 
@@ -61,6 +62,7 @@ function loadBrands() {
       if (!u.googleAds) u.googleAds = { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '', merchantId: '' };
       else if (u.googleAds.merchantId === undefined) u.googleAds.merchantId = '';
       if (!u.listmonk)  u.listmonk  = { url: '', username: '', password: '', defaultListId: '', fromEmail: '' };
+      if (!u.clarity)   u.clarity   = { apiToken: '', projectId: '' };
       return u;
     });
   }
@@ -89,12 +91,20 @@ export const useStore = create((set, get) => {
   // Restore persisted per-brand inventory
   const storedInv = lsGet(LS_INV, {});
   const customerCache = lsGet(LS_CUST, {});
+  const clarityHistoryAll = lsGet('taos_clarity_history_v1', {});
   const initialBrandData = {};
   // Also migrate old single-store taos_inventory
   const oldInv = lsGet('taos_inventory', null);
   initialBrands.forEach((b, i) => {
     const inv = storedInv[b.id] || (i === 0 && oldInv ? oldInv : null);
-    if (inv) initialBrandData[b.id] = { inventoryMap: inv, inventoryStatus: 'success' };
+    const clarityHistory = clarityHistoryAll[b.id] || [];
+    const latest = clarityHistory.length ? clarityHistory[clarityHistory.length - 1].snapshot : null;
+    if (inv || clarityHistory.length) {
+      initialBrandData[b.id] = {
+        ...(inv ? { inventoryMap: inv, inventoryStatus: 'success' } : {}),
+        ...(clarityHistory.length ? { clarityData: latest, clarityHistory, clarityStatus: 'success' } : {}),
+      };
+    }
   });
 
   /* ── helpers ──────────────────────────────────────────────────── */
@@ -424,6 +434,34 @@ export const useStore = create((set, get) => {
 
     setBrandMerchantStatus: (brandId, status, error = null) => {
       const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), merchantStatus: status, merchantError: error } };
+      set({ brandData });
+    },
+
+    /* Microsoft Clarity — stores current snapshot + rolling history of
+       past snapshots so we can compute comparative deltas across pulls
+       (API doesn't expose historical data, we build it over time). */
+    setBrandClarityData: (brandId, snapshot) => {
+      const cur = get().brandData[brandId] || {};
+      const history = [...(cur.clarityHistory || []), { at: Date.now(), snapshot }].slice(-30); // keep last 30 snapshots
+      const brandData = { ...get().brandData, [brandId]: {
+        ...cur,
+        clarityData:    snapshot,
+        clarityHistory: history,
+        clarityStatus:  'success',
+        clarityFetchAt: Date.now(),
+      }};
+      set({ brandData });
+      // Persist to localStorage so history survives reloads
+      try {
+        const LS_KEY = 'taos_clarity_history_v1';
+        const all = lsGet(LS_KEY, {});
+        all[brandId] = history;
+        lsSet(LS_KEY, all);
+      } catch (e) { /* quota; not fatal */ }
+    },
+
+    setBrandClarityStatus: (brandId, status, error = null) => {
+      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), clarityStatus: status, clarityError: error } };
       set({ brandData });
     },
 

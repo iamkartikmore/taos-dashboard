@@ -381,6 +381,30 @@ export async function fetchPmaxSearchTerms(creds, campaignIds, datePreset = 'las
   return json.rows || [];
 }
 
+/* ─── MICROSOFT CLARITY ────────────────────────────────────────────── */
+
+export async function verifyClarity(apiToken) {
+  const res = await fetch('/api/clarity/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiToken }),
+  });
+  const json = await res.json();
+  if (!res.ok || !json.ok) throw new Error(json.error || 'Clarity verification failed');
+  return json;
+}
+
+export async function fetchClarity(apiToken, period = 'current') {
+  const res = await fetch('/api/clarity/pull', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiToken, period }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'Clarity pull failed');
+  return json;
+}
+
 /* ─── MERCHANT CENTER — REPORTS (price, best-sellers, competitive) ── */
 export async function fetchMerchantReport(creds, report) {
   const res = await fetch('/api/google-merchant/reports', {

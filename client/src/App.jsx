@@ -42,6 +42,7 @@ const SendPlanner        = lazy(() => import('./pages/SendPlanner'));
 const CampaignPerformance = lazy(() => import('./pages/CampaignPerformance'));
 const RetentionSheets    = lazy(() => import('./pages/RetentionSheets'));
 const ModelDiagnostics   = lazy(() => import('./pages/ModelDiagnostics'));
+const ClarityInsights    = lazy(() => import('./pages/ClarityInsights'));
 
 function PageFallback() {
   return (
@@ -162,6 +163,7 @@ export default function App() {
             <Route path="/procurement"      element={<Procurement />} />
             <Route path="/ga"               element={<GAInsights />} />
             <Route path="/google-ads"       element={<GoogleAds />} />
+            <Route path="/clarity"          element={<ClarityInsights />} />
             <Route path="/email-campaigns"  element={<EmailCampaigns />} />
             <Route path="/email-engine"     element={<EmailEngine />} />
             <Route path="/segments"         element={<Segments />} />

@@ -3,10 +3,11 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key,
   BookOpen, Upload, ShoppingBag, Zap, ChevronDown, ChevronRight,
-  Package, BarChart3, Calendar, Search, Mail,
+  Package, BarChart3, Calendar, Search, Mail, MousePointerClick,
 } from 'lucide-react';
 import { useStore, BRAND_COLORS } from '../store';
-import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData, fetchGoogleAds, verifyGoogleAds, fetchMerchant, verifyMerchant, pullAccountWithCustomRange, verifyListmonk, fetchListmonkCampaigns } from '../lib/api';
+import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData, fetchGoogleAds, verifyGoogleAds, fetchMerchant, verifyMerchant, pullAccountWithCustomRange, verifyListmonk, fetchListmonkCampaigns, verifyClarity, fetchClarity } from '../lib/api';
+import { normalizeClaritySnapshot } from '../lib/clarityAnalytics';
 import { normalizeMerchantResponse } from '../lib/googleMerchantAnalytics';
 import { normalizeGoogleAdsResponse } from '../lib/googleAdsAnalytics';
 import { BREAKDOWN_SPECS, pullAllBreakdowns } from '../lib/breakdownApi';
@@ -86,6 +87,7 @@ function BrandCard({ brand, brandInfo }) {
     setBrandGoogleAdsData, setBrandGoogleAdsStatus,
     setBrandMerchantData, setBrandMerchantStatus,
     setBrandListmonkData, setBrandListmonkStatus,
+    setBrandClarityData, setBrandClarityStatus,
     appendLog,
     startPullJob, updatePullJob, finishPullJob,
   } = useStore();
@@ -107,6 +109,9 @@ function BrandCard({ brand, brandInfo }) {
   const [pullingLmonk, setPullingLmonk]     = useState(false);
   const [verifyingLmonk, setVerifyingLmonk] = useState(false);
   const [verifyLmonkOk, setVerifyLmonkOk]   = useState(null);
+  const [pullingClarity, setPullingClarity] = useState(false);
+  const [verifyingClarity, setVerifyingClarity] = useState(false);
+  const [verifyClarityOk, setVerifyClarityOk]   = useState(null);
   const [pullingAll, setPullingAll]         = useState(false);
 
   // Per-brand time windows
@@ -120,6 +125,7 @@ function BrandCard({ brand, brandInfo }) {
   const gaStatus        = bd.gaStatus        || 'idle';
   const googleAdsStatus = bd.googleAdsStatus || 'idle';
   const listmonkStatus  = bd.listmonkStatus  || 'idle';
+  const clarityStatus   = bd.clarityStatus   || 'idle';
   const hasToken   = !!brand.meta.token;
   const hasAccts   = brand.meta.accounts.filter(a => a.key && a.id).length > 0;
   const hasShopify = !!(brand.shopify.shop && brand.shopify.clientId && brand.shopify.clientSecret);
@@ -128,7 +134,9 @@ function BrandCard({ brand, brandInfo }) {
   const hasGAds    = !!(gAds.devToken && gAds.customerId && gAds.clientId && gAds.clientSecret && gAds.refreshToken);
   const lmonk      = brand.listmonk || {};
   const hasLmonk   = !!(lmonk.url && lmonk.username && lmonk.password);
-  const anyBusy    = pullingMeta || pullingInv || pullingOrders || pullingGa || pullingGAds || pullingMerchant || pullingLmonk || pullingAll;
+  const clarity    = brand.clarity || {};
+  const hasClarity = !!clarity.apiToken;
+  const anyBusy    = pullingMeta || pullingInv || pullingOrders || pullingGa || pullingGAds || pullingMerchant || pullingLmonk || pullingClarity || pullingAll;
 
   /* ── individual pull handlers ───────────────────────────────────── */
   const handleVerify = async () => {
@@ -385,6 +393,35 @@ function BrandCard({ brand, brandInfo }) {
     try { await doPullListmonk(); }
     catch (e) { setBrandListmonkStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Listmonk: ${e.message}`); }
     finally { setPullingLmonk(false); }
+  };
+
+  const handleVerifyClarity = async () => {
+    if (!hasClarity) return;
+    setVerifyingClarity(true); setVerifyClarityOk(null);
+    try {
+      const info = await verifyClarity(clarity.apiToken);
+      setVerifyClarityOk({ ok: true, sampleRows: info.sampleRows });
+    } catch (e) { setVerifyClarityOk({ ok: false, msg: e.message }); }
+    finally { setVerifyingClarity(false); }
+  };
+
+  const doPullClarity = async () => {
+    setBrandClarityStatus(brand.id, 'loading');
+    appendLog(`[${brand.name}] Starting Clarity pull (5 dimension slices)...`);
+    const raw = await fetchClarity(clarity.apiToken, 'current');
+    const snap = normalizeClaritySnapshot(raw);
+    setBrandClarityData(brand.id, snap);
+    const sum = snap.byUrl?.length || 0;
+    const errs = Object.keys(raw.errors || {}).length;
+    appendLog(`[${brand.name}] ✅ Clarity — ${sum} URLs tracked${errs ? ` · ${errs} slice errors (likely rate limit)` : ''}`);
+  };
+
+  const handlePullClarity = async () => {
+    if (!hasClarity) return;
+    setPullingClarity(true);
+    try { await doPullClarity(); }
+    catch (e) { setBrandClarityStatus(brand.id, 'error', e.message); appendLog(`[${brand.name}] ❌ Clarity: ${e.message}`); }
+    finally { setPullingClarity(false); }
   };
 
   const handlePullAll = async () => {
@@ -896,6 +933,63 @@ function BrandCard({ brand, brandInfo }) {
                   {bd.listmonkData?.campaigns && (
                     <span className="px-2 py-0.5 rounded-full bg-sky-900/30 text-sky-400 text-[10px]">
                       {bd.listmonkData.campaigns.length} campaigns
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* ── MICROSOFT CLARITY (behavior / heatmaps) ───────────── */}
+              <div className="space-y-3 xl:col-span-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-widest">
+                  <MousePointerClick size={11} /> Microsoft Clarity (Heatmaps + Behavior)
+                  <StatusDot status={clarityStatus} />
+                  {bd.clarityFetchAt && <span className="text-[10px] text-slate-600 font-normal ml-1">Last: {new Date(bd.clarityFetchAt).toLocaleTimeString()}</span>}
+                  {bd.clarityHistory?.length > 0 && <span className="text-[10px] text-slate-600 font-normal ml-1">· {bd.clarityHistory.length} snapshot(s)</span>}
+                </div>
+
+                <div className="text-[11px] text-slate-500 leading-relaxed">
+                  Generate an API token in Clarity → Settings → Data Export. The API has a hard limit of 10 calls/day per project — each "pull" here consumes 5 calls (URL, URL×Device, Channel, Country, Device×Browser). Historical comparisons are built from stored snapshots over time.
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="sm:col-span-2">
+                    <label className="text-[10px] text-slate-500 mb-1 block">API Token</label>
+                    <input type="password"
+                      value={clarity.apiToken || ''}
+                      onChange={e => updateBrand(brand.id, { clarity: { ...clarity, apiToken: e.target.value.trim() } })}
+                      placeholder="clarity-export-api-token"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-cyan-500" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-500 mb-1 block">Project ID (optional, for deep links)</label>
+                    <input type="text"
+                      value={clarity.projectId || ''}
+                      onChange={e => updateBrand(brand.id, { clarity: { ...clarity, projectId: e.target.value.trim() } })}
+                      placeholder="abc123xyz"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-cyan-500" />
+                  </div>
+                </div>
+
+                {verifyClarityOk && (
+                  <div className={`flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-lg ${verifyClarityOk.ok ? 'bg-emerald-900/30 text-emerald-300' : 'bg-red-900/30 text-red-300'}`}>
+                    {verifyClarityOk.ok
+                      ? <><CheckCircle size={11} /> Token works · {verifyClarityOk.sampleRows} sample rows returned</>
+                      : <><AlertCircle size={11} /> {verifyClarityOk.msg}</>}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 flex-wrap pt-1">
+                  <button onClick={handleVerifyClarity} disabled={verifyingClarity || !hasClarity}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 rounded-lg text-xs text-slate-300 transition-all border border-gray-700">
+                    {verifyingClarity ? <Spinner size="sm" /> : <CheckCircle size={11} />} Verify
+                  </button>
+                  <button onClick={handlePullClarity} disabled={anyBusy || !hasClarity}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-700/30 hover:bg-cyan-700/50 disabled:opacity-30 rounded-lg text-xs font-medium text-cyan-300 transition-all border border-cyan-700/30">
+                    {pullingClarity ? <Spinner size="sm" /> : <MousePointerClick size={11} />} Pull Clarity (5 calls)
+                  </button>
+                  {bd.clarityData?.byUrl && (
+                    <span className="px-2 py-0.5 rounded-full bg-cyan-900/30 text-cyan-400 text-[10px]">
+                      {bd.clarityData.byUrl.length} URLs
                     </span>
                   )}
                 </div>

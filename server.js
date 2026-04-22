@@ -1081,6 +1081,100 @@ app.post('/api/google-merchant/pull', async (req, res) => {
   }
 });
 
+/* ─── MICROSOFT CLARITY (Data Export API) ──────────────────────────
+   Clarity gives us behavioral "why" data (rage clicks, dead clicks,
+   quick-backs, scroll depth) that pairs with our "what" data (Google
+   clicks, Shopify conversions) to diagnose PDP issues.
+
+   The API has hard limits: 10 requests/project/day, max 3 days of
+   data per request, max 3 dimensions per request. So one logical
+   "pull" = 5 carefully-chosen dimension slices = 5 calls, leaving
+   budget for a prior-period comparison.
+
+   Token is project-scoped: user generates it in Clarity → Settings
+   → Data Export. We accept it as-is and pass through. */
+
+const CLARITY_BASE = 'https://www.clarity.ms/export-data/api/v1/project-live-insights';
+
+async function clarityCall({ apiToken, numOfDays = 3, dimensions = [] }) {
+  const params = new URLSearchParams({ numOfDays: String(numOfDays) });
+  dimensions.slice(0, 3).forEach((d, i) => params.set(`dimension${i + 1}`, d));
+  const url = `${CLARITY_BASE}?${params.toString()}`;
+  const r = await axios.get(url, {
+    headers: { Authorization: `Bearer ${apiToken}` },
+    timeout: 30000,
+  });
+  return r.data; // array of metric blocks
+}
+
+// POST /api/clarity/verify — confirms the API token + project access
+app.post('/api/clarity/verify', async (req, res) => {
+  const { apiToken } = req.body;
+  if (!apiToken) return res.status(400).json({ ok: false, error: 'apiToken required' });
+  try {
+    const rows = await clarityCall({ apiToken, numOfDays: 1, dimensions: ['OperatingSystem'] });
+    // Rows may be empty if the project has no traffic in the window, but a
+    // non-auth error means the token is valid.
+    res.json({ ok: true, sampleRows: (rows?.[0]?.information?.length ?? 0) });
+  } catch (err) {
+    const msg = err.response?.data?.error || err.response?.data?.message || err.message;
+    const status = err.response?.status || 500;
+    res.status(status).json({ ok: false, error: msg });
+  }
+});
+
+// POST /api/clarity/pull — one logical pull = 5 dimension slices in parallel
+// Caller can pass `periods: ['current']` (default) or `['current','prior']`.
+// Prior adds another 5 calls — uses the full 10/day budget. We warn the
+// client so it can rate-limit or rotate with caching.
+app.post('/api/clarity/pull', async (req, res) => {
+  const { apiToken, period = 'current' } = req.body;
+  if (!apiToken) return res.status(400).json({ error: 'apiToken required' });
+
+  // numOfDays is 1-3 for current; prior is "days 4-6 ago" — but the Clarity
+  // API only exposes the most recent 3 days. So the client must cache daily
+  // to build comparative history. We expose the slice set and caller stamps
+  // the period into the returned record.
+  const numOfDays = period === 'current' ? 3 : 3;
+
+  // Five slices chosen to give the broadest coverage within 10-call quota:
+  //   url          — per-page behavior (rage, dead, scroll)
+  //   url+device   — PDP behavior split mobile vs desktop (the usual diff)
+  //   channel      — which traffic source has the worst behavior
+  //   country      — geo-level behavioral splits
+  //   device+browser — tech stack CRO issues
+  const slices = [
+    { key: 'url',         dimensions: ['URL'] },
+    { key: 'urlDevice',   dimensions: ['URL', 'Device'] },
+    { key: 'channel',     dimensions: ['Channel'] },
+    { key: 'country',     dimensions: ['Country'] },
+    { key: 'deviceBrowser', dimensions: ['Device', 'Browser'] },
+  ];
+
+  const startMs = Date.now();
+  const results = {};
+  const errors = {};
+  await Promise.all(slices.map(async s => {
+    try {
+      const data = await clarityCall({ apiToken, numOfDays, dimensions: s.dimensions });
+      results[s.key] = data;
+    } catch (err) {
+      const msg = err.response?.data?.error || err.response?.data?.message || err.message;
+      errors[s.key] = msg;
+      results[s.key] = [];
+    }
+  }));
+
+  res.json({
+    period,
+    numOfDays,
+    pulledAt: Date.now(),
+    ...results,
+    errors,
+    fetchMs: Date.now() - startMs,
+  });
+});
+
 /* ─── LISTMONK (email) ────────────────────────────────────────────── */
 
 function listmonkAuth({ url, username, password }) {
