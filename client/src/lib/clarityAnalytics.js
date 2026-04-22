@@ -17,44 +17,104 @@
 const num = v => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 
 /* ─── PIVOT ─────────────────────────────────────────────────────────
-   Clarity emits separate metric blocks with the same dimensions. Pivot
-   them into one row per dimension-combination with all metrics merged
-   as columns.
+   Clarity's real response shape (verified against official docs):
+     [ { metricName: 'Traffic',
+         information: [ { totalSessionCount: '9554',
+                          totalBotSessionCount: '8369',
+                          distantUserCount: '189733',
+                          PagesPerSessionPercentage: 1.0931,
+                          URL: '/products/x' } ] } ]
 
-   Input: [ { metricName: 'Traffic', information: [{URL:'/foo', value:100}] },
-            { metricName: 'DeadClickCount', information: [{URL:'/foo', value:5}] } ]
-   Output: [ { URL: '/foo', traffic: 100, deadClicks: 5 } ]
+   Metric fields are embedded directly in each information[] row
+   (NOT under a `value` key) and vary per metricName. We map known
+   field names to friendly keys and fall back to preserving any
+   numeric field under a namespaced name so nothing gets silently
+   dropped if Clarity adds new metric fields.
 */
-const METRIC_ALIASES = {
-  Traffic:                'sessions',
-  Engagement:             'engagementSeconds',
-  ScrollDepth:            'scrollDepth',
-  DeadClickCount:         'deadClicks',
-  ExcessiveScroll:        'excessiveScroll',
-  RageClickCount:         'rageClicks',
-  QuickbackClick:         'quickBacks',
-  ScriptErrorCount:       'jsErrors',
-  ErrorClickCount:        'errorClicks',
-  PageViews:              'pageViews',
-  PopularPages:           'pageViews',
-  EngagingTime:           'engagementSeconds',
-  TotalTime:              'totalTime',
-};
+
+// Per-metric field extractors. Each returns { friendlyKey: number } based on
+// the actual raw fields Clarity emits. The mapping covers the official docs;
+// unknown fields still survive via the defensive fallback at the bottom.
+function extractMetricFields(metricName, info) {
+  const out = {};
+  switch (metricName) {
+    case 'Traffic':
+      if (info.totalSessionCount != null)         out.sessions       = num(info.totalSessionCount);
+      if (info.totalBotSessionCount != null)      out.botSessions    = num(info.totalBotSessionCount);
+      if (info.distantUserCount != null)          out.distinctUsers  = num(info.distantUserCount);
+      if (info.PagesPerSessionPercentage != null) out.pagesPerSession = num(info.PagesPerSessionPercentage);
+      break;
+    case 'ScrollDepth':
+      // Could be averageScrollDepth or similar; take whichever numeric field exists
+      if (info.averageScrollDepth != null)   out.scrollDepth = num(info.averageScrollDepth);
+      else if (info.scrollDepthAverage != null) out.scrollDepth = num(info.scrollDepthAverage);
+      else if (info.averageScrollDepthPercentage != null) out.scrollDepth = num(info.averageScrollDepthPercentage) / 100;
+      break;
+    case 'EngagementTime':
+    case 'EngagingTime':
+      if (info.averageEngagementTime != null) out.engagementSeconds = num(info.averageEngagementTime);
+      else if (info.averageEngagingTime != null) out.engagementSeconds = num(info.averageEngagingTime);
+      else if (info.totalTime != null) out.engagementSeconds = num(info.totalTime);
+      break;
+    case 'DeadClickCount':
+      out.deadClicks = num(info.subTotal ?? info.deadClickCount ?? info.totalDeadClickCount);
+      break;
+    case 'RageClickCount':
+      out.rageClicks = num(info.subTotal ?? info.rageClickCount ?? info.totalRageClickCount);
+      break;
+    case 'QuickbackClick':
+      out.quickBacks = num(info.subTotal ?? info.quickbackClickCount ?? info.totalQuickbackClickCount);
+      break;
+    case 'ExcessiveScroll':
+      out.excessiveScroll = num(info.subTotal ?? info.excessiveScrollCount ?? info.totalExcessiveScrollCount);
+      break;
+    case 'ScriptErrorCount':
+      out.jsErrors = num(info.subTotal ?? info.scriptErrorCount ?? info.totalScriptErrorCount);
+      break;
+    case 'ErrorClickCount':
+      out.errorClicks = num(info.subTotal ?? info.errorClickCount ?? info.totalErrorClickCount);
+      break;
+    case 'PopularPages':
+    case 'PageViews':
+      out.pageViews = num(info.sessionsCount ?? info.subTotal ?? info.totalPageViews ?? info.pageViewsCount);
+      break;
+    default:
+      break;
+  }
+  return out;
+}
+
+// Well-known dimension keys Clarity returns inside information[] rows
+const DIMENSION_KEYS = new Set(['URL', 'Device', 'Browser', 'OS', 'Country', 'CountryRegion', 'Country/Region', 'Channel', 'Source', 'Medium', 'Campaign', 'PageTitle', 'ReferrerUrl']);
 
 function pivotClarityResponse(metricBlocks = [], dimensionKeys = []) {
   if (!Array.isArray(metricBlocks)) return [];
-  // Build composite key from the dimensions we requested
   const rowsByKey = new Map();
+
   for (const block of metricBlocks) {
-    const metric = METRIC_ALIASES[block.metricName] || block.metricName;
-    if (!metric) continue;
+    const metric = block.metricName;
     for (const info of (block.information || [])) {
       const keyParts = dimensionKeys.map(d => info[d] ?? '');
       const key = keyParts.join('|');
       const row = rowsByKey.get(key) || { ...Object.fromEntries(dimensionKeys.map(d => [d, info[d] || ''])) };
-      // value may be a number, or an object like { averageScrollDepth: 0.7, ... }
-      const rawValue = info.value ?? info[metric] ?? info.averageScrollDepth ?? info.averageEngagementTime;
-      row[metric] = num(rawValue);
+
+      // 1. Extract known metric fields into friendly columns
+      const extracted = extractMetricFields(metric, info);
+      Object.assign(row, extracted);
+
+      // 2. Defensive fallback: preserve any numeric field we didn't map
+      //    (protects against Clarity adding new metric fields without us
+      //    noticing). Namespaced under the metric name to avoid collisions.
+      for (const [k, v] of Object.entries(info)) {
+        if (DIMENSION_KEYS.has(k)) continue;
+        if (dimensionKeys.includes(k)) continue;
+        if (k in extracted) continue;
+        const n = Number(v);
+        if (!Number.isFinite(n)) continue;
+        const nsKey = `_raw_${metric}_${k}`;
+        if (!(nsKey in row)) row[nsKey] = n;
+      }
+
       rowsByKey.set(key, row);
     }
   }

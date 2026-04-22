@@ -1112,7 +1112,7 @@ app.post('/api/clarity/verify', async (req, res) => {
   const { apiToken } = req.body;
   if (!apiToken) return res.status(400).json({ ok: false, error: 'apiToken required' });
   try {
-    const rows = await clarityCall({ apiToken, numOfDays: 1, dimensions: ['OperatingSystem'] });
+    const rows = await clarityCall({ apiToken, numOfDays: 1, dimensions: ['OS'] });
     // Rows may be empty if the project has no traffic in the window, but a
     // non-auth error means the token is valid.
     res.json({ ok: true, sampleRows: (rows?.[0]?.information?.length ?? 0) });
