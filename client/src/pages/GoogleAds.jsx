@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useCallback, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
@@ -11,6 +11,7 @@ import {
   Stethoscope, TrendingDown, GitBranch,
   Tag, ArrowUpCircle, ArrowDownCircle,
   Lightbulb, Rocket, Ban, Clock3, MousePointerClick, ExternalLink, Layers,
+  TrendingUp as TrendingUpIcon, ShoppingCart, Flame, Scissors,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { totalsFromNormalized } from '../lib/googleAdsAnalytics';
@@ -18,6 +19,8 @@ import { blendAdsMerchant, shopifyBySkuFromOrders, aggregateShoppingBySku } from
 import { diagnose, skuImpactChain } from '../lib/dropDiagnostics';
 import { buildPriceSuggestions } from '../lib/priceSuggestions';
 import { analyzeOpportunities } from '../lib/googleAdsOpportunities';
+import { analyzeKeywordGaps, analyzePriceCompetitiveness, analyzeBestSellerGap, analyzePmaxThemes } from '../lib/growthOpportunities';
+import { fetchKeywordIdeas, fetchPmaxSearchTerms, fetchMerchantReport } from '../lib/api';
 import GoogleAdsIntel from './GoogleAdsIntel';
 
 /* ─── FORMATTERS ─────────────────────────────────────────────────── */
@@ -179,7 +182,7 @@ const TABS = [
    by default except the summary counts — click into any panel for
    full evidence and per-item actions.
    ─────────────────────────────────────────────────────────────────── */
-function OpportunitiesTab({ opps, brand }) {
+function OpportunitiesTab({ opps, brand, growth, onLoadGrowth }) {
   const [open, setOpen] = useState(null);
 
   if (!opps) {
@@ -236,6 +239,47 @@ function OpportunitiesTab({ opps, brand }) {
         : '',
       color: '#60a5fa',
     },
+    // ── Growth panels (on-demand, hit Google APIs) ──
+    {
+      id: 'keywordGap', icon: TrendingUpIcon, title: 'Keyword gap scanner',
+      blurb: 'Feeds Shopify product titles to Keyword Planner — surfaces high-volume keywords you don\'t currently target.',
+      count: growth?.keywordGaps?.totals.count ?? '·',
+      secondary: growth?.keywordGaps?.totals.totalVolume
+        ? `${num(growth.keywordGaps.totals.totalVolume)} searches/mo untargeted`
+        : (growth?.keywordGapsStatus === 'loading' ? 'Loading…' : 'Click to load'),
+      color: '#34d399',
+      onDemand: true, loaded: !!growth?.keywordGaps,
+    },
+    {
+      id: 'priceCompet', icon: Tag, title: 'Price vs market',
+      blurb: 'Compares your feed prices against Merchant Center\'s benchmark (median competitor price for the same product).',
+      count: growth?.priceCompet?.totals.count ?? '·',
+      secondary: growth?.priceCompet?.totals.overpricedCount != null
+        ? `${growth.priceCompet.totals.overpricedCount} overpriced · ${growth.priceCompet.totals.underpricedCount} underpriced`
+        : (growth?.priceCompetStatus === 'loading' ? 'Loading…' : 'Click to load'),
+      color: '#fbbf24',
+      onDemand: true, loaded: !!growth?.priceCompet,
+    },
+    {
+      id: 'bestSeller', icon: Flame, title: 'Best-seller catalog gap',
+      blurb: 'Google\'s top-ranking products in your categories — surfaces items you don\'t currently carry (sourcing leads).',
+      count: growth?.bestSellers?.totals.missingCount ?? '·',
+      secondary: growth?.bestSellers?.totals.missingCount != null
+        ? `${growth.bestSellers.totals.missingCount} missing · ${growth.bestSellers.totals.brandOnlyCount} brand-only`
+        : (growth?.bestSellersStatus === 'loading' ? 'Loading…' : 'Click to load'),
+      color: '#f472b6',
+      onDemand: true, loaded: !!growth?.bestSellers,
+    },
+    {
+      id: 'pmaxThemes', icon: Scissors, title: 'PMax theme forker',
+      blurb: 'Which search-category themes Pmax converts on. High-value themes to fork into dedicated Search campaigns.',
+      count: growth?.pmax?.totals.forkCount ?? '·',
+      secondary: growth?.pmax?.totals.forkCount != null
+        ? `${growth.pmax.totals.forkCount} fork-ready themes`
+        : (growth?.pmaxStatus === 'loading' ? 'Loading…' : 'Click to load'),
+      color: '#a78bfa',
+      onDemand: true, loaded: !!growth?.pmax,
+    },
   ];
 
   return (
@@ -248,7 +292,10 @@ function OpportunitiesTab({ opps, brand }) {
           return (
             <button
               key={p.id}
-              onClick={() => setOpen(isOpen ? null : p.id)}
+              onClick={() => {
+                setOpen(isOpen ? null : p.id);
+                if (!isOpen && p.onDemand && !p.loaded) onLoadGrowth?.(p.id);
+              }}
               className={`text-left p-4 rounded-xl border transition-all ${isOpen ? 'bg-gray-900 border-amber-600/40 ring-1 ring-amber-600/30' : 'bg-gray-900 border-gray-800 hover:border-gray-700'}`}
             >
               <div className="flex items-start gap-3">
@@ -276,7 +323,216 @@ function OpportunitiesTab({ opps, brand }) {
       {open === 'dayparting' && <DaypartingPanel opps={opps.dayparting} />}
       {open === 'pdp'        && <PdpPanel       opps={opps.pdp} />}
       {open === 'scorecard'  && <ScorecardPanel opps={opps.scorecard} brand={brand} />}
+      {open === 'keywordGap'  && <KeywordGapPanel   data={growth?.keywordGaps} status={growth?.keywordGapsStatus} error={growth?.keywordGapsError} />}
+      {open === 'priceCompet' && <PriceCompetPanel  data={growth?.priceCompet}   status={growth?.priceCompetStatus}  error={growth?.priceCompetError} />}
+      {open === 'bestSeller'  && <BestSellerPanel   data={growth?.bestSellers}   status={growth?.bestSellersStatus}  error={growth?.bestSellersError} />}
+      {open === 'pmaxThemes'  && <PmaxThemesPanel   data={growth?.pmax}          status={growth?.pmaxStatus}         error={growth?.pmaxError} />}
     </motion.div>
+  );
+}
+
+/* ─── ON-DEMAND GROWTH PANELS ────────────────────────────────────── */
+function LoadingEmpty({ status, error, emptyMsg }) {
+  if (status === 'loading') return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center">
+      <RefreshCw size={20} className="text-slate-500 mx-auto mb-2 animate-spin" />
+      <p className="text-sm text-slate-400">Loading…</p>
+    </div>
+  );
+  if (error) return (
+    <div className="bg-gray-900 border border-red-800/40 rounded-xl p-6 text-sm text-red-300">
+      <div className="font-semibold mb-1">Couldn't load</div>
+      <div className="text-red-300/70 text-xs">{error}</div>
+    </div>
+  );
+  return (
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center text-sm text-slate-500">
+      {emptyMsg || 'No data.'}
+    </div>
+  );
+}
+
+function KeywordGapPanel({ data, status, error }) {
+  if (!data?.items?.length) return <LoadingEmpty status={status} error={error} emptyMsg="No untargeted keywords with volume above floor. You're already advertising on the queries that have demand." />;
+  return (
+    <Card title={`${data.items.length} untargeted keywords — ${num(data.totals.totalVolume)} searches/mo`}>
+      <p className="text-[11px] text-slate-500 mb-3">Google's Keyword Planner forecasts for seeds derived from your Shopify product titles. These keywords have volume but don't appear in your current campaigns. {data.totals.matchedToSkus} match a specific SKU → launch a campaign for that SKU.</p>
+      <div className="overflow-auto" style={{ maxHeight: '560px' }}>
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+            <tr>
+              <th className="px-3 py-2 text-left text-slate-400 font-semibold">Keyword</th>
+              <th className="px-3 py-2 text-right text-slate-400 font-semibold">Searches/mo</th>
+              <th className="px-3 py-2 text-left text-slate-400 font-semibold">Competition</th>
+              <th className="px-3 py-2 text-right text-slate-400 font-semibold">CPC range</th>
+              <th className="px-3 py-2 text-left text-slate-400 font-semibold">Matched SKU</th>
+              <th className="px-3 py-2 text-left text-slate-400 font-semibold">Suggested Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.items.slice(0, 100).map((k, i) => (
+              <tr key={i} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                <td className="px-3 py-2 text-slate-200 font-medium">{k.keyword}</td>
+                <td className="px-3 py-2 text-right font-mono text-emerald-400">{num(k.avgMonthlySearches)}</td>
+                <td className="px-3 py-2">
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${k.competition === 'HIGH' ? 'bg-red-900/40 text-red-300' : k.competition === 'MEDIUM' ? 'bg-amber-900/40 text-amber-300' : 'bg-emerald-900/40 text-emerald-300'}`}>{k.competition}</span>
+                </td>
+                <td className="px-3 py-2 text-right font-mono text-slate-300">
+                  {k.lowCpc > 0 ? <>{cur(k.lowCpc)}–{cur(k.highCpc)}</> : '—'}
+                </td>
+                <td className="px-3 py-2 text-[11px] text-slate-400 truncate max-w-[200px]">
+                  {k.matchedTitle ? <><span className="text-emerald-400">{k.matchedTitle}</span><div className="text-[10px] text-slate-600">{cur(k.matchedRevenue)} Shopify rev</div></> : <span className="text-slate-600 italic">no match</span>}
+                </td>
+                <td className="px-3 py-2 text-[11px] text-amber-300/80 max-w-[300px] truncate">{k.action}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function PriceCompetPanel({ data, status, error }) {
+  if (!data?.items?.length) return <LoadingEmpty status={status} error={error} emptyMsg="Price Competitiveness report is empty. Merchant Center needs a minimum click threshold per country/category to emit benchmarks — check back after your feed accumulates more impressions." />;
+  return (
+    <div className="space-y-4">
+      {data.overpriced?.length > 0 && (
+        <Card title={`${data.overpriced.length} SKUs priced above market`}>
+          <p className="text-[11px] text-slate-500 mb-3">Benchmark = median price other retailers charge for the same product (or very similar). Above market = likely losing clicks on Shopping.</p>
+          <SortableTable rows={data.overpriced.slice(0, 50)} maxHeight="340px" cols={[
+            { key: 'title', label: 'Product', fn: r => <><span className="truncate max-w-[200px] inline-block">{r.title}</span><div className="text-[10px] text-slate-600 font-mono">{r.sku}</div></> },
+            { key: 'ourPrice', label: 'Your Price', align: 'right', fn: r => cur(r.ourPrice) },
+            { key: 'benchmark', label: 'Benchmark', align: 'right', fn: r => cur(r.benchmark) },
+            { key: 'deltaPct', label: 'Δ', align: 'right', fn: r => <span className="text-red-400 font-mono">+{(r.deltaPct * 100).toFixed(0)}%</span> },
+            { key: 'affectedRev', label: 'Volume', align: 'right', fn: r => cur(r.affectedRev) },
+            { key: 'action', label: 'Action', fn: r => <span className="text-[11px] text-amber-300/80">{r.action}</span> },
+          ]} defaultSort={{ key: 'affectedRev', dir: 'desc' }} />
+        </Card>
+      )}
+      {data.underpriced?.length > 0 && (
+        <Card title={`${data.underpriced.length} SKUs priced below market — free margin`}>
+          <p className="text-[11px] text-slate-500 mb-3">You could raise these prices without losing Shopping clicks. Pure margin uplift if you're already selling well at current price.</p>
+          <SortableTable rows={data.underpriced.slice(0, 30)} maxHeight="260px" cols={[
+            { key: 'title', label: 'Product', fn: r => <><span className="truncate max-w-[200px] inline-block">{r.title}</span><div className="text-[10px] text-slate-600 font-mono">{r.sku}</div></> },
+            { key: 'ourPrice', label: 'Your Price', align: 'right', fn: r => cur(r.ourPrice) },
+            { key: 'benchmark', label: 'Benchmark', align: 'right', fn: r => cur(r.benchmark) },
+            { key: 'deltaPct', label: 'Δ', align: 'right', fn: r => <span className="text-emerald-400 font-mono">{(r.deltaPct * 100).toFixed(0)}%</span> },
+            { key: 'action', label: 'Action', fn: r => <span className="text-[11px] text-emerald-300/80">{r.action}</span> },
+          ]} defaultSort={{ key: 'ourPrice', dir: 'desc' }} />
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function BestSellerPanel({ data, status, error }) {
+  if (!data?.items?.length) return <LoadingEmpty status={status} error={error} emptyMsg="Best-sellers report is empty for your account. Merchant Center only emits this once your feed meets category-level click thresholds." />;
+  return (
+    <div className="space-y-4">
+      {data.missing?.length > 0 && (
+        <Card title={`${data.missing.length} best-sellers NOT in your catalog — sourcing leads`}>
+          <p className="text-[11px] text-slate-500 mb-3">Google's top-ranking products in your categories that you don't currently sell. Investigate whether you can source these.</p>
+          <div className="overflow-auto" style={{ maxHeight: '460px' }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                <tr>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Rank</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Product</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Brand</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Category</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Momentum</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Demand</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.missing.slice(0, 100).map((r, i) => (
+                  <tr key={i} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                    <td className="px-3 py-2 text-right font-mono text-pink-400 font-bold">#{r.rank}</td>
+                    <td className="px-3 py-2 text-slate-200 truncate max-w-[280px]">{r.title}</td>
+                    <td className="px-3 py-2 text-[11px] text-slate-400">{r.brand || '—'}</td>
+                    <td className="px-3 py-2 text-[11px] text-slate-500 truncate max-w-[180px]">{r.category}{r.subCategory ? ` / ${r.subCategory}` : ''}</td>
+                    <td className="px-3 py-2 text-right font-mono text-[11px]">
+                      {r.momentum > 0 ? <span className="text-emerald-400">↑{r.momentum}</span> : r.momentum < 0 ? <span className="text-red-400">↓{Math.abs(r.momentum)}</span> : '—'}
+                    </td>
+                    <td className="px-3 py-2 text-[11px] text-slate-500">{r.relativeDemand}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+      {data.brandOnly?.length > 0 && (
+        <Card title={`${data.brandOnly.length} best-sellers where you carry the brand but not this variant`}>
+          <p className="text-[11px] text-slate-500 mb-3">You already have a supplier relationship — just expand the variant mix.</p>
+          <div className="overflow-auto" style={{ maxHeight: '280px' }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                <tr>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Rank</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Product</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Brand (carried)</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.brandOnly.slice(0, 40).map((r, i) => (
+                  <tr key={i} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                    <td className="px-3 py-2 text-right font-mono text-pink-400">#{r.rank}</td>
+                    <td className="px-3 py-2 text-slate-200 truncate max-w-[260px]">{r.title}</td>
+                    <td className="px-3 py-2 text-[11px] text-emerald-400">{r.brand}</td>
+                    <td className="px-3 py-2 text-[11px] text-amber-300/80">{r.action}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function PmaxThemesPanel({ data, status, error }) {
+  if (!data?.items?.length) return <LoadingEmpty status={status} error={error} emptyMsg="No Pmax search-term insight data. Either this account has no Pmax campaigns, or the campaigns haven't accumulated enough search-category data yet." />;
+  return (
+    <div className="space-y-4">
+      {data.forkCandidates?.length > 0 && (
+        <Card title={`${data.forkCandidates.length} themes ready to fork into Search campaigns`}>
+          <p className="text-[11px] text-slate-500 mb-3">Categories with ≥5 conversions and ≥₹5k conversion value inside a Pmax campaign. Forking into a Search campaign gives you explicit keyword + bid control on queries Pmax is already proving out.</p>
+          <div className="space-y-2">
+            {data.forkCandidates.map((r, i) => (
+              <div key={i} className="px-3 py-2.5 rounded-lg bg-gray-950 border border-gray-800">
+                <div className="flex items-center gap-3">
+                  <code className="text-sm font-semibold text-purple-300">{r.categoryLabel}</code>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-slate-400 truncate max-w-[220px]">{r.campaignName}</span>
+                  <span className="text-[11px] text-slate-500 ml-auto">{Math.round(r.conversions)} conv · {cur(r.conversionValue)}</span>
+                </div>
+                <div className="text-[11px] text-amber-300/80 mt-1">→ {r.action}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+      <Card title={`Per-campaign top categories (${data.byCampaign?.length || 0} campaigns)`}>
+        <div className="space-y-3">
+          {data.byCampaign?.slice(0, 8).map(c => (
+            <div key={c.campaignId} className="border border-gray-800 rounded-lg overflow-hidden">
+              <div className="px-3 py-2 bg-gray-950 text-xs font-semibold text-slate-200 truncate">{c.campaignName}</div>
+              <div className="px-3 py-2 space-y-1">
+                {c.topCategories.map((t, ti) => (
+                  <div key={ti} className="flex items-center gap-3 text-[11px]">
+                    <code className="text-purple-300 truncate max-w-[240px]">{t.categoryLabel}</code>
+                    <span className="text-slate-500 ml-auto">{num(t.impressions)} impr · {Math.round(t.conversions)} conv · {cur(t.conversionValue)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
   );
 }
 
@@ -1239,6 +1495,82 @@ export default function GoogleAds() {
     return map;
   }, [enrichedRows, selectedBrandId]);
 
+  /* Growth panels — on-demand fetches (Keyword Planner, Merchant
+     reports, Pmax search-term insights). State lives here, not memo'd,
+     because each needs an explicit trigger. */
+  const [growth, setGrowth] = useState({});
+  const updateGrowth = update => setGrowth(g => ({ ...g, ...update }));
+
+  const loadGrowth = useCallback(async (panelId) => {
+    const gAdsCreds = active?.googleAds;
+    const merchCreds = active?.merchant;
+    if (!gAdsCreds || !data) return;
+
+    if (panelId === 'keywordGap' && !growth.keywordGaps) {
+      updateGrowth({ keywordGapsStatus: 'loading', keywordGapsError: null });
+      try {
+        // Seed from top-selling Shopify products (titles) — top 30
+        const shopifyBySku = orders.length ? shopifyBySkuFromOrders(orders) : null;
+        const topTitles = shopifyBySku ? [...shopifyBySku.values()].sort((a, b) => b.revenue - a.revenue).slice(0, 30).map(s => s.name).filter(Boolean) : [];
+        if (!topTitles.length) { updateGrowth({ keywordGapsStatus: 'error', keywordGapsError: 'Need Shopify orders to seed the scanner.' }); return; }
+        const ideas = await fetchKeywordIdeas(gAdsCreds, topTitles);
+        const result = analyzeKeywordGaps({
+          ideas,
+          existingKeywords: data.keywords || [],
+          existingSearchTerms: data.searchTerms || [],
+          shopifyBySku, orders,
+        });
+        updateGrowth({ keywordGaps: result, keywordGapsStatus: 'success' });
+      } catch (e) {
+        updateGrowth({ keywordGapsStatus: 'error', keywordGapsError: e.message });
+      }
+    }
+
+    if (panelId === 'priceCompet' && !growth.priceCompet) {
+      if (!merchCreds?.merchantId) { updateGrowth({ priceCompetStatus: 'error', priceCompetError: 'Merchant Center not connected for this brand.' }); return; }
+      updateGrowth({ priceCompetStatus: 'loading', priceCompetError: null });
+      try {
+        const rows = await fetchMerchantReport(merchCreds, 'price_competitiveness');
+        const shoppingRows = data.shoppingByCampaign?.length ? data.shoppingByCampaign : data.shopping || [];
+        const adBySku = shoppingRows.length ? aggregateShoppingBySku(shoppingRows) : null;
+        const shopifyBySku = orders.length ? shopifyBySkuFromOrders(orders) : null;
+        const result = analyzePriceCompetitiveness({ rows, adBySku, shopifyBySku });
+        updateGrowth({ priceCompet: result, priceCompetStatus: 'success' });
+      } catch (e) {
+        updateGrowth({ priceCompetStatus: 'error', priceCompetError: e.message });
+      }
+    }
+
+    if (panelId === 'bestSeller' && !growth.bestSellers) {
+      if (!merchCreds?.merchantId) { updateGrowth({ bestSellersStatus: 'error', bestSellersError: 'Merchant Center not connected for this brand.' }); return; }
+      updateGrowth({ bestSellersStatus: 'loading', bestSellersError: null });
+      try {
+        const rows = await fetchMerchantReport(merchCreds, 'best_sellers_products');
+        const result = analyzeBestSellerGap({ rows, merchantBySku: merchantData?.bySku || null, orders });
+        updateGrowth({ bestSellers: result, bestSellersStatus: 'success' });
+      } catch (e) {
+        updateGrowth({ bestSellersStatus: 'error', bestSellersError: e.message });
+      }
+    }
+
+    if (panelId === 'pmaxThemes' && !growth.pmax) {
+      const pmaxCampaigns = (data.campaigns || []).filter(c => c.channel === 'PERFORMANCE_MAX').map(c => c.id);
+      if (!pmaxCampaigns.length) { updateGrowth({ pmaxStatus: 'error', pmaxError: 'No Performance Max campaigns in this account.' }); return; }
+      updateGrowth({ pmaxStatus: 'loading', pmaxError: null });
+      try {
+        const rows = await fetchPmaxSearchTerms(gAdsCreds, pmaxCampaigns, 'last_30d');
+        const campaignsById = new Map((data.campaigns || []).map(c => [String(c.id), c]));
+        const result = analyzePmaxThemes({ rows, campaignsById });
+        updateGrowth({ pmax: result, pmaxStatus: 'success' });
+      } catch (e) {
+        updateGrowth({ pmaxStatus: 'error', pmaxError: e.message });
+      }
+    }
+  }, [active, data, orders, merchantData, growth]);
+
+  // Reset growth cache when brand changes
+  useEffect(() => { setGrowth({}); }, [selectedBrandId]);
+
   /* Opportunities — six-analysis cross-system engine */
   const opps = useMemo(() => {
     if (!data) return null;
@@ -1506,7 +1838,7 @@ export default function GoogleAds() {
 
       {/* ── OPPORTUNITIES ────────────────────────────────────────── */}
       {tab === 'opps' && (
-        <OpportunitiesTab opps={opps} brand={active} />
+        <OpportunitiesTab opps={opps} brand={active} growth={growth} onLoadGrowth={loadGrowth} />
       )}
 
       {/* ── ROOT CAUSE ────────────────────────────────────────────── */}

@@ -357,6 +357,42 @@ export async function fetchGoogleAds(creds, datePreset = 'last_30d', onProgress)
   return json;
 }
 
+/* ─── GOOGLE ADS — KEYWORD PLANNER ─────────────────────────────────── */
+export async function fetchKeywordIdeas(creds, seeds, geoTargetIds = ['2356']) {
+  const res = await fetch('/api/google-ads/keyword-ideas', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...creds, seeds, geoTargetIds }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'Keyword Planner error');
+  return json.ideas || [];
+}
+
+/* ─── GOOGLE ADS — PMAX SEARCH CATEGORIES ──────────────────────────── */
+export async function fetchPmaxSearchTerms(creds, campaignIds, datePreset = 'last_30d') {
+  const res = await fetch('/api/google-ads/pmax-search-terms', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...creds, campaignIds, datePreset }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'PMax search terms error');
+  return json.rows || [];
+}
+
+/* ─── MERCHANT CENTER — REPORTS (price, best-sellers, competitive) ── */
+export async function fetchMerchantReport(creds, report) {
+  const res = await fetch('/api/google-merchant/reports', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...creds, report }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || `Merchant report ${report} failed`);
+  return json.rows || [];
+}
+
 /* ─── GOOGLE MERCHANT CENTER ─────────────────────────────────────── */
 
 export async function verifyMerchant(creds) {

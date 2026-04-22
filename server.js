@@ -786,6 +786,213 @@ app.post('/api/google-ads/pull', async (req, res) => {
   }
 });
 
+/* ─── GOOGLE ADS KEYWORD PLANNER ────────────────────────────────────
+   KeywordPlanIdeaService.GenerateKeywordIdeas returns historical
+   monthly search volume + low/high-top-of-page CPC for a list of seed
+   keywords. We use Shopify product titles as seeds to find
+   under-advertised demand. Rate-limited hard by Google (~100
+   keywords/req, ~60 requests/min). */
+app.post('/api/google-ads/keyword-ideas', async (req, res) => {
+  const {
+    devToken, loginCustomerId, customerId, clientId, clientSecret, refreshToken,
+    seeds = [],           // array of seed keyword strings
+    geoTargetIds = [],    // optional — defaults to India (2356)
+    language = '1000',    // English
+  } = req.body;
+  if (!devToken || !customerId || !clientId || !clientSecret || !refreshToken) {
+    return res.status(400).json({ error: 'missing required fields' });
+  }
+  if (!seeds.length) return res.json({ ideas: [] });
+
+  const startMs = Date.now();
+  try {
+    const accessToken = await getGadsAccessToken(clientId, clientSecret, refreshToken);
+    const url = `${GADS_BASE}/${GADS_API_VERSION}/customers/${customerId}:generateKeywordIdeas`;
+    const headers = {
+      'Authorization':   `Bearer ${accessToken}`,
+      'developer-token': devToken,
+      'Content-Type':    'application/json',
+    };
+    if (loginCustomerId) headers['login-customer-id'] = loginCustomerId;
+
+    // Google caps to ~20 seeds per call. Chunk, cap at ~10 chunks to
+    // avoid rate-limit bans on a free dev token.
+    const geos = (geoTargetIds.length ? geoTargetIds : ['2356']).map(id => `geoTargetConstants/${id}`);
+    const languageResource = `languageConstants/${language}`;
+    const chunks = [];
+    for (let i = 0; i < seeds.length && chunks.length < 10; i += 20) {
+      chunks.push(seeds.slice(i, i + 20));
+    }
+
+    const byKeyword = new Map();
+    for (const chunk of chunks) {
+      const body = {
+        geoTargetConstants: geos,
+        language:           languageResource,
+        includeAdultKeywords: false,
+        keywordSeed: { keywords: chunk },
+        keywordPlanNetwork: 'GOOGLE_SEARCH',
+      };
+      try {
+        const r = await withRetry(() => axios.post(url, body, { headers, timeout: 30000 }));
+        for (const res of (r.data.results || [])) {
+          const text = res.text;
+          if (!text || byKeyword.has(text)) continue;
+          const m = res.keywordIdeaMetrics || {};
+          byKeyword.set(text, {
+            keyword:     text,
+            avgMonthlySearches: Number(m.avgMonthlySearches) || 0,
+            competition: m.competition || 'UNKNOWN',       // LOW | MEDIUM | HIGH
+            competitionIndex: Number(m.competitionIndex) || 0,
+            lowCpc:      m.lowTopOfPageBidMicros  ? Number(m.lowTopOfPageBidMicros)  / 1e6 : 0,
+            highCpc:     m.highTopOfPageBidMicros ? Number(m.highTopOfPageBidMicros) / 1e6 : 0,
+            monthly:     (m.monthlySearchVolumes || []).map(v => ({
+              year:  Number(v.year), month: v.month, searches: Number(v.monthlySearches) || 0,
+            })),
+          });
+        }
+      } catch (e) {
+        console.warn('[keyword-ideas] chunk failed:', e.response?.data?.error?.message || e.message);
+      }
+      // Polite pause between chunks
+      await new Promise(r => setTimeout(r, 400));
+    }
+    res.json({ ideas: [...byKeyword.values()], fetchMs: Date.now() - startMs });
+  } catch (err) {
+    const gErr = err.response?.data?.error;
+    const msg  = gErr?.details?.[0]?.errors?.[0]?.message || gErr?.message || err.message;
+    res.status(err.response?.status || 500).json({ error: msg });
+  }
+});
+
+/* ─── GOOGLE ADS PMAX SEARCH-TERM INSIGHTS ───────────────────────────
+   campaign_search_term_insight is gated by a single campaign filter —
+   so we iterate per Pmax campaign. Expensive but unavoidable. */
+app.post('/api/google-ads/pmax-search-terms', async (req, res) => {
+  const {
+    devToken, loginCustomerId, customerId, clientId, clientSecret, refreshToken,
+    campaignIds = [], datePreset = 'last_30d',
+  } = req.body;
+  if (!devToken || !customerId || !clientId || !clientSecret || !refreshToken) {
+    return res.status(400).json({ error: 'missing required fields' });
+  }
+  if (!campaignIds.length) return res.json({ rows: [] });
+
+  const during = GADS_DATE_PRESETS[datePreset] || 'LAST_30_DAYS';
+  const startMs = Date.now();
+  try {
+    const accessToken = await getGadsAccessToken(clientId, clientSecret, refreshToken);
+    const mcc = loginCustomerId || customerId;
+    const all = [];
+
+    // Cap at 10 campaigns to protect the free dev token
+    for (const cid of campaignIds.slice(0, 10)) {
+      const query = `
+        SELECT campaign.id, campaign.name,
+          campaign_search_term_insight.category_label,
+          campaign_search_term_insight.id,
+          metrics.impressions, metrics.clicks,
+          metrics.conversions, metrics.conversions_value
+        FROM campaign_search_term_insight
+        WHERE segments.date DURING ${during}
+          AND campaign_search_term_insight.campaign_id = ${cid}
+        ORDER BY metrics.impressions DESC
+        LIMIT 500`;
+      try {
+        const rows = await gadsQuery({ accessToken, devToken, loginCustomerId: mcc, customerId, query });
+        all.push(...rows);
+      } catch (e) {
+        console.warn('[pmax-search-terms]', cid, 'failed:', e.response?.data?.error?.message || e.message);
+      }
+    }
+    res.json({ rows: all, fetchMs: Date.now() - startMs });
+  } catch (err) {
+    const msg = err.response?.data?.error?.message || err.message;
+    res.status(err.response?.status || 500).json({ error: msg });
+  }
+});
+
+/* ─── GOOGLE MERCHANT CENTER REPORTS (Content API v2.1) ─────────────
+   Query price competitiveness / best sellers / competitive visibility.
+   Uses reports.search with a SQL-like query. */
+app.post('/api/google-merchant/reports', async (req, res) => {
+  const { clientId, clientSecret, refreshToken, merchantId, report, days = 30 } = req.body;
+  if (!clientId || !clientSecret || !refreshToken || !merchantId) {
+    return res.status(400).json({ error: 'credentials + merchantId required' });
+  }
+  if (!report) return res.status(400).json({ error: 'report type required (price_competitiveness | best_sellers_products | best_sellers_brands | competitive_visibility)' });
+
+  const startMs = Date.now();
+  try {
+    const accessToken = await getGadsAccessToken(clientId, clientSecret, refreshToken);
+    const url = `${GMC_BASE}/${merchantId}/reports/search`;
+    const headers = { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' };
+
+    let query;
+    if (report === 'price_competitiveness') {
+      query = `
+        SELECT offer_id, id, title, brand, price.amount_micros, price.currency_code,
+          benchmark_price.amount_micros, benchmark_price.currency_code,
+          report_country_code, report_category_id
+        FROM PriceCompetitivenessProductView
+        LIMIT 1000`;
+    } else if (report === 'best_sellers_products') {
+      query = `
+        SELECT rank, previous_rank, title, brand, category_l1, category_l2,
+          relative_demand, previous_relative_demand,
+          variant_gtins, google_product_category, report_country_code,
+          report_date.year, report_date.month, report_date.day
+        FROM BestSellersProductClusterView
+        WHERE report_date.year >= 2025
+        ORDER BY rank ASC
+        LIMIT 200`;
+    } else if (report === 'best_sellers_brands') {
+      query = `
+        SELECT rank, previous_rank, brand, relative_demand, previous_relative_demand,
+          report_country_code, report_category_id,
+          report_date.year, report_date.month, report_date.day
+        FROM BestSellersBrandView
+        WHERE report_date.year >= 2025
+        ORDER BY rank ASC
+        LIMIT 200`;
+    } else if (report === 'competitive_visibility') {
+      query = `
+        SELECT domain, rank, ads_organic_ratio, page_overlap_rate, higher_position_rate,
+          report_country_code, report_category_id,
+          date.year, date.month, date.day
+        FROM CompetitiveVisibilityCompetitorView
+        WHERE date.year >= 2025
+        ORDER BY rank ASC
+        LIMIT 100`;
+    } else {
+      return res.status(400).json({ error: 'unknown report type' });
+    }
+
+    const all = [];
+    let pageToken;
+    for (let page = 0; page < 20; page++) {
+      const body = { query, pageSize: 500 };
+      if (pageToken) body.pageToken = pageToken;
+      try {
+        const r = await withRetry(() => axios.post(url, body, { headers, timeout: 45000 }));
+        if (r.data.results?.length) all.push(...r.data.results);
+        pageToken = r.data.nextPageToken;
+        if (!pageToken) break;
+      } catch (e) {
+        const msg = e.response?.data?.error?.message || e.message;
+        // Report not available for this merchant (common — many merchants
+        // don't meet the 1000-click threshold for best-sellers, etc.)
+        return res.status(e.response?.status || 500).json({ error: msg, report });
+      }
+    }
+    res.json({ rows: all, report, fetchMs: Date.now() - startMs });
+  } catch (err) {
+    const msg = err.response?.data?.error?.message || err.message;
+    const scopeHint = /insufficient|scope|unauthorized/i.test(msg) ? ' — re-authorize with `content` scope.' : '';
+    res.status(err.response?.status || 500).json({ error: msg + scopeHint });
+  }
+});
+
 /* ─── GOOGLE MERCHANT CENTER (Content API v2.1) ─────────────────────
    GMC feeds power Shopping / Performance Max campaigns. The Google Ads
    `shopping_performance_view` only tells us *which item_ids spent how
