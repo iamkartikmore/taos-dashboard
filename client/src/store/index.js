@@ -10,6 +10,7 @@ import { mergeOrders as mergeOrdersById, mergeCustomers as mergeCustomersByKey }
 const LS_BRANDS  = 'taos_brands_v2';
 const LS_ACTIVE  = 'taos_active_brands';
 const LS_MANUAL  = 'taos_manual';
+const LS_MANUAL_LOG = 'taos_manual_log';
 const LS_LISTS   = 'taos_lists';
 const LS_INV     = 'taos_inventory_v2';      // { [brandId]: inventoryMap }
 const LS_CUST    = 'taos_customers';          // { [brandId]: { [email]: CustomerRecord } }
@@ -485,12 +486,35 @@ export const useStore = create((set, get) => {
 
     /* ── Manual labels ───────────────────────────────────────────── */
     manualMap: lsGet(LS_MANUAL, {}),
+    manualLog: lsGet(LS_MANUAL_LOG, []),
     setManualMap: m => { lsSet(LS_MANUAL, m); set({ manualMap: m }); },
     setManualRow: (adId, fields) => {
       const manualMap = { ...get().manualMap, [adId]: { ...(get().manualMap[adId] || {}), ...fields } };
       lsSet(LS_MANUAL, manualMap);
       set({ manualMap });
     },
+    // Same as setManualRow but records a per-field diff entry to manualLog and
+    // triggers enrichedRows rebuild so the change propagates across views.
+    setManualRowLogged: (adId, fields, context = {}) => {
+      const prev = get().manualMap[adId] || {};
+      const ts   = Date.now();
+      const entries = [];
+      const actual = {};
+      for (const [field, next] of Object.entries(fields || {})) {
+        const before = prev[field] ?? '';
+        if (String(before) === String(next ?? '')) continue;
+        actual[field] = next;
+        entries.push({ ts, adId, field, oldValue: before, newValue: next ?? '', source: context.source || '', adName: context.adName || '' });
+      }
+      if (!entries.length) return;
+      const manualMap = { ...get().manualMap, [adId]: { ...prev, ...actual } };
+      const manualLog = [...get().manualLog, ...entries].slice(-2000);
+      lsSet(LS_MANUAL, manualMap);
+      lsSet(LS_MANUAL_LOG, manualLog);
+      set({ manualMap, manualLog });
+      _rebuild();
+    },
+    clearManualLog: () => { lsSet(LS_MANUAL_LOG, []); set({ manualLog: [] }); },
 
     /* ── Dynamic lists ───────────────────────────────────────────── */
     dynamicLists: lsGet(LS_LISTS, DEFAULT_LISTS),

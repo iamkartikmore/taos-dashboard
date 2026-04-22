@@ -845,7 +845,7 @@ function BrandCard({ brand, brandInfo }) {
 export default function Setup() {
   const {
     brands, addBrand, brandData,
-    manualMap, setManualMap, setManualRow, rebuildEnriched,
+    manualMap, setManualMap, setManualRow, setManualRowLogged, rebuildEnriched,
     fetchLog, appendLog, clearLog,
     enrichedRows, dynamicLists, mergeDynamicLists,
     setBrandMetaData, setBrandMetaStatus,
@@ -1248,7 +1248,7 @@ export default function Setup() {
                           {['Collection','Campaign Type','Offer Type','Status Override'].map(field => (
                             <td key={field} className="px-3 py-1">
                               <select value={m[field] || ''}
-                                onChange={e => { setManualRow(row.adId, { [field]: e.target.value }); rebuildEnriched(); flashSaved(); }}
+                                onChange={e => { setManualRowLogged(row.adId, { [field]: e.target.value }, { source: 'setup', adName: row.adName }); flashSaved(); }}
                                 className="w-full px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-200 text-xs focus:outline-none focus:ring-1 focus:ring-brand-500">
                                 <option value="">—</option>
                                 {(LISTS[field] || []).map(v => <option key={v} value={v}>{v}</option>)}
@@ -1257,7 +1257,7 @@ export default function Setup() {
                           ))}
                           <td className="px-3 py-1">
                             <input type="text" value={m['Notes'] || ''}
-                              onChange={e => { setManualRow(row.adId, { Notes: e.target.value }); rebuildEnriched(); flashSaved(); }}
+                              onChange={e => { setManualRowLogged(row.adId, { Notes: e.target.value }, { source: 'setup', adName: row.adName }); flashSaved(); }}
                               placeholder="notes..."
                               className="w-32 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-200 text-xs focus:outline-none" />
                           </td>

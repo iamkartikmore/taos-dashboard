@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { TrendingUp, Wrench, Shield, Skull, AlertTriangle, Flame, TrendingDown } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
@@ -86,6 +86,37 @@ const KILL_ACTIONS = [
   { label: 'Duplicate & Fix', desc: 'Clone the ad, fix the creative/offer, kill the original', action: 'DUPLICATE' },
   { label: 'Kill & Replace', desc: 'Delete ad and launch a new concept for this product', action: 'REPLACE' },
 ];
+
+function NotesCell({ adId, adName, value }) {
+  const setManualRowLogged = useStore(s => s.setManualRowLogged);
+  const [v, setV] = useState(value || '');
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => { if (!focused) setV(value || ''); }, [value, focused]);
+
+  const commit = () => {
+    setFocused(false);
+    if ((v || '') !== (value || '')) {
+      setManualRowLogged(adId, { Notes: v }, { source: 'boards', adName });
+    }
+  };
+
+  return (
+    <input
+      type="text"
+      value={v}
+      onChange={e => setV(e.target.value)}
+      onFocus={() => setFocused(true)}
+      onBlur={commit}
+      onKeyDown={e => {
+        if (e.key === 'Enter')  e.target.blur();
+        if (e.key === 'Escape') { setV(value || ''); e.target.blur(); }
+      }}
+      placeholder="Add note…"
+      className="w-full bg-transparent text-slate-300 px-1.5 py-1 rounded border border-transparent hover:border-gray-700 focus:border-brand-500 focus:bg-gray-900 focus:outline-none transition-colors text-xs"
+    />
+  );
+}
 
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
@@ -182,7 +213,8 @@ export default function Board() {
     { key: 'spendDelta',   label: 'Spend Δ 30D', align: 'right', width: 90,
       render: v => { const n = safeNum(v); return <span className={n >= 0 ? 'text-emerald-400' : 'text-red-400'}>{fmt.delta(n)}</span>; }
     },
-    { key: 'notes', label: 'Notes', width: 140 },
+    { key: 'notes', label: 'Notes', width: 200, sortable: false,
+      render: (v, row) => <NotesCell adId={row.adId} adName={row.adName} value={v} /> },
   ];
 
   // Kill-specific columns prepended
