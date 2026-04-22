@@ -142,3 +142,24 @@ export function buildCustomerStateFromSends(sends, now = Date.now()) {
   }
   return state;
 }
+
+/**
+ * Channel-scoped state: each channel has its own fatigue budget so SMS
+ * sends don't starve email fatigue and vice-versa. Returns a map of
+ * channel → state (same shape as buildCustomerStateFromSends).
+ * Holdout rows (channel='none') are left out of every channel's count.
+ */
+export function buildCustomerStateByChannel(sends, now = Date.now()) {
+  const weekMs = 7 * 86_400_000;
+  const byChannel = {};
+  for (const s of sends) {
+    const ch = s.channel;
+    if (!ch || ch === 'none') continue;
+    if (!byChannel[ch]) byChannel[ch] = {};
+    const key = `${s.brand_id}|${s.email}`;
+    const st = byChannel[ch][key] || (byChannel[ch][key] = { sends_last_7d: 0, last_send_ms: 0 });
+    if (now - s.sent_at <= weekMs) st.sends_last_7d++;
+    if (s.sent_at > st.last_send_ms) st.last_send_ms = s.sent_at;
+  }
+  return byChannel;
+}

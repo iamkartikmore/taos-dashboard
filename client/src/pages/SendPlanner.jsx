@@ -6,7 +6,7 @@ import { buildAffinity } from '../lib/retention/affinity';
 import { buildTaxonomy, applyTaxonomy } from '../lib/retention/taxonomy';
 import { rankAllOpportunities } from '../lib/retention/opportunities';
 import { planSends } from '../lib/retention/planner';
-import { appendSends, loadAllSends, buildCustomerStateFromSends } from '../lib/sendLog';
+import { appendSends, loadAllSends, buildCustomerStateFromSends, buildCustomerStateByChannel } from '../lib/sendLog';
 import { buildProductLookup, productFor } from '../lib/retention/productLookup';
 import { downloadCsv } from '../lib/retention/exportCsv';
 import { publishPlanToListmonk } from '../lib/retention/publish';
@@ -17,11 +17,17 @@ import { attributeOrders } from '../lib/retention/attribution';
 import { buildUpliftTable, indexUplift, lookupLift } from '../lib/retention/uplift';
 import { updateBandit, makeBanditWeight } from '../lib/retention/bandit';
 import { buildSuppressionSet } from '../lib/suppression';
+import { tickJourneys, scheduleJourneyForPlan, summarizeJourneys } from '../lib/retention/journey';
 
 const BANDIT_KEY = 'retention:bandit:v1';
 const BRAND_WEIGHTS_KEY = 'retention:brandWeights:v1';
 const PER_BRAND_FATIGUE_KEY = 'retention:perBrandFatigue:v1';
 
+function mergeCounts(a, b) {
+  const out = { ...(a || {}) };
+  for (const [k, v] of Object.entries(b || {})) out[k] = (out[k] || 0) + v;
+  return out;
+}
 function loadJson(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -44,6 +50,11 @@ export default function SendPlanner() {
   const [fatigueMax, setFatigueMax] = useState(2);
   const [cooldownHours, setCooldownHours] = useState(48);
   const [minScore, setMinScore] = useState(0.2);
+  // SMS is its own channel: lower cap, stricter fatigue, independent state.
+  const [smsEnabled, setSmsEnabled] = useState(false);
+  const [smsDailyCap, setSmsDailyCap] = useState(10_000);
+  const [smsFatigueMax, setSmsFatigueMax] = useState(1);
+  const [smsMinScore, setSmsMinScore] = useState(0.35);
   const [computing, setComputing] = useState(false);
   const [plan, setPlan] = useState(null);
   const [logCount, setLogCount] = useState(0);
@@ -59,6 +70,8 @@ export default function SendPlanner() {
   const [perBrandFatigue, setPerBrandFatigue] = useState(() => loadJson(PER_BRAND_FATIGUE_KEY, {}));
   const [killedCells, setKilledCells] = useState([]);   // uplift auto-kill log
   const [banditSummary, setBanditSummary] = useState(null);
+  const [journeyStats, setJourneyStats] = useState(null);  // {total, scheduled, promoted, dropped, drop_reasons}
+  const [journeyPromoted, setJourneyPromoted] = useState(0);  // rows injected into allFlat this run
 
   const run = async () => {
     setComputing(true);
@@ -71,6 +84,10 @@ export default function SendPlanner() {
     const sendsLog = await loadAllSends();
     setLogCount(sendsLog.length);
     const customerState = buildCustomerStateFromSends(sendsLog);
+    // Per-channel state so email and SMS fatigue budgets are independent.
+    const stateByChannel = buildCustomerStateByChannel(sendsLog);
+    const emailState = stateByChannel.email || {};
+    const smsState = stateByChannel.sms || {};
 
     // Re-attribute all sends against all known orders so the uplift table
     // reflects the most recent week of deliveries.
@@ -92,6 +109,18 @@ export default function SendPlanner() {
 
     // Load suppression registry once (cross-brand).
     const suppressionSet = await buildSuppressionSet();
+
+    // Tick the journey queue — Day-3/Day-7 follow-ups whose fire_at has
+    // arrived get promoted (as pick-shaped rows) and merged into allFlat.
+    // Converted / suppressed / fatigued steps are dropped here.
+    const journeyTick = await tickJourneys({
+      orders: allOrders,
+      suppressionSet,
+      customerState,
+      fatigueMax,
+      now: Date.now(),
+    });
+    setJourneyPromoted(journeyTick.promoted.length);
 
     await new Promise(r => setTimeout(r, 20));
     const allFlat = [];
@@ -140,7 +169,40 @@ export default function SendPlanner() {
       }
     }
     setBrandCtx(ctx);
-    const result = planSends(allFlat, customerState, {
+
+    // Merge promoted journey steps into the candidate pool. Enrich each
+    // row with the consent/tier context the planner expects (same fields
+    // we added for the fresh per-brand rows above).
+    const brandNameById = Object.fromEntries(activeBrands.map(b => [b.id, b.name]));
+    for (const j of journeyTick.promoted) {
+      const f = ctx[j.brand_id]?.features?.[j.email] || {};
+      allFlat.push({
+        ...j,
+        brand: brandNameById[j.brand_id] || j.brand_id,
+        accepts_email_marketing: f.accepts_email_marketing,
+        consent: !!f.accepts_email_marketing,
+        value_tier: f.value_tier || 'unknown',
+        lifecycle_stage: f.lifecycle_stage || 'unknown',
+      });
+    }
+
+    // Send-time optimization: each pick carries a `scheduled_send_hour`
+    // (0-23 UTC) derived from the customer's preferred purchase hour, so
+    // the publisher can stagger campaigns into hourly batches instead of
+    // firing everything at once. Falls back to 10 UTC for customers with
+    // no history.
+    for (const row of allFlat) {
+      const f = ctx[row.brand_id]?.features?.[row.email];
+      const hr = f?.preferred_hour_utc;
+      row.scheduled_send_hour = (hr != null && hr >= 0 && hr < 24) ? hr : 10;
+    }
+
+    // Email lane — excludes rows that were explicitly scheduled on SMS
+    // (e.g. a promoted journey step whose original send went out as SMS).
+    const emailCandidates = allFlat
+      .filter(r => !r.channel || r.channel === 'email')
+      .map(r => ({ ...r, channel: 'email' }));
+    const emailResult = planSends(emailCandidates, emailState, {
       dailyCap, holdoutPct, fatigueMax, cooldownHours, minScore,
       upliftIndex, lookupLift,
       banditWeight: banditWeightFn,
@@ -148,8 +210,71 @@ export default function SendPlanner() {
       brandWeights,
       perBrandFatigue,
     });
+
+    // SMS lane — parallel channel with its own caps + state. Only customers
+    // with accepts_sms_marketing=true make it through; consent check lives
+    // in the candidate-mapping step so the planner's existing consent
+    // gate does the right thing (accepts_email_marketing gets rebranded
+    // to the SMS flag for this pass).
+    let smsResult = null;
+    if (smsEnabled) {
+      const smsCandidates = allFlat
+        .filter(r => {
+          // Either consent-eligible fresh rows, or journey promotions
+          // explicitly marked as SMS (so the follow-up chain stays in SMS).
+          const isSmsJourney = r.channel === 'sms';
+          const f = ctx[r.brand_id]?.features?.[r.email];
+          return isSmsJourney || !!f?.accepts_sms_marketing;
+        })
+        .map(r => ({
+          ...r,
+          channel: 'sms',
+          accepts_email_marketing: true,  // reuse planner's consent gate with SMS semantics
+          consent: true,
+          variant: r.variant || 'default',
+        }));
+      smsResult = planSends(smsCandidates, smsState, {
+        dailyCap: smsDailyCap,
+        holdoutPct,
+        fatigueMax: smsFatigueMax,
+        cooldownHours: Math.max(cooldownHours, 72),  // SMS deserves a longer cooldown
+        minScore: smsMinScore,
+        upliftIndex, lookupLift,
+        banditWeight: banditWeightFn,
+        suppressionSet,
+        brandWeights,
+        perBrandFatigue,
+      });
+      for (const p of smsResult.picks) p.channel = 'sms';
+    }
+
+    // Combine results — picks/deferred concatenated; summary derived from both.
+    const picks = [...emailResult.picks, ...(smsResult?.picks || [])];
+    const deferred = [...emailResult.deferred, ...(smsResult?.deferred || [])];
+    const byChannel = {
+      email: emailResult.picks.length,
+      sms: smsResult?.picks?.length || 0,
+    };
+    const result = {
+      picks,
+      deferred,
+      summary: {
+        ...emailResult.summary,
+        total_picked: picks.length,
+        total_deferred: deferred.length,
+        by_channel: byChannel,
+        by_brand: mergeCounts(emailResult.summary.by_brand, smsResult?.summary.by_brand),
+        by_opportunity: mergeCounts(emailResult.summary.by_opportunity, smsResult?.summary.by_opportunity),
+        expected_incremental_revenue: +(
+          (emailResult.summary.expected_incremental_revenue || 0) +
+          (smsResult?.summary.expected_incremental_revenue || 0)
+        ).toFixed(2),
+        fill_ratio: +((picks.length) / (dailyCap + (smsEnabled ? smsDailyCap : 0))).toFixed(3),
+      },
+    };
     setPlan(result);
     setBanditSummary({ arms: Object.keys(banditState.arms || {}).length, updated_at: banditState.updated_at });
+    try { setJourneyStats(await summarizeJourneys()); } catch { setJourneyStats(null); }
     setComputing(false);
   };
 
@@ -168,8 +293,11 @@ export default function SendPlanner() {
       reason:         p.reason,
       sent_at:        now,
       was_holdout:    false,
-      channel:        'email',
+      channel:        p.channel || 'email',
       campaign_id:    campaignId,
+      variant:            p.variant || 'default',
+      journey_step:       p.journey_step ?? 0,
+      scheduled_send_hour:p.scheduled_send_hour ?? null,
       converted:      null,
       converted_at:   null,
       attributed_rev: null,
@@ -194,6 +322,15 @@ export default function SendPlanner() {
       attributed_rev: null,
     }));
     const res = await appendSends([...records, ...holdouts]);
+
+    // Schedule Day-3 / Day-7 follow-ups for the Day-0 picks we just sent.
+    // Journey steps that were themselves promoted from an earlier tick
+    // (journey_step > 0) don't get re-scheduled — their chain is already
+    // laid down.
+    const day0Picks = plan.picks.filter(p => !p.journey_step || p.journey_step === 0);
+    try { await scheduleJourneyForPlan(day0Picks, campaignId, now); } catch {}
+    try { setJourneyStats(await summarizeJourneys()); } catch {}
+
     setConfirmStatus({ ok: true, added: res.added, campaignId });
   };
 
@@ -213,7 +350,7 @@ export default function SendPlanner() {
   // carries the right attributes for mail-merge.
   const MAIL_MERGE_COLUMNS = [
     'email','brand','first_name','last_name',
-    'opportunity','reason',
+    'opportunity','variant','journey_step','scheduled_send_hour','reason',
     'primary_sku','sku_name','product_url','product_image','price',
     'recommended_skus','recommended_names','recommended_urls',
     'days_since_last','value_tier','lifecycle_stage',
@@ -236,6 +373,9 @@ export default function SendPlanner() {
         first_name: f.first_name || '',
         last_name:  f.last_name  || '',
         opportunity: p.opportunity,
+        variant: p.variant || 'default',
+        journey_step: p.journey_step ?? 0,
+        scheduled_send_hour: p.scheduled_send_hour ?? '',
         reason: p.reason || '',
         primary_sku: primary,
         sku_name: primaryProd.name,
@@ -261,14 +401,16 @@ export default function SendPlanner() {
     downloadCsv(rows, 'send-plan', MAIL_MERGE_COLUMNS);
   };
 
-  // Unique brand/opportunity pairs present in the plan, used for
-  // the publish preview ("N lists to touch in Listmonk").
+  // Unique (brand, opportunity, variant) triples present in the plan, used
+  // for the publish preview ("N lists to touch in Listmonk"). Variants get
+  // their own campaigns so follow-up copy doesn't blur into the base list.
   const brandOppPairs = useMemo(() => {
     if (!plan?.picks) return [];
     const map = {};
     for (const p of plan.picks) {
-      const key = `${p.brand_id}|${p.opportunity}`;
-      if (!map[key]) map[key] = { brand: p.brand, brand_id: p.brand_id, opportunity: p.opportunity, count: 0 };
+      const variant = p.variant || 'default';
+      const key = `${p.brand_id}|${p.opportunity}|${variant}`;
+      if (!map[key]) map[key] = { brand: p.brand, brand_id: p.brand_id, opportunity: p.opportunity, variant, count: 0 };
       map[key].count++;
     }
     return Object.values(map).sort((a, b) => b.count - a.count);
@@ -389,14 +531,46 @@ export default function SendPlanner() {
         </div>
       </div>
 
-      {/* Knobs */}
+      {/* Knobs — email */}
       <div className="grid grid-cols-5 gap-3">
-        <Knob label="Daily cap" value={dailyCap} onChange={v => setDailyCap(parseInt(v, 10) || 0)} min={0} step={1000} />
+        <Knob label="Daily cap (email)" value={dailyCap} onChange={v => setDailyCap(parseInt(v, 10) || 0)} min={0} step={1000} />
         <Knob label="Holdout %" value={holdoutPct} onChange={v => setHoldoutPct(parseFloat(v) || 0)} min={0} max={0.2} step={0.01} />
         <Knob label="Fatigue / 7d" value={fatigueMax} onChange={v => setFatigueMax(parseInt(v, 10) || 0)} min={0} max={7} step={1} />
         <Knob label="Cooldown (h)" value={cooldownHours} onChange={v => setCooldownHours(parseInt(v, 10) || 0)} min={0} step={6} />
         <Knob label="Min score" value={minScore} onChange={v => setMinScore(parseFloat(v) || 0)} min={0} max={1} step={0.05} />
       </div>
+
+      {/* SMS channel — parallel lane with its own cap, fatigue, and threshold. */}
+      <div className="rounded-xl bg-gray-900/50 border border-gray-800 p-4">
+        <label className="flex items-center gap-2 text-sm text-slate-200 cursor-pointer mb-3">
+          <input type="checkbox" checked={smsEnabled} onChange={e => setSmsEnabled(e.target.checked)} />
+          Enable SMS lane <span className="text-[11px] text-slate-500">(only customers with accepts_sms_marketing — separate fatigue budget)</span>
+        </label>
+        {smsEnabled && (
+          <div className="grid grid-cols-3 gap-3">
+            <Knob label="SMS daily cap" value={smsDailyCap} onChange={v => setSmsDailyCap(parseInt(v, 10) || 0)} min={0} step={500} />
+            <Knob label="SMS fatigue / 7d" value={smsFatigueMax} onChange={v => setSmsFatigueMax(parseInt(v, 10) || 0)} min={0} max={5} step={1} />
+            <Knob label="SMS min score" value={smsMinScore} onChange={v => setSmsMinScore(parseFloat(v) || 0)} min={0} max={1} step={0.05} />
+          </div>
+        )}
+      </div>
+
+      {/* Journey + send-time status */}
+      {(journeyStats || journeyPromoted > 0) && (
+        <div className="rounded-xl bg-indigo-500/5 border border-indigo-500/20 p-4 flex items-center flex-wrap gap-4 text-xs">
+          <div className="text-indigo-300 uppercase tracking-wide">Journey queue</div>
+          {journeyStats && (
+            <>
+              <span className="text-slate-400">scheduled <span className="text-slate-100 font-medium tabular-nums">{journeyStats.scheduled}</span></span>
+              <span className="text-slate-400">promoted today <span className="text-emerald-400 font-medium tabular-nums">{journeyPromoted}</span></span>
+              <span className="text-slate-400">dropped <span className="text-rose-300 font-medium tabular-nums">{journeyStats.dropped}</span></span>
+              {Object.entries(journeyStats.drop_reasons || {}).map(([r, n]) => (
+                <span key={r} className="text-slate-500">· {r.replace(/_/g,' ')} <span className="text-slate-300">{n}</span></span>
+              ))}
+            </>
+          )}
+        </div>
+      )}
 
       {/* Governance: brand weights, per-brand fatigue override, uplift kill log, bandit */}
       <div className="grid grid-cols-3 gap-4">
@@ -501,6 +675,15 @@ export default function SendPlanner() {
             <Stat label="Est. incremental revenue" value={'₹' + Math.round(plan.summary.expected_incremental_revenue).toLocaleString('en-IN')} accent="text-amber-400" />
           </div>
 
+          {/* Channel split */}
+          {plan.summary.by_channel && (plan.summary.by_channel.sms > 0) && (
+            <div className="flex items-center gap-6 text-xs rounded-xl bg-gray-900/50 border border-gray-800 p-3">
+              <span className="uppercase tracking-wide text-slate-500">Channel</span>
+              <span className="text-slate-400">email <span className="text-slate-100 font-medium tabular-nums">{(plan.summary.by_channel.email || 0).toLocaleString()}</span></span>
+              <span className="text-slate-400">sms <span className="text-emerald-300 font-medium tabular-nums">{(plan.summary.by_channel.sms || 0).toLocaleString()}</span></span>
+            </div>
+          )}
+
           {/* By brand / opp */}
           <div className="grid grid-cols-2 gap-4">
             <div className="rounded-xl bg-gray-900/50 border border-gray-800 p-4">
@@ -557,6 +740,7 @@ export default function SendPlanner() {
                   <th className="p-3 font-medium">Brand</th>
                   <th className="p-3 font-medium">Customer</th>
                   <th className="p-3 font-medium">Opportunity</th>
+                  <th className="p-3 font-medium">Ch</th>
                   <th className="p-3 font-medium">SKUs</th>
                   <th className="p-3 font-medium">Why</th>
                   <th className="p-3 font-medium text-right">Score</th>
@@ -569,7 +753,10 @@ export default function SendPlanner() {
                     <td className="p-3 text-slate-500 tabular-nums">{i + 1}</td>
                     <td className="p-3 text-slate-300">{p.brand}</td>
                     <td className="p-3 text-slate-200 text-xs">{p.email}</td>
-                    <td className="p-3 text-slate-300">{OPP_LABEL[p.opportunity] || p.opportunity}</td>
+                    <td className="p-3 text-slate-300">{OPP_LABEL[p.opportunity] || p.opportunity}
+                      {p.variant && p.variant !== 'default' && <span className="ml-1 text-[10px] text-indigo-300">· {p.variant}</span>}
+                    </td>
+                    <td className="p-3 text-[11px] uppercase text-slate-400">{p.channel || 'email'}</td>
                     <td className="p-3 text-slate-400 text-xs max-w-[180px] truncate">{(p.recommended_skus || []).join(', ')}</td>
                     <td className="p-3 text-slate-400 text-xs max-w-[260px]">{p.reason}</td>
                     <td className="p-3 text-right tabular-nums text-slate-200">{p.score.toFixed(2)}</td>
@@ -577,7 +764,7 @@ export default function SendPlanner() {
                   </tr>
                 ))}
                 {topPicks.length === 0 && (
-                  <tr><td colSpan={8} className="p-8 text-center text-slate-500">No picks — import data for at least one brand.</td></tr>
+                  <tr><td colSpan={9} className="p-8 text-center text-slate-500">No picks — import data for at least one brand.</td></tr>
                 )}
               </tbody>
             </table>
@@ -601,7 +788,11 @@ export default function SendPlanner() {
       )}
 
       {previewOpp && (
-        <PreviewModal opp={previewOpp} onClose={() => setPreviewOpp(null)} />
+        <PreviewModal
+          opp={typeof previewOpp === 'string' ? previewOpp : previewOpp.opp}
+          variant={typeof previewOpp === 'string' ? 'default' : (previewOpp.variant || 'default')}
+          onClose={() => setPreviewOpp(null)}
+        />
       )}
     </div>
   );
@@ -648,15 +839,17 @@ function PublishModal({ onClose, pairs, readiness, running, log, results, startN
                     <div className="flex flex-wrap gap-1.5 mt-1.5">
                       {rows.map(p => {
                         const tpl = OPP_TEMPLATES[p.opportunity];
+                        const isVariant = p.variant && p.variant !== 'default';
                         return (
                           <button
-                            key={p.brand_id + p.opportunity}
-                            onClick={() => onPreview(p.opportunity)}
+                            key={p.brand_id + p.opportunity + p.variant}
+                            onClick={() => onPreview({ opp: p.opportunity, variant: p.variant })}
                             className="px-2 py-1 rounded-md bg-gray-800 hover:bg-gray-700 border border-gray-700 text-[11px] text-slate-200 flex items-center gap-1.5"
                             title="Preview template"
                           >
                             <Eye className="w-3 h-3 text-slate-500" />
                             {tpl?.label || p.opportunity}
+                            {isVariant && <span className="text-indigo-300">· {p.variant}</span>}
                             <span className="text-slate-500">· {p.count.toLocaleString()}</span>
                           </button>
                         );
@@ -731,9 +924,11 @@ function PublishModal({ onClose, pairs, readiness, running, log, results, startN
   );
 }
 
-function PreviewModal({ opp, onClose }) {
-  const tpl = OPP_TEMPLATES[opp];
-  if (!tpl) return null;
+function PreviewModal({ opp, variant = 'default', onClose }) {
+  const base = OPP_TEMPLATES[opp];
+  if (!base) return null;
+  const v = variant !== 'default' ? base.variants?.[variant] : null;
+  const tpl = v ? { ...base, ...v } : base;
   const rendered = renderPreview(tpl.body);
   return (
     <div className="fixed inset-0 z-[60] bg-black/80 flex items-center justify-center p-4" onClick={onClose}>

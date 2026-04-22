@@ -114,7 +114,8 @@ export function planSends(opportunityFlat, customerState = {}, {
     // greedy sort below picks a principled mix — rather than letting one brand
     // or one opp monopolise the 240k cap.
     const tier = row.value_tier || row.evidence?.value_tier || 'unknown';
-    const bw = banditWeight ? banditWeight(brandId, row.opportunity, tier) : 1;
+    const variant = row.variant || 'default';
+    const bw = banditWeight ? banditWeight(brandId, row.opportunity, tier, variant) : 1;
     const brandMul = brandWeights?.[brandId] ?? 1;
     const adjusted = (row.expected_incremental_revenue || 0) * bw * brandMul;
     keep({ ...row, _adjusted_eir: adjusted, _bandit_w: +bw.toFixed(3), _brand_w: brandMul });

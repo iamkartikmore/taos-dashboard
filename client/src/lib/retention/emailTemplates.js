@@ -53,6 +53,30 @@ ${PRODUCT_CARD}
 ${BTN('Reorder now', '{{ .Attribs.product_url }}')}
 <p style="font-size:13px;color:#6b7280;margin-top:24px;">{{ .Attribs.reason }}</p>
 `.trim(),
+    variants: {
+      nudge: {
+        label: 'Replenish · Day-3 nudge',
+        subject: `Still need {{ .Attribs.sku_name }}, {{ .Attribs.first_name | default "there" }}?`,
+        body: `
+<p>Hi {{ .Attribs.first_name | default "there" }},</p>
+<p>Just a gentle nudge — we saved your spot. Two taps, same favourite.</p>
+${PRODUCT_CARD}
+${BTN('Reorder in 30 seconds', '{{ .Attribs.product_url }}')}
+<p style="font-size:13px;color:#6b7280;margin-top:24px;">{{ .Attribs.reason }}</p>
+`.trim(),
+      },
+      last_call: {
+        label: 'Replenish · Day-7 last call',
+        subject: `Last reminder, {{ .Attribs.first_name | default "" }} — {{ .Attribs.sku_name }}`,
+        body: `
+<p>Hi {{ .Attribs.first_name | default "there" }},</p>
+<p>We won't bug you again after this — but it really is the moment to restock.</p>
+${PRODUCT_CARD}
+${BTN('Restock now', '{{ .Attribs.product_url }}')}
+<p style="font-size:13px;color:#6b7280;margin-top:24px;">{{ .Attribs.reason }}</p>
+`.trim(),
+      },
+    },
   },
 
   COMPLEMENT: {
@@ -79,6 +103,30 @@ ${PRODUCT_CARD}
 ${BTN('Come back with 10% off', '{{ .Attribs.product_url }}')}
 <p style="font-size:13px;color:#6b7280;margin-top:24px;">{{ .Attribs.reason }}</p>
 `.trim(),
+    variants: {
+      offer: {
+        label: 'Winback · Day-5 offer',
+        subject: `A 15% welcome-back, {{ .Attribs.first_name | default "" }}`,
+        body: `
+<p>Hi {{ .Attribs.first_name | default "there" }},</p>
+<p>We'd love to earn you back. Here's <strong>15% off</strong> your next order — no code needed at checkout.</p>
+${PRODUCT_CARD}
+${BTN('Shop 15% off', '{{ .Attribs.product_url }}')}
+<p style="font-size:13px;color:#6b7280;margin-top:24px;">{{ .Attribs.reason }}</p>
+`.trim(),
+      },
+      last_call: {
+        label: 'Winback · Day-12 last call',
+        subject: `One more try, {{ .Attribs.first_name | default "" }}`,
+        body: `
+<p>Hi {{ .Attribs.first_name | default "there" }},</p>
+<p>This is the last nudge from us. The 15% is still yours if you'd like it.</p>
+${PRODUCT_CARD}
+${BTN('Take 15% off', '{{ .Attribs.product_url }}')}
+<p style="font-size:13px;color:#6b7280;margin-top:24px;">{{ .Attribs.reason }}</p>
+`.trim(),
+      },
+    },
   },
 
   NEW_LAUNCH: {
@@ -118,14 +166,34 @@ ${PRODUCT_CARD}
 ${BTN('Claim your spot', '{{ .Attribs.product_url }}')}
 <p style="font-size:13px;color:#6b7280;margin-top:24px;">{{ .Attribs.reason }}</p>
 `.trim(),
+    variants: {
+      concierge: {
+        label: 'VIP Protect · Day-4 concierge',
+        subject: `{{ .Attribs.first_name | default "" }}, a quick hello from the team`,
+        body: `
+<p>Hi {{ .Attribs.first_name | default "there" }},</p>
+<p>No pitch this time — we just wanted to check in. If there's anything you'd like us to source, stock, or help with, reply to this email and it lands on our desk directly.</p>
+<p>Meanwhile, in case it's useful:</p>
+${PRODUCT_CARD}
+${BTN('Have a look', '{{ .Attribs.product_url }}')}
+<p style="font-size:13px;color:#6b7280;margin-top:24px;">{{ .Attribs.reason }}</p>
+`.trim(),
+      },
+    },
   },
 };
 
 /** Public list for UI dropdowns. */
 export const OPP_LIST = Object.keys(OPP_TEMPLATES);
 
-export function templateFor(opp) {
-  return OPP_TEMPLATES[opp] || OPP_TEMPLATES.REPLENISH;
+export function templateFor(opp, variant = 'default') {
+  const base = OPP_TEMPLATES[opp] || OPP_TEMPLATES.REPLENISH;
+  if (!variant || variant === 'default') return base;
+  const v = base.variants?.[variant];
+  if (!v) return base;
+  // Variant overlays onto base — any field absent on the variant falls
+  // through to the base so we never ship a half-rendered template.
+  return { ...base, ...v };
 }
 
 /**

@@ -20,8 +20,26 @@
 const DAY = 86_400_000;
 const OPPS = ['REPLENISH', 'COMPLEMENT', 'WINBACK', 'NEW_LAUNCH', 'UPSELL', 'VIP_PROTECT'];
 
-function armKey(brand, opp, tier) {
-  return `${brand}|${String(opp || 'UNKNOWN').toUpperCase()}|${String(tier || 'unknown').toUpperCase()}`;
+function armKey(brand, opp, tier, variant = 'default') {
+  return `${brand}|${String(opp || 'UNKNOWN').toUpperCase()}|${String(tier || 'unknown').toUpperCase()}|${String(variant || 'default').toLowerCase()}`;
+}
+
+/**
+ * Pre-v2 arm keys were 3-part (brand|opp|tier). v2 adds creative variant
+ * as a 4th component. On load, migrate old keys in-place by appending
+ * `|default`. Idempotent — safe to run every load.
+ */
+function migrateKeys(state) {
+  if (!state?.arms) return state;
+  const arms = state.arms;
+  for (const k of Object.keys(arms)) {
+    if (k.split('|').length === 3) {
+      const newK = `${k}|default`;
+      if (!arms[newK]) arms[newK] = arms[k];
+      delete arms[k];
+    }
+  }
+  return state;
 }
 
 /* ─── BETA SAMPLING ───────────────────────────────────────────── */
@@ -81,10 +99,10 @@ function decayArm(arm, decayPerDay = 0.01) {
  * (even non-converted ones) — each contributes 1 to α or β.
  */
 export function updateBandit(state, attributedSends, { decayPerDay = 0.01 } = {}) {
-  const s = state || initBanditState();
+  const s = migrateKeys(state || initBanditState());
   for (const send of attributedSends || []) {
     if (send.was_holdout) continue;  // bandit only learns from sent arm
-    const key = armKey(send.brand_id, send.opportunity, send.value_tier);
+    const key = armKey(send.brand_id, send.opportunity, send.value_tier, send.variant || 'default');
     const arm = getArm(s, key);
     decayArm(arm, decayPerDay);
     if (send.converted) arm.alpha += 1; else arm.beta += 1;
@@ -120,9 +138,10 @@ export function sampleWeights(state, { arms: requestedArms = null } = {}) {
  * planner can call during scoring: `w = weight(brand, opp, tier)`.
  */
 export function makeBanditWeight(state) {
-  const draws = sampleWeights(state);
-  return (brand, opp, tier) => {
-    const k = armKey(brand, opp, tier);
+  const migrated = migrateKeys(state || initBanditState());
+  const draws = sampleWeights(migrated);
+  return (brand, opp, tier, variant = 'default') => {
+    const k = armKey(brand, opp, tier, variant);
     if (k in draws) return draws[k];
     // Unseen arm: draw from prior Beta(1,1) = uniform
     return sampleBeta(1, 1);
@@ -135,8 +154,10 @@ export function makeBanditWeight(state) {
  */
 export function summarizeBandit(state) {
   const rows = [];
-  for (const [k, arm] of Object.entries(state?.arms || {})) {
-    const [brand, opp, tier] = k.split('|');
+  const s = migrateKeys(state || initBanditState());
+  for (const [k, arm] of Object.entries(s.arms || {})) {
+    const parts = k.split('|');
+    const [brand, opp, tier, variant = 'default'] = parts;
     const mean = arm.alpha / (arm.alpha + arm.beta);
     // Normal approx to Beta CI — good for α+β > 10
     const variance = (arm.alpha * arm.beta) / (Math.pow(arm.alpha + arm.beta, 2) * (arm.alpha + arm.beta + 1));
@@ -145,6 +166,7 @@ export function summarizeBandit(state) {
       brand_id: brand,
       opportunity: opp,
       value_tier: tier,
+      variant,
       alpha: +arm.alpha.toFixed(2),
       beta:  +arm.beta.toFixed(2),
       n: arm.n,

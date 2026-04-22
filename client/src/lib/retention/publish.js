@@ -69,12 +69,19 @@ export async function publishPlanToListmonk(picks, brands, ctx, opts = {}) {
   const log = msg => onProgress({ ts: Date.now(), msg });
   const results = [];
 
-  // Group picks: brand → opportunity → [picks]
+  // Group picks: brand → `${opp}::${variant}` → [picks]. Each (opp, variant)
+  // combination becomes its own Listmonk list + campaign so Day-3 "nudge"
+  // copy goes to a different list than Day-0 defaults. Listmonk is an
+  // email-only dispatcher, so SMS picks are dropped here — they leave
+  // through the SMS publisher (added separately).
   const grouped = {};
   for (const p of picks) {
     if (!p.brand_id) continue;
-    (grouped[p.brand_id] ||= {})[p.opportunity] ||= [];
-    grouped[p.brand_id][p.opportunity].push(p);
+    if (p.channel && p.channel !== 'email') continue;
+    const variant = p.variant || 'default';
+    const groupKey = `${p.opportunity}::${variant}`;
+    (grouped[p.brand_id] ||= {})[groupKey] ||= { opp: p.opportunity, variant, picks: [] };
+    grouped[p.brand_id][groupKey].picks.push(p);
   }
 
   for (const [brandId, byOpp] of Object.entries(grouped)) {
@@ -86,16 +93,22 @@ export async function publishPlanToListmonk(picks, brands, ctx, opts = {}) {
       continue;
     }
 
-    const opps = Object.keys(byOpp);
+    const groupKeys = Object.keys(byOpp);
+    // Listmonk list name encodes opp + variant so Day-3 nudges are on a
+    // distinct list from Day-0 defaults (needed if we ever run them
+    // concurrently, e.g. last-call catches up with fresh Day-0 picks).
+    const listLabelFor = (opp, variant) => variant && variant !== 'default'
+      ? `${opp}__${variant}` : opp;
     const listPrefix = `TAOS — ${brand.name}`;
-    log(`📧 ${brand.name}: ensuring ${opps.length} list(s) under "${listPrefix}"…`);
+    log(`📧 ${brand.name}: ensuring ${groupKeys.length} list(s) under "${listPrefix}"…`);
 
+    const listLabels = groupKeys.map(k => listLabelFor(byOpp[k].opp, byOpp[k].variant));
     let listMap = {};
     try {
       if (dryRun) {
-        listMap = Object.fromEntries(opps.map(o => [o, -1]));
+        listMap = Object.fromEntries(listLabels.map(l => [l, -1]));
       } else {
-        const r = await ensureListmonkLists(creds, opps, listPrefix);
+        const r = await ensureListmonkLists(creds, listLabels, listPrefix);
         listMap = r.lists || {};
       }
     } catch (e) {
@@ -104,10 +117,13 @@ export async function publishPlanToListmonk(picks, brands, ctx, opts = {}) {
     }
 
     const { features, lookup } = ctx[brandId] || {};
-    for (const [opp, list] of Object.entries(byOpp)) {
-      const listId = listMap[opp];
-      const tpl = templateFor(opp);
-      const campaignName = `${brand.name} · ${tpl.label} · ${campaignTag}`;
+    for (const [, group] of Object.entries(byOpp)) {
+      const { opp, variant, picks: list } = group;
+      const label = listLabelFor(opp, variant);
+      const listId = listMap[label];
+      const tpl = templateFor(opp, variant);
+      const vtag = variant && variant !== 'default' ? ` · ${variant}` : '';
+      const campaignName = `${brand.name} · ${tpl.label}${vtag} · ${campaignTag}`;
 
       // 1) Import subscribers
       const subs = list.map(p => ({
@@ -116,13 +132,13 @@ export async function publishPlanToListmonk(picks, brands, ctx, opts = {}) {
         attribs: attribsForPick(p, features, lookup, campaignTag),
       }));
 
-      log(`  → ${tpl.label}: ${subs.length} subscribers → list ${listId}`);
+      log(`  → ${tpl.label}${vtag}: ${subs.length} subscribers → list ${listId}`);
       if (!dryRun) {
         try {
           await importListmonkSubscribers(creds, listId, subs);
         } catch (e) {
           log(`  ❌ import failed — ${e.message}`);
-          results.push({ brand: brand.name, opp, ok: false, error: e.message });
+          results.push({ brand: brand.name, opp, variant, ok: false, error: e.message });
           continue;
         }
       }
@@ -135,14 +151,14 @@ export async function publishPlanToListmonk(picks, brands, ctx, opts = {}) {
         listIds:   [listId],
         body:      tpl.body,
         contentType: 'html',
-        tags:      ['taos', 'retention', opp.toLowerCase(), brand.id],
+        tags:      ['taos', 'retention', opp.toLowerCase(), `v_${variant}`, brand.id],
         ...(sendAt ? { sendAt } : {}),
         startNow,
       };
 
       if (dryRun) {
         log(`  ✓ [dry-run] would create campaign "${campaignName}"`);
-        results.push({ brand: brand.name, opp, ok: true, dryRun: true, recipients: subs.length });
+        results.push({ brand: brand.name, opp, variant, ok: true, dryRun: true, recipients: subs.length });
         continue;
       }
 
@@ -153,13 +169,13 @@ export async function publishPlanToListmonk(picks, brands, ctx, opts = {}) {
         const c = resp.campaign;
         log(`  ✅ campaign #${c?.id} — status: ${c?.status || 'draft'}`);
         results.push({
-          brand: brand.name, opp, ok: true,
+          brand: brand.name, opp, variant, ok: true,
           campaign_id: c?.id, status: c?.status,
           list_id: listId, recipients: subs.length,
         });
       } catch (e) {
         log(`  ❌ campaign create failed — ${e.message}`);
-        results.push({ brand: brand.name, opp, ok: false, error: e.message });
+        results.push({ brand: brand.name, opp, variant, ok: false, error: e.message });
       }
     }
   }

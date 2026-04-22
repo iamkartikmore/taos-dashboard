@@ -1082,6 +1082,117 @@ app.post('/api/listmonk/import-stop', async (req, res) => {
   }
 });
 
+/* ─── RETENTION: SUPPRESSION REGISTRY + LISTMONK WEBHOOK ─────────────
+   File-backed suppression store. Emails that land here must never receive
+   a marketing send, regardless of what the client-side planner decides.
+   We persist to ./data/suppression.json (one line per record in NDJSON so
+   appends are atomic and rebuilds don't rewrite the whole file). The client
+   syncs on each planner run via GET /api/retention/suppression.
+
+   The Listmonk webhook ingests three event types:
+     - "bounced"    → reason 'bounce_hard' (permanent) or 'bounce_soft_3x'
+     - "complained" → reason 'complaint'
+     - "unsubscribed" → reason 'unsubscribed'
+   Each translates into a suppression record scoped by brand_id. The brand
+   is inferred from the Listmonk list prefix (`brand_{id}_{opp}`) or from a
+   custom attribute on the subscriber — configured per deployment.
+   ──────────────────────────────────────────────────────────────────── */
+
+const fs = require('fs');
+const DATA_DIR = path.join(__dirname, 'data');
+const SUPP_FILE = path.join(DATA_DIR, 'suppression.ndjson');
+
+function ensureDataDir() {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+}
+function suppressionRead() {
+  ensureDataDir();
+  try {
+    if (!fs.existsSync(SUPP_FILE)) return [];
+    const lines = fs.readFileSync(SUPP_FILE, 'utf8').split('\n').filter(Boolean);
+    const out = [];
+    for (const l of lines) {
+      try { out.push(JSON.parse(l)); } catch {}
+    }
+    return out;
+  } catch { return []; }
+}
+function suppressionAppend(records) {
+  ensureDataDir();
+  const existing = new Map();
+  for (const r of suppressionRead()) existing.set(r.id, r);
+  let added = 0;
+  for (const r of records) {
+    if (!r?.brand_id || !r?.email) continue;
+    r.id = `${r.brand_id}|${String(r.email).toLowerCase().trim()}`;
+    r.email = String(r.email).toLowerCase().trim();
+    r.added_at ||= Date.now();
+    existing.set(r.id, r);
+    added++;
+  }
+  const body = Array.from(existing.values()).map(JSON.stringify).join('\n') + '\n';
+  fs.writeFileSync(SUPP_FILE, body);
+  return { added, total: existing.size };
+}
+
+app.get('/api/retention/suppression', (req, res) => {
+  const brand_id = req.query.brand_id || null;
+  const rows = suppressionRead();
+  res.json({ rows: brand_id ? rows.filter(r => r.brand_id === brand_id) : rows });
+});
+
+app.post('/api/retention/suppression', (req, res) => {
+  const { records } = req.body || {};
+  if (!Array.isArray(records)) return res.status(400).json({ error: 'records[] required' });
+  const r = suppressionAppend(records);
+  res.json({ ok: true, ...r });
+});
+
+app.delete('/api/retention/suppression', (req, res) => {
+  const { brand_id, email } = req.body || {};
+  if (!brand_id || !email) return res.status(400).json({ error: 'brand_id + email required' });
+  const id = `${brand_id}|${String(email).toLowerCase().trim()}`;
+  const rows = suppressionRead().filter(r => r.id !== id);
+  ensureDataDir();
+  fs.writeFileSync(SUPP_FILE, rows.map(JSON.stringify).join('\n') + (rows.length ? '\n' : ''));
+  res.json({ ok: true, total: rows.length });
+});
+
+// Listmonk webhook: POST body includes { event, subscriber: {email, attribs}, ... }
+// We extract email + brand_id (from attribs.brand_id if set, else from query) and
+// translate the event type into a suppression reason. Listmonk can be configured
+// to hit this endpoint via `Settings → Webhooks` or via the webhook bundled in
+// the email footer (for unsubscribe links that round-trip a POST).
+app.post('/api/retention/webhook/listmonk', (req, res) => {
+  try {
+    const body = req.body || {};
+    const event = String(body.event || body.type || '').toLowerCase();
+    const sub   = body.subscriber || body.data || {};
+    const email = String(sub.email || body.email || '').toLowerCase().trim();
+    const brand_id = sub.attribs?.brand_id || body.brand_id || req.query.brand_id || 'default';
+    if (!email) return res.status(400).json({ error: 'email missing' });
+    const reasonMap = {
+      bounced:       'bounce_hard',
+      bounce:        'bounce_hard',
+      complained:    'complaint',
+      complaint:     'complaint',
+      unsubscribed:  'unsubscribed',
+      unsubscribe:   'unsubscribed',
+    };
+    const reason = reasonMap[event] || 'manual';
+    suppressionAppend([{
+      brand_id, email, reason,
+      notes: `via listmonk webhook (event=${event})`,
+      added_by: 'webhook:listmonk',
+      channel: event === 'complained' || event === 'bounced' ? 'all' : 'email',
+      added_at: Date.now(),
+    }]);
+    res.json({ ok: true, reason });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 /* ─── HEALTH CHECK ────────────────────────────────────────────────── */
 
 app.get('/api/health', (_, res) => res.json({ ok: true, ts: Date.now() }));

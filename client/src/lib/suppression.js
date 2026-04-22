@@ -160,3 +160,40 @@ export function isSuppressed(set, brandId, email) {
   if (!set || !brandId || !email) return false;
   return set.has(`${brandId}|${normEmail(email)}`);
 }
+
+/* ─── SERVER SYNC ────────────────────────────────────────────────
+   Listmonk webhook writes bounce/complaint/unsub events into a
+   server-side NDJSON store. We pull those down on each planner run
+   and merge into local IDB so the kill set stays current without
+   requiring a manual re-import. Failures are soft — if the server is
+   unreachable the planner falls back to the local registry only.
+   ─────────────────────────────────────────────────────────────── */
+
+export async function syncSuppressionFromServer(brandId = null) {
+  try {
+    const qs = brandId ? `?brand_id=${encodeURIComponent(brandId)}` : '';
+    const res = await fetch(`/api/retention/suppression${qs}`, { method: 'GET' });
+    if (!res.ok) return { ok: false, synced: 0 };
+    const { rows } = await res.json();
+    if (!rows?.length) return { ok: true, synced: 0 };
+    const { added } = await addSuppressionBulk(rows);
+    return { ok: true, synced: added };
+  } catch (e) {
+    return { ok: false, error: e?.message };
+  }
+}
+
+export async function pushSuppressionToServer(records) {
+  if (!records?.length) return { ok: true, added: 0 };
+  try {
+    const res = await fetch('/api/retention/suppression', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ records }),
+    });
+    if (!res.ok) return { ok: false };
+    return await res.json();
+  } catch (e) {
+    return { ok: false, error: e?.message };
+  }
+}

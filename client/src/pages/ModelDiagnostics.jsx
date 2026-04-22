@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Gauge, Activity, Layers, Target, Zap, AlertTriangle } from 'lucide-react';
+import { Gauge, Activity, Layers, Target, Zap, AlertTriangle, Clock, CalendarClock } from 'lucide-react';
 import { useStore } from '../store';
 import { fitBrandSurvival, survival } from '../lib/retention/survival';
 import { buildRecommender } from '../lib/retention/recommender';
@@ -10,6 +10,7 @@ import { summarizeBandit } from '../lib/retention/bandit';
 import { loadAllSends } from '../lib/sendLog';
 import { oosSkus } from '../lib/retention/productLookup';
 import { buildProductLookup } from '../lib/retention/productLookup';
+import { summarizeJourneys, loadAllSteps } from '../lib/retention/journey';
 
 const OPP_LABEL = {
   REPLENISH: 'Replenish', COMPLEMENT: 'Complement', WINBACK: 'Winback',
@@ -26,6 +27,10 @@ export default function ModelDiagnostics() {
   const [elasticity, setElasticity] = useState({});
   const [uplift, setUplift] = useState([]);
   const [bandit, setBandit] = useState([]);
+  const [journeyStats, setJourneyStats] = useState(null);
+  const [journeySteps, setJourneySteps] = useState([]);
+  const [sendHourDist, setSendHourDist] = useState([]);  // [{hour, count}]
+  const [channelDist, setChannelDist] = useState({ email: 0, sms: 0 });
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -71,6 +76,28 @@ export default function ModelDiagnostics() {
         setBandit(state ? summarizeBandit(state) : []);
       } catch { setBandit([]); }
 
+      // Journey queue snapshot
+      try {
+        const stats = await summarizeJourneys();
+        setJourneyStats(stats);
+        const steps = await loadAllSteps();
+        setJourneySteps(steps);
+      } catch { setJourneyStats(null); setJourneySteps([]); }
+
+      // Send-hour + channel distribution from confirmed sends.
+      const hourCounts = new Array(24).fill(0);
+      let emailN = 0, smsN = 0;
+      for (const s of sends) {
+        if (s.was_holdout) continue;
+        if (s.scheduled_send_hour != null && s.scheduled_send_hour >= 0 && s.scheduled_send_hour < 24) {
+          hourCounts[s.scheduled_send_hour]++;
+        }
+        if (s.channel === 'sms') smsN++;
+        else if (s.channel === 'email') emailN++;
+      }
+      setSendHourDist(hourCounts.map((c, i) => ({ hour: i, count: c })));
+      setChannelDist({ email: emailN, sms: smsN });
+
       setLoading(false);
     })();
   }, [activeBrandIds.join(',')]);   // eslint-disable-line
@@ -90,6 +117,76 @@ export default function ModelDiagnostics() {
       </div>
 
       {loading && <div className="text-sm text-slate-500">Fitting models…</div>}
+
+      {/* JOURNEY QUEUE */}
+      <Section icon={<CalendarClock className="w-4 h-4" />} title="Journey queue (multi-touch sequencer)">
+        {journeyStats ? (
+          <div className="p-4 flex items-center flex-wrap gap-6 text-sm">
+            <Stat label="Total steps" value={journeyStats.total} />
+            <Stat label="Scheduled" value={journeyStats.scheduled} accent="text-indigo-300" />
+            <Stat label="Promoted" value={journeyStats.promoted} accent="text-emerald-300" />
+            <Stat label="Dropped" value={journeyStats.dropped} accent="text-rose-300" />
+            <div className="flex items-center gap-3 ml-4">
+              {Object.entries(journeyStats.drop_reasons || {}).map(([r, n]) => (
+                <span key={r} className="text-xs text-slate-500">
+                  {r.replace(/_/g,' ')}: <span className="text-slate-300 tabular-nums">{n}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : <div className="p-4 text-slate-500 text-sm">No journeys scheduled yet.</div>}
+        {journeySteps.length > 0 && (
+          <table className="w-full text-sm">
+            <thead className="bg-gray-900 border-b border-gray-800 text-xs uppercase text-slate-500">
+              <tr>
+                <Th>Brand</Th><Th>Opp</Th><Th>Variant</Th><Th>Step</Th>
+                <Th>Channel</Th><Th>Fires at</Th><Th>Status</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {journeySteps
+                .filter(s => s.status === 'scheduled')
+                .sort((a, b) => a.fire_at - b.fire_at)
+                .slice(0, 30)
+                .map(s => (
+                  <tr key={s.id} className="border-b border-gray-800/50">
+                    <Td>{s.brand_id}</Td>
+                    <Td>{OPP_LABEL[s.opportunity] || s.opportunity}</Td>
+                    <Td>{s.variant || 'default'}</Td>
+                    <Td>{s.step}</Td>
+                    <Td className="uppercase text-xs">{s.channel || 'email'}</Td>
+                    <Td className="text-xs">{new Date(s.fire_at).toLocaleString()}</Td>
+                    <Td className="text-indigo-300 text-xs">{s.status}</Td>
+                  </tr>
+                ))}
+              {journeySteps.filter(s => s.status === 'scheduled').length === 0 && (
+                <tr><td className="p-3 text-slate-500 text-sm" colSpan={7}>No pending steps.</td></tr>
+              )}
+            </tbody>
+          </table>
+        )}
+      </Section>
+
+      {/* SEND-HOUR + CHANNEL */}
+      <Section icon={<Clock className="w-4 h-4" />} title="Send-time distribution (scheduled hour UTC)">
+        <div className="p-4 flex items-end gap-0.5 h-28">
+          {sendHourDist.map(({ hour, count }) => {
+            const max = Math.max(1, ...sendHourDist.map(x => x.count));
+            const h = (count / max) * 100;
+            return (
+              <div key={hour} className="flex flex-col items-center flex-1 gap-1" title={`${hour}:00 — ${count}`}>
+                <div className="w-full bg-indigo-400/70 rounded-sm" style={{ height: `${h}%`, minHeight: count ? 2 : 0 }} />
+                <div className="text-[9px] text-slate-600 tabular-nums">{hour}</div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="px-4 pb-3 flex items-center gap-5 text-xs text-slate-400">
+          <span>Email <span className="text-slate-100 tabular-nums">{channelDist.email.toLocaleString()}</span></span>
+          <span>SMS <span className="text-emerald-300 tabular-nums">{channelDist.sms.toLocaleString()}</span></span>
+          <span className="text-slate-600">Derived from confirmed sends (holdout excluded).</span>
+        </div>
+      </Section>
 
       {/* SURVIVAL */}
       <Section icon={<Activity className="w-4 h-4" />} title="Weibull survival (next-order timing)">
@@ -238,21 +335,22 @@ export default function ModelDiagnostics() {
           <table className="w-full text-sm">
             <thead className="bg-gray-900 border-b border-gray-800 text-xs uppercase text-slate-500 sticky top-0">
               <tr>
-                <Th>Brand</Th><Th>Opp</Th><Th>Tier</Th>
+                <Th>Brand</Th><Th>Opp</Th><Th>Tier</Th><Th>Variant</Th>
                 <Th>α</Th><Th>β</Th><Th>n</Th>
                 <Th>mean</Th><Th>CI (95%)</Th>
               </tr>
             </thead>
             <tbody>
               {bandit.map(r => (
-                <tr key={r.brand_id + r.opportunity + r.value_tier} className="border-b border-gray-800/50">
+                <tr key={r.brand_id + r.opportunity + r.value_tier + (r.variant || '')} className="border-b border-gray-800/50">
                   <Td>{r.brand_id}</Td><Td>{OPP_LABEL[r.opportunity] || r.opportunity}</Td><Td>{r.value_tier}</Td>
+                  <Td className="text-indigo-300 text-xs">{r.variant || 'default'}</Td>
                   <Td>{r.alpha}</Td><Td>{r.beta}</Td><Td>{r.n}</Td>
                   <Td>{(r.mean * 100).toFixed(2)}%</Td>
                   <Td className="text-xs text-slate-500">{(r.ci_lo * 100).toFixed(1)}–{(r.ci_hi * 100).toFixed(1)}%</Td>
                 </tr>
               ))}
-              {!bandit.length && <tr><td className="p-4 text-slate-500" colSpan={8}>Bandit is empty — run a plan first.</td></tr>}
+              {!bandit.length && <tr><td className="p-4 text-slate-500" colSpan={9}>Bandit is empty — run a plan first.</td></tr>}
             </tbody>
           </table>
         </div>
@@ -274,3 +372,11 @@ function Section({ icon, title, children }) {
 }
 function Th({ children }) { return <th className="p-2.5 text-left font-medium">{children}</th>; }
 function Td({ children, className = '' }) { return <td className={'p-2.5 text-slate-300 tabular-nums ' + className}>{children}</td>; }
+function Stat({ label, value, accent = 'text-slate-100' }) {
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-wide text-slate-500">{label}</div>
+      <div className={'text-xl font-bold tabular-nums ' + accent}>{(value ?? 0).toLocaleString()}</div>
+    </div>
+  );
+}
