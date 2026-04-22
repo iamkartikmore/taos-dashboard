@@ -6,6 +6,7 @@ import {
 import {
   Star, TrendingUp, Package, AlertTriangle, Award, Target,
   Layers, GitMerge, ChevronRight, Search, RefreshCw, PackageX, Truck,
+  Download, ExternalLink, Ban,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -13,6 +14,60 @@ import { fmt } from '../lib/analytics';
 import { buildStarProducts, PRESETS, ACTION_STYLES, POSTURE_STYLES, SEVERITY_STYLES } from '../lib/starProducts';
 import { pullBrandOrders90d } from '../lib/autoPull';
 import MetricCard from '../components/ui/MetricCard';
+
+/* ─── product link resolver ──────────────────────────────────────
+   Prefer the merchant feed link (what Google sends customers to), fall
+   back to a Shopify storefront URL if we have a handle, then to an
+   admin URL if we have the productId. Returns null if nothing usable. */
+function productLinkFor(s, brand) {
+  if (s?.feedLink) return s.feedLink;
+  const shop = brand?.shopify?.shop;
+  if (shop && s?.handle) return `https://${shop.replace(/^https?:\/\//, '')}/products/${s.handle}`;
+  if (shop && s?.shopifyProductId) return `https://${shop.replace(/^https?:\/\//, '')}/admin/products/${s.shopifyProductId}`;
+  return null;
+}
+
+/* ─── CSV export of filtered table ───────────────────────────────
+   The user exports to push these lists into ops/procurement — include
+   the same columns they see (plus a few more that only make sense in a
+   spreadsheet like raw revenue and the full blocked-reason string). */
+function exportStarCsv(skus, brandId, brand) {
+  if (!skus?.length) return;
+  const cols = [
+    ['SKU',              s => s.sku],
+    ['Name',             s => s.name],
+    ['Quadrant',         s => s.action],
+    ['Composed Action',  s => s.composedAction?.label || s.action],
+    ['Severity',         s => s.composedAction?.severity || ''],
+    ['Stock Posture',    s => s.inventoryPosture],
+    ['Feed Status',      s => s.feedStatus || ''],
+    ['Blocked',          s => s.blocked ? 'yes' : 'no'],
+    ['Blocked Reasons',  s => (s.blockedReasons || []).join('; ')],
+    ['Star Score',       s => s.starScore?.toFixed?.(1) ?? ''],
+    ['Revenue (window)', s => Math.round(s.revenueWindow || 0)],
+    ['Units (window)',   s => s.unitsWindow || 0],
+    ['Momentum %',       s => ((s.momentum || 0) * 100).toFixed(1)],
+    ['Gateway %',        s => ((s.gatewayRate || 0) * 100).toFixed(1)],
+    ['Repeat %',         s => ((s.repeatRate || 0) * 100).toFixed(1)],
+    ['Stock',            s => s.stock ?? ''],
+    ['Reorder Point',    s => Math.round(s.reorderPoint || 0)],
+    ['Lead Time (d)',    s => s.leadTimeDays],
+    ['Runway (d)',       s => s.forwardDoS == null ? '' : Math.round(s.forwardDoS)],
+    ['Reorder By',       s => s.reorderByDate || ''],
+    ['Product Link',     s => productLinkFor(s, brand) || ''],
+  ];
+  const header = cols.map(c => `"${c[0]}"`).join(',');
+  const lines  = skus.map(s => cols.map(c => {
+    const v = c[1](s);
+    return `"${String(v ?? '').replace(/"/g, '""')}"`;
+  }).join(','));
+  const blob = new Blob(['\uFEFF' + [header, ...lines].join('\n')], { type: 'text/csv;charset=utf-8' });
+  const a = Object.assign(document.createElement('a'), {
+    href: URL.createObjectURL(blob),
+    download: `star-products-${brandId || 'brand'}-${new Date().toISOString().slice(0, 10)}.csv`,
+  });
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}
 
 /* ─── persisted plan margin (mirrors BusinessPlan storage key) ─── */
 const lsBplanKey = id => `taos_bplan_v7_${id || 'default'}`;
@@ -300,15 +355,25 @@ function BundleRadar({ bundles }) {
 }
 
 /* ─── Decision Table ───────────────────────────────────────────── */
-function DecisionTable({ skus, search, actionFilter }) {
-  const rows = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return skus.filter(s => {
+function filterSkus(skus, { search, actionFilter, hideBlocked }) {
+  const q = (search || '').trim().toLowerCase();
+  return skus.filter(s => {
+    if (actionFilter === 'BLOCKED') {
+      if (!s.blocked) return false;
+    } else {
       if (actionFilter !== 'all' && s.action !== actionFilter) return false;
-      if (!q) return true;
-      return s.sku.toLowerCase().includes(q) || (s.name || '').toLowerCase().includes(q);
-    });
-  }, [skus, search, actionFilter]);
+      if (hideBlocked && s.blocked) return false;
+    }
+    if (!q) return true;
+    return s.sku.toLowerCase().includes(q) || (s.name || '').toLowerCase().includes(q);
+  });
+}
+
+function DecisionTable({ skus, search, actionFilter, hideBlocked, brand }) {
+  const rows = useMemo(
+    () => filterSkus(skus, { search, actionFilter, hideBlocked }),
+    [skus, search, actionFilter, hideBlocked],
+  );
 
   if (!rows.length) {
     return (
@@ -336,6 +401,7 @@ function DecisionTable({ skus, search, actionFilter }) {
               <th className="px-3 py-2.5 text-right">Repeat</th>
               <th className="px-3 py-2.5 text-right">Runway</th>
               <th className="px-3 py-2.5 text-right">Reorder By</th>
+              <th className="px-3 py-2.5 text-right">Link</th>
             </tr>
           </thead>
           <tbody>
@@ -351,7 +417,14 @@ function DecisionTable({ skus, search, actionFilter }) {
                     <div className="text-[10px] text-slate-500 font-mono">{s.sku}</div>
                   </td>
                   <td className="px-3 py-2">
-                    <span className={clsx('inline-block px-2 py-0.5 rounded text-[10px] font-bold border', style.bg, style.text, style.border)}>
+                    <span
+                      title={s.blocked ? `Commercial assessment: ${s.action}. Currently BLOCKED — ${s.blockedReasons.join(' · ')}` : style.desc}
+                      className={clsx(
+                        'inline-block px-2 py-0.5 rounded text-[10px] font-bold border',
+                        style.bg, style.text, style.border,
+                        s.blocked && 'opacity-40 line-through'
+                      )}
+                    >
                       {s.action}
                     </span>
                   </td>
@@ -400,6 +473,24 @@ function DecisionTable({ skus, search, actionFilter }) {
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-400 text-[10px]">
                     {s.reorderByDate || '—'}
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    {(() => {
+                      const href = productLinkFor(s, brand);
+                      if (!href) return <span className="text-slate-700">—</span>;
+                      return (
+                        <a
+                          href={href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-0.5 text-slate-400 hover:text-amber-300"
+                          title="Open product"
+                          onClick={e => e.stopPropagation()}
+                        >
+                          <ExternalLink size={12} />
+                        </a>
+                      );
+                    })()}
                   </td>
                 </tr>
               );
@@ -521,6 +612,7 @@ export default function StarProducts() {
   const [preset, setPreset]         = useState('balanced');
   const [windowDays, setWindowDays] = useState(90);
   const [actionFilter, setActionFilter] = useState('all');
+  const [hideBlocked, setHideBlocked]   = useState(true); // default hide OOS/disapproved from actionable tabs
   const [search, setSearch]         = useState('');
   const [fetching, setFetching]     = useState(false);
   const [fetchErr, setFetchErr]     = useState(null);
@@ -657,24 +749,55 @@ export default function StarProducts() {
             </div>
             <div className="flex items-center gap-1 flex-wrap">
               <span className="text-[11px] text-slate-500 mr-1">Filter:</span>
-              {['all', 'DOUBLE DOWN', 'MILK', 'BET', 'BUNDLE', 'EXIT', 'INVESTIGATE'].map(a => (
-                <button
-                  key={a}
-                  onClick={() => setActionFilter(a)}
-                  className={clsx(
-                    'px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors',
-                    actionFilter === a
-                      ? 'border-amber-500 text-amber-300 bg-amber-900/20'
-                      : 'border-gray-800 text-slate-500 hover:text-slate-300',
-                  )}
-                >
-                  {a === 'all' ? 'All' : a}
-                </button>
-              ))}
+              {['all', 'DOUBLE DOWN', 'MILK', 'BET', 'BUNDLE', 'EXIT', 'INVESTIGATE', 'BLOCKED'].map(a => {
+                const count = a === 'all'     ? skus.length
+                            : a === 'BLOCKED' ? skus.filter(s => s.blocked).length
+                            : skus.filter(s => s.action === a && (a === 'BLOCKED' || !hideBlocked || !s.blocked)).length;
+                return (
+                  <button
+                    key={a}
+                    onClick={() => setActionFilter(a)}
+                    className={clsx(
+                      'px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors flex items-center gap-1.5',
+                      actionFilter === a
+                        ? (a === 'BLOCKED' ? 'border-red-500 text-red-300 bg-red-900/20' : 'border-amber-500 text-amber-300 bg-amber-900/20')
+                        : 'border-gray-800 text-slate-500 hover:text-slate-300',
+                    )}
+                  >
+                    {a === 'all' ? 'All' : a}
+                    <span className="text-[9px] opacity-70 tabular-nums">{count}</span>
+                  </button>
+                );
+              })}
             </div>
+            {actionFilter !== 'BLOCKED' && (
+              <label className="flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer select-none ml-auto">
+                <input
+                  type="checkbox"
+                  checked={hideBlocked}
+                  onChange={e => setHideBlocked(e.target.checked)}
+                  className="accent-amber-500"
+                />
+                <Ban size={11} className="text-slate-500" />
+                Hide blocked (OOS · disapproved · not-in-feed)
+              </label>
+            )}
+            <button
+              onClick={() => exportStarCsv(filterSkus(skus, { search, actionFilter, hideBlocked }), viewingBrandId, selectedBrandObj)}
+              className="px-2.5 py-1 rounded-lg text-[11px] font-medium border border-gray-800 text-slate-400 hover:border-gray-700 hover:text-slate-200 flex items-center gap-1.5"
+              title="Download currently-filtered SKUs as CSV"
+            >
+              <Download size={11} /> Export CSV
+            </button>
           </div>
 
-          <DecisionTable skus={skus} search={search} actionFilter={actionFilter} />
+          <DecisionTable
+            skus={skus}
+            search={search}
+            actionFilter={actionFilter}
+            hideBlocked={hideBlocked}
+            brand={selectedBrandObj}
+          />
         </>
       )}
     </div>

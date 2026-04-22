@@ -109,6 +109,8 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
           collection: inv.collectionLabel || inv.productType || '',
           stock: inv.stock ?? null,
           price: inv.price ?? p(item.price),
+          shopifyProductId: inv.productId || item.product_id || null,
+          handle: inv.handle || null,
           revenueWindow: 0, revenue30d: 0, revenue14d: 0,
           unitsWindow: 0,   units30d: 0,   units14d: 0,
           ordersWindow: 0,  orders30d: 0,
@@ -287,6 +289,17 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
     }
     s.composedAction = composeAction(s.action, s.inventoryPosture, s.feedPosture);
     s.budgetCap      = adBudgetCap(s);
+    // A SKU is "blocked" when its commercial quadrant can't be executed
+    // right now — either stock is unavailable, or the feed won't serve it.
+    // Used by the UI to filter stock-OOS winners out of actionable lists.
+    const stockBlocked = s.inventoryPosture === 'oos' || s.inventoryPosture === 'critical';
+    const feedBlocked  = s.feedPosture === 'disapproved' || s.feedPosture === 'absent';
+    s.blocked = stockBlocked || feedBlocked;
+    s.blockedReasons = [
+      stockBlocked ? (s.inventoryPosture === 'oos' ? 'Out of stock' : 'Below reorder point') : null,
+      s.feedPosture === 'disapproved' ? 'Feed disapproved' : null,
+      s.feedPosture === 'absent'      ? 'Not in feed'      : null,
+    ].filter(Boolean);
   });
 
   skus.sort((a, b) => b.starScore - a.starScore);
