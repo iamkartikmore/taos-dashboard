@@ -5,12 +5,12 @@ import {
 } from 'recharts';
 import {
   Star, TrendingUp, Package, AlertTriangle, Award, Target,
-  Layers, GitMerge, ChevronRight, Search, RefreshCw,
+  Layers, GitMerge, ChevronRight, Search, RefreshCw, PackageX, Truck,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
 import { fmt } from '../lib/analytics';
-import { buildStarProducts, PRESETS, ACTION_STYLES } from '../lib/starProducts';
+import { buildStarProducts, PRESETS, ACTION_STYLES, POSTURE_STYLES, SEVERITY_STYLES } from '../lib/starProducts';
 import { pullBrandOrders90d } from '../lib/autoPull';
 import MetricCard from '../components/ui/MetricCard';
 
@@ -325,20 +325,24 @@ function DecisionTable({ skus, search, actionFilter }) {
           <thead className="bg-gray-900/90 sticky top-0 z-10">
             <tr className="text-left text-slate-500 font-semibold">
               <th className="px-3 py-2.5">SKU</th>
-              <th className="px-3 py-2.5">Action</th>
+              <th className="px-3 py-2.5">Quadrant</th>
+              <th className="px-3 py-2.5">Stock</th>
+              <th className="px-3 py-2.5">Recommended Action</th>
               <th className="px-3 py-2.5 text-right">Star</th>
               <th className="px-3 py-2.5 text-right">Revenue</th>
-              <th className="px-3 py-2.5 text-right">Share</th>
               <th className="px-3 py-2.5 text-right">Momentum</th>
               <th className="px-3 py-2.5 text-right">Gateway</th>
               <th className="px-3 py-2.5 text-right">Repeat</th>
-              <th className="px-3 py-2.5 text-right">Bundle</th>
-              <th className="px-3 py-2.5 text-right">DoS</th>
+              <th className="px-3 py-2.5 text-right">Runway</th>
+              <th className="px-3 py-2.5 text-right">Reorder By</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((s, i) => {
               const style = ACTION_STYLES[s.action];
+              const posture = POSTURE_STYLES[s.inventoryPosture] || POSTURE_STYLES.unknown;
+              const composed = s.composedAction || { label: s.action, severity: 'info', hint: '' };
+              const sev = SEVERITY_STYLES[composed.severity] || SEVERITY_STYLES.info;
               return (
                 <tr key={s.sku} className={clsx('border-t border-gray-800/50', i % 2 === 0 ? 'bg-gray-950/40' : '')}>
                   <td className="px-3 py-2">
@@ -350,17 +354,34 @@ function DecisionTable({ skus, search, actionFilter }) {
                       {s.action}
                     </span>
                   </td>
+                  <td className="px-3 py-2">
+                    <span
+                      title={`${posture.desc} · stock ${s.stock ?? '—'} · reorder pt ${Math.round(s.reorderPoint || 0)}`}
+                      className={clsx('inline-block px-2 py-0.5 rounded text-[10px] font-bold border', posture.bg, posture.text, posture.border)}
+                    >
+                      {posture.label}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2">
+                    <span
+                      title={composed.hint}
+                      className={clsx('inline-block px-2 py-0.5 rounded text-[10px] font-bold border', sev.bg, sev.text, sev.border)}
+                    >
+                      {composed.label}
+                    </span>
+                  </td>
                   <td className="px-3 py-2 text-right tabular-nums font-semibold text-white">{s.starScore.toFixed(1)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-200">{fmt.currency(s.revenueWindow)}</td>
-                  <td className="px-3 py-2 text-right tabular-nums text-slate-400">{fmt.pct(s.revenueShare * 100)}</td>
                   <td className={clsx('px-3 py-2 text-right tabular-nums font-semibold', s.momentum >= 0 ? 'text-emerald-400' : 'text-red-400')}>
                     {s.momentum >= 0 ? '+' : ''}{(s.momentum * 100).toFixed(1)}%
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-300">{fmt.pct(s.gatewayRate * 100)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-300">{fmt.pct(s.repeatRate * 100)}</td>
-                  <td className="px-3 py-2 text-right tabular-nums text-slate-300">{fmt.pct(s.bundleRate * 100)}</td>
-                  <td className={clsx('px-3 py-2 text-right tabular-nums', s.daysOfStock == null ? 'text-slate-600' : s.daysOfStock < 14 ? 'text-red-400' : s.daysOfStock < 30 ? 'text-amber-400' : 'text-slate-400')}>
-                    {s.daysOfStock == null ? '—' : `${Math.round(s.daysOfStock)}d`}
+                  <td className={clsx('px-3 py-2 text-right tabular-nums', s.forwardDoS == null ? 'text-slate-600' : s.forwardDoS < 14 ? 'text-red-400' : s.forwardDoS < 30 ? 'text-amber-400' : 'text-slate-400')}>
+                    {s.forwardDoS == null ? '—' : s.forwardDoS >= 999 ? '∞' : `${Math.round(s.forwardDoS)}d`}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-400 text-[10px]">
+                    {s.reorderByDate || '—'}
                   </td>
                 </tr>
               );
@@ -386,8 +407,96 @@ function timeAgo(ts) {
 }
 
 /* ─── MAIN PAGE ────────────────────────────────────────────────── */
+/* ─── Inventory ribbon ─────────────────────────────────────────── */
+function InventoryRibbon({ inventory }) {
+  if (!inventory) return null;
+  const c = inventory.counts || {};
+  const atRisk = c.oos + c.critical;
+  return (
+    <div className="bg-gray-900/60 rounded-xl border border-gray-800/50 p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <PackageX size={14} className="text-red-400" />
+          <div className="text-xs text-slate-500 uppercase tracking-wide font-semibold">Inventory Posture</div>
+        </div>
+        {atRisk > 0 && (
+          <div className="text-[11px] text-red-300 font-semibold">
+            {atRisk} SKU{atRisk === 1 ? '' : 's'} at risk · {fmt.currency(inventory.revenueAtRisk || 0)} 90d revenue affected
+          </div>
+        )}
+      </div>
+      <div className="grid grid-cols-3 md:grid-cols-7 gap-2">
+        {['oos','critical','low','healthy','overstock','stale','unknown'].map(key => {
+          const style = POSTURE_STYLES[key];
+          const count = c[key] || 0;
+          return (
+            <div key={key} className={clsx('rounded-lg border px-3 py-2', style.bg, style.border)}>
+              <div className={clsx('text-[10px] uppercase tracking-wide font-semibold', style.text)}>{style.label}</div>
+              <div className={clsx('text-xl font-bold tabular-nums mt-0.5', style.text)}>{count}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-3 text-[10px] text-slate-500 leading-relaxed">
+        Posture is computed per SKU from forward-looking velocity (max of 14d/30d × positive momentum) vs. reorder point (lead time + safety × velocity).
+        Lead times default to 14d (7d safety) unless configured in Procurement.
+      </div>
+    </div>
+  );
+}
+
+/* ─── Restock urgency list ─────────────────────────────────────── */
+function RestockUrgencyList({ skus }) {
+  const urgent = skus
+    .filter(s => s.inventoryPosture === 'oos' || s.inventoryPosture === 'critical')
+    .filter(s => s.action !== 'EXIT' && s.action !== 'INVESTIGATE')
+    .sort((a, b) => (b.forwardVelocity * (Number(b.price) || 1)) - (a.forwardVelocity * (Number(a.price) || 1)))
+    .slice(0, 10);
+  if (!urgent.length) return null;
+  return (
+    <div className="bg-red-500/5 rounded-xl border border-red-500/30 p-4">
+      <div className="flex items-center gap-2 mb-3">
+        <Truck size={14} className="text-red-400" />
+        <div className="text-sm font-semibold text-red-300">Restock Queue — Ordered by Daily Revenue Loss</div>
+      </div>
+      <div className="space-y-1.5">
+        {urgent.map(s => {
+          const dailyLoss = (s.forwardVelocity || 0) * (Number(s.price) || s.revenueWindow / Math.max(1, s.unitsWindow));
+          const postureStyle = POSTURE_STYLES[s.inventoryPosture];
+          return (
+            <div key={s.sku} className="grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-3 px-3 py-2 bg-gray-900/60 rounded-lg text-xs">
+              <div className="truncate">
+                <div className="font-medium text-slate-200 truncate">{s.name}</div>
+                <div className="text-[10px] text-slate-500 font-mono">{s.sku}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[9px] text-slate-500 uppercase tracking-wide">Posture</div>
+                <span className={clsx('inline-block px-1.5 py-0.5 rounded text-[10px] font-bold border', postureStyle.bg, postureStyle.text, postureStyle.border)}>
+                  {postureStyle.label}
+                </span>
+              </div>
+              <div className="text-right">
+                <div className="text-[9px] text-slate-500 uppercase tracking-wide">Runway</div>
+                <div className="text-slate-300 tabular-nums">{s.forwardDoS == null ? '—' : `${Math.round(s.forwardDoS)}d`}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[9px] text-slate-500 uppercase tracking-wide">Lead</div>
+                <div className="text-slate-300 tabular-nums">{s.leadTimeDays}d</div>
+              </div>
+              <div className="text-right">
+                <div className="text-[9px] text-slate-500 uppercase tracking-wide">Daily Loss</div>
+                <div className="text-red-400 font-bold tabular-nums">{fmt.currency(dailyLoss)}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function StarProducts() {
-  const { brands, activeBrandIds, brandData, setBrandOrders, setBrandOrdersStatus } = useStore();
+  const { brands, activeBrandIds, brandData, procurement, setBrandOrders, setBrandOrdersStatus } = useStore();
 
   const defaultViewId = brands.find(b => activeBrandIds.includes(b.id))?.id || activeBrandIds[0] || brands[0]?.id;
   const [viewingBrandId, setViewingBrandId] = useState(defaultViewId);
@@ -423,8 +532,8 @@ export default function StarProducts() {
   const plan = useMemo(() => ({ grossMarginPct: loadPlanMargin(viewingBrandId) }), [viewingBrandId]);
 
   const analysis = useMemo(
-    () => buildStarProducts({ orders, inventoryMap, plan, preset, windowDays }),
-    [orders, inventoryMap, plan, preset, windowDays],
+    () => buildStarProducts({ orders, inventoryMap, plan, procurement, preset, windowDays }),
+    [orders, inventoryMap, plan, procurement, preset, windowDays],
   );
 
   const { skus, summary, concentration, bundles, medians } = analysis;
@@ -492,6 +601,10 @@ export default function StarProducts() {
           <ConcentrationRibbon concentration={concentration} summary={summary} />
 
           <ActionBar counts={summary.counts} total={summary.totalSkus} />
+
+          <InventoryRibbon inventory={summary.inventory} />
+
+          <RestockUrgencyList skus={skus} />
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div className="lg:col-span-2">

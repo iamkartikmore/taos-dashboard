@@ -50,8 +50,13 @@ function rankPct(values) {
   return out;
 }
 
+/* ─── INVENTORY DEFAULTS (used when procurement has no per-SKU data) ── */
+const DEFAULT_LEAD_TIME_DAYS = 14;
+const DEFAULT_SAFETY_DAYS    = 7;
+const OVERSTOCK_DAYS         = 180;
+
 /* ─── BUILD ─────────────────────────────────────────────────────── */
-export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, preset = 'balanced', windowDays = 90 } = {}) {
+export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, procurement = {}, preset = 'balanced', windowDays = 90 } = {}) {
   const now = new Date();
   const windowStart = new Date(now.getTime() - windowDays * 86400000);
   const cutoff30    = new Date(now.getTime() - 30 * 86400000);
@@ -147,6 +152,8 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
     ? Math.ceil((now - firstOrderDate) / 86400000) + 1
     : windowDays));
 
+  const suppliers = procurement?.suppliers || {};
+
   /* ── pass 2: per-SKU derived metrics ── */
   const skus = Object.values(skuMap).map(s => {
     const grossContribution = s.revenueWindow * marginPct;
@@ -154,8 +161,6 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
     const velocity30 = s.units30d / 30;
     const momentum   = velocity30 > 0 ? (velocity14 - velocity30) / velocity30 : 0;   // -1..+∞
     const daysSince  = s.lastSeen ? Math.ceil((now - s.lastSeen) / 86400000) : null;
-    // History threshold scales with the window so short windows (7d/14d) don't
-    // flag every SKU as thin. Cap at 60d for long windows.
     const historyThreshold = Math.min(60, Math.max(3, windowDays * 0.4));
     const hasHistory = s.firstSeen ? (now - s.firstSeen) / 86400000 >= historyThreshold : false;
     const revenueShare = totalRevenueInWindow > 0 ? s.revenueWindow / totalRevenueInWindow : 0;
@@ -165,10 +170,60 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
     const dailyUnits   = s.unitsWindow / effectiveDays;
     const daysOfStock  = s.stock != null && dailyUnits > 0 ? s.stock / dailyUnits : null;
 
+    /* ── inventory layer: forward-looking, lead-time aware ────────── */
+    // Use the higher of recent (14d) and trailing (30d) daily rate as the demand
+    // baseline so we don't under-project hot SKUs. Apply positive momentum only
+    // (never *lower* forecast below observed — stockout decisions should be
+    // conservative).
+    const baseVel        = Math.max(velocity14, velocity30, dailyUnits);
+    const momentumBoost  = momentum > 0 ? Math.min(momentum, 1) : 0;   // cap at +100%
+    const forwardVelocity = baseVel * (1 + momentumBoost);
+    const forwardDoS = s.stock != null && forwardVelocity > 0
+      ? s.stock / forwardVelocity
+      : (s.stock != null && s.stock > 0 ? 999 : null);
+
+    const supplier = suppliers[s.sku] || {};
+    const leadTimeDays = Number(supplier.leadTimeDays) > 0 ? Number(supplier.leadTimeDays) : DEFAULT_LEAD_TIME_DAYS;
+    const safetyDays   = Number(supplier.safetyDays)   > 0 ? Number(supplier.safetyDays)   : DEFAULT_SAFETY_DAYS;
+    const reorderPoint = (leadTimeDays + safetyDays) * forwardVelocity;
+    const safetyStock  = safetyDays * forwardVelocity;
+    const reorderByDate = (forwardDoS != null && forwardDoS < 999 && leadTimeDays > 0 && forwardVelocity > 0)
+      ? new Date(now.getTime() + Math.max(0, (forwardDoS - leadTimeDays)) * 86400000).toISOString().slice(0, 10)
+      : null;
+
+    let inventoryPosture = 'unknown';
+    let inventoryAction  = 'UNKNOWN';
+    if (s.stock == null) {
+      inventoryPosture = 'unknown';
+      inventoryAction  = 'UNKNOWN';
+    } else if (s.stock <= 0) {
+      inventoryPosture = 'oos';
+      inventoryAction  = forwardVelocity > 0 ? 'RESTOCK' : 'REVIEW';
+    } else if (forwardVelocity > 0 && s.stock <= reorderPoint) {
+      inventoryPosture = 'critical';
+      inventoryAction  = 'REORDER NOW';
+    } else if (forwardVelocity > 0 && forwardDoS <= leadTimeDays * 2) {
+      inventoryPosture = 'low';
+      inventoryAction  = 'REORDER SOON';
+    } else if (forwardVelocity > 0 && forwardDoS > OVERSTOCK_DAYS) {
+      inventoryPosture = 'overstock';
+      inventoryAction  = 'LIQUIDATE';
+    } else if (forwardVelocity === 0 && s.stock > 0) {
+      inventoryPosture = 'stale';
+      inventoryAction  = 'LIQUIDATE';
+    } else {
+      inventoryPosture = 'healthy';
+      inventoryAction  = 'OK';
+    }
+
+    const stockConstrained = inventoryPosture === 'oos' || inventoryPosture === 'critical';
+
     return {
       ...s,
       revenueShare, grossContribution, momentum,
       velocity14, velocity30, dailyUnits, daysOfStock, daysSince,
+      forwardVelocity, forwardDoS, reorderPoint, safetyStock, leadTimeDays, safetyDays, reorderByDate,
+      inventoryPosture, inventoryAction, stockConstrained,
       gatewayRate, repeatRate, bundleRate,
       hasHistory, thinData: s.ordersWindow < 5 || !hasHistory,
     };
@@ -203,15 +258,19 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
   const econMedian  = median(playable.map(s => s.econRank));
   const stratMedian = median(playable.map(s => s.stratRank));
   skus.forEach(s => {
-    if (s.thinData) { s.action = 'INVESTIGATE'; s.quadrant = 'thin'; return; }
-    const hiEcon  = s.econRank  >= econMedian;
-    const hiStrat = s.stratRank >= stratMedian;
-    if (hiEcon && hiStrat)       { s.action = 'DOUBLE DOWN'; s.quadrant = 'star'; }
-    else if (hiEcon && !hiStrat) { s.action = 'MILK';        s.quadrant = 'cash'; }
-    else if (!hiEcon && hiStrat) {
-      s.action = s.bundleRate >= 0.60 ? 'BUNDLE' : 'BET';
-      s.quadrant = s.bundleRate >= 0.60 ? 'bundle' : 'question';
-    } else                       { s.action = 'EXIT';        s.quadrant = 'dog'; }
+    if (s.thinData) { s.action = 'INVESTIGATE'; s.quadrant = 'thin'; }
+    else {
+      const hiEcon  = s.econRank  >= econMedian;
+      const hiStrat = s.stratRank >= stratMedian;
+      if (hiEcon && hiStrat)       { s.action = 'DOUBLE DOWN'; s.quadrant = 'star'; }
+      else if (hiEcon && !hiStrat) { s.action = 'MILK';        s.quadrant = 'cash'; }
+      else if (!hiEcon && hiStrat) {
+        s.action = s.bundleRate >= 0.60 ? 'BUNDLE' : 'BET';
+        s.quadrant = s.bundleRate >= 0.60 ? 'bundle' : 'question';
+      } else                       { s.action = 'EXIT';        s.quadrant = 'dog'; }
+    }
+    s.composedAction = composeAction(s.action, s.inventoryPosture);
+    s.budgetCap      = adBudgetCap(s);
   });
 
   skus.sort((a, b) => b.starScore - a.starScore);
@@ -227,7 +286,8 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
         .reduce((sum, s) => sum + s.newOrders, 0) / totalNewOrders
     : 0;
 
-  /* ── bundle radar: top pairs by lift × support ── */
+  /* ── bundle radar: top pairs by lift × support, filtered to sellable SKUs ── */
+  const postureBySku = new Map(skus.map(s => [s.sku, s.inventoryPosture]));
   const totalOrdersForLift = totalOrdersInWindow || 1;
   const bundles = Object.entries(crossSell).map(([key, count]) => {
     const [a, b] = key.split('|');
@@ -238,17 +298,36 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
     const supportB = countB / totalOrdersForLift;
     const lift = supportA > 0 && supportB > 0 ? support / (supportA * supportB) : 0;
     const confidence = count / countA; // P(B | A)
+    const postureA = postureBySku.get(a) || 'unknown';
+    const postureB = postureBySku.get(b) || 'unknown';
+    const blocked = postureA === 'oos' || postureB === 'oos';
     return {
       a, b,
       nameA: skuMap[a]?.name || a,
       nameB: skuMap[b]?.name || b,
+      postureA, postureB, blocked,
       count, support, lift, confidence,
       score: lift * Math.log2(1 + count),
     };
   })
-  .filter(pair => pair.count >= 3 && pair.lift > 1.2)
+  .filter(pair => pair.count >= 3 && pair.lift > 1.2 && !pair.blocked)
   .sort((a, b) => b.score - a.score)
   .slice(0, 15);
+
+  /* ── inventory roll-ups for the summary ── */
+  const playableForInv = skus.filter(s => !s.thinData);
+  const invCounts = {
+    oos:       playableForInv.filter(s => s.inventoryPosture === 'oos').length,
+    critical:  playableForInv.filter(s => s.inventoryPosture === 'critical').length,
+    low:       playableForInv.filter(s => s.inventoryPosture === 'low').length,
+    healthy:   playableForInv.filter(s => s.inventoryPosture === 'healthy').length,
+    overstock: playableForInv.filter(s => s.inventoryPosture === 'overstock').length,
+    stale:     playableForInv.filter(s => s.inventoryPosture === 'stale').length,
+    unknown:   playableForInv.filter(s => s.inventoryPosture === 'unknown').length,
+  };
+  const revenueAtRisk = playableForInv
+    .filter(s => s.stockConstrained)
+    .reduce((sum, s) => sum + s.revenueWindow, 0);
 
   /* ── summary ── */
   const summary = {
@@ -270,6 +349,10 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
       exit:       skus.filter(s => s.action === 'EXIT').length,
       investigate:skus.filter(s => s.action === 'INVESTIGATE').length,
     },
+    inventory: {
+      counts: invCounts,
+      revenueAtRisk,
+    },
   };
 
   return {
@@ -279,6 +362,66 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
     bundles,
     medians: { econ: econMedian, strat: stratMedian },
   };
+}
+
+/* ─── ACTION COMPOSITION ──────────────────────────────────────────
+   Layer the commercial quadrant with the inventory posture. Stock
+   constraints *veto* scale actions (you can't scale what you can't
+   ship), and they *convert* exit actions (delist-clean vs. liquidate). */
+function composeAction(commercial, posture) {
+  if (commercial === 'INVESTIGATE') return { label: 'INVESTIGATE', severity: 'info', hint: 'Thin data — revisit.' };
+  switch (commercial) {
+    case 'DOUBLE DOWN':
+      if (posture === 'oos')       return { label: 'HALT ADS · RESTOCK',  severity: 'critical', hint: 'Scaling was best bet but stock is out. Pause spend, expedite PO.' };
+      if (posture === 'critical')  return { label: 'SCALE + PO TODAY',    severity: 'high',     hint: 'Winner — but runway is under reorder point. Cap budget to stock runway and place PO today.' };
+      if (posture === 'low')       return { label: 'SCALE · WATCH STOCK', severity: 'medium',   hint: 'Scale, but queue a PO before runway goes critical.' };
+      if (posture === 'overstock') return { label: 'SCALE AGGRESSIVE',    severity: 'high',     hint: 'Winner with excess stock — push hard, no supply risk.' };
+      return { label: 'SCALE', severity: 'high', hint: 'Scale ad spend. Stock can support it.' };
+    case 'MILK':
+      if (posture === 'oos')       return { label: 'RESTOCK URGENT',      severity: 'critical', hint: "Harvest plan blocked — can't milk what isn't on the shelf." };
+      if (posture === 'critical')  return { label: 'HARVEST · REORDER',   severity: 'high',     hint: 'Cash cow running out. PO now; keep ad budget capped to runway.' };
+      if (posture === 'low')       return { label: 'HARVEST · PO SOON',   severity: 'medium',   hint: 'Harvest, PO within reorder lead time.' };
+      if (posture === 'overstock') return { label: 'FLASH SALE',          severity: 'medium',   hint: 'Overstocked cash cow — run a promo/flash to pull cash forward.' };
+      if (posture === 'stale')     return { label: 'LIQUIDATE',           severity: 'medium',   hint: 'Revenue exists but no forward velocity — clear dead shelf.' };
+      return { label: 'HARVEST', severity: 'medium', hint: 'Steady margin. Minimal reinvestment.' };
+    case 'BET':
+      if (posture === 'oos')       return { label: 'HOLD TEST · RESTOCK', severity: 'high',     hint: "Can't test-scale a SKU that's out. Restock before campaigning." };
+      if (posture === 'critical')  return { label: 'SMALL TEST + PO',     severity: 'medium',   hint: 'Run a small scale test and simultaneously place PO.' };
+      if (posture === 'overstock') return { label: 'TEST · BUNDLE DUMP',  severity: 'medium',   hint: 'Test scale; if it doesn\'t move, liquidate via bundle.' };
+      return { label: 'TEST SCALE', severity: 'medium', hint: 'Strategic pull exists. Test before committing budget.' };
+    case 'BUNDLE':
+      if (posture === 'oos')       return { label: 'BUNDLE BLOCKED',      severity: 'high',     hint: 'Attachment SKU is OOS — pairs will break. Restock first.' };
+      if (posture === 'critical')  return { label: 'BUNDLE · REORDER',    severity: 'medium',   hint: 'Keep bundling but PO now — attach rate will drain stock quickly.' };
+      if (posture === 'overstock') return { label: 'BUNDLE LIQUIDATE',    severity: 'medium',   hint: 'Use bundles to clear excess attachment stock.' };
+      return { label: 'BUNDLE', severity: 'info', hint: 'Attaches to orders. Bundle rather than advertise alone.' };
+    case 'EXIT':
+      if (posture === 'oos')       return { label: 'DELIST CLEAN',        severity: 'info',     hint: 'Already out, low value — delist, free the shelf.' };
+      if (posture === 'critical')  return { label: 'SELL THROUGH',        severity: 'info',     hint: 'Let current stock drain then delist. No restock.' };
+      if (posture === 'overstock') return { label: 'LIQUIDATE',           severity: 'medium',   hint: 'Bundle/discount — convert shelf to cash.' };
+      if (posture === 'stale')     return { label: 'LIQUIDATE',           severity: 'medium',   hint: 'Dead stock. Bundle/discount to clear.' };
+      return { label: 'SELL THROUGH', severity: 'info', hint: 'Low value — drain stock, then delist.' };
+    default:
+      return { label: commercial, severity: 'info', hint: '' };
+  }
+}
+
+/* ─── AD BUDGET CEILING ───────────────────────────────────────────
+   For SKUs where the commercial action is SCALE/DOUBLE DOWN, suggest a
+   weekly budget ceiling bounded by stock runway so the campaign can't
+   outrun inventory. Returns { weeklyCapRs, daysOfRunway } or null. */
+function adBudgetCap(s) {
+  if (!['DOUBLE DOWN', 'MILK', 'BET'].includes(s.action)) return null;
+  if (s.stock == null || s.forwardVelocity <= 0) return null;
+  const price = Number(s.price) || (s.revenueWindow / Math.max(1, s.unitsWindow));
+  if (!price) return null;
+  // Safe target: don't let ads pull more than the runway buys us between now
+  // and a realistic PO arrival (leadTimeDays). Unit budget per week:
+  const usableUnitsPerWeek = Math.min(s.forwardVelocity, s.stock / Math.max(1, s.leadTimeDays)) * 7;
+  if (usableUnitsPerWeek <= 0) return null;
+  // Rough CAC assumption: ad spend equal to ~30% of realized revenue is a
+  // working ceiling — UI can override with the brand's target MER later.
+  const weeklyCapRs = usableUnitsPerWeek * price * 0.30;
+  return { weeklyCapRs, daysOfRunway: s.forwardDoS };
 }
 
 function median(arr) {
@@ -295,4 +438,21 @@ export const ACTION_STYLES = {
   'BUNDLE':      { color: '#f59e0b', bg: 'bg-amber-500/15',    text: 'text-amber-300',   border: 'border-amber-500/30',   desc: 'Attaches to orders. Bundle rather than advertise alone.' },
   'EXIT':        { color: '#ef4444', bg: 'bg-red-500/15',      text: 'text-red-300',     border: 'border-red-500/30',     desc: 'Low Econ × Low Strat. Delist unless it has a non-commercial role.' },
   'INVESTIGATE': { color: '#64748b', bg: 'bg-gray-500/15',     text: 'text-slate-300',   border: 'border-gray-500/30',    desc: 'Under 60d of data or < 5 orders. Revisit next cycle.' },
+};
+
+export const POSTURE_STYLES = {
+  oos:       { color: '#ef4444', bg: 'bg-red-500/15',     text: 'text-red-300',      border: 'border-red-500/40',     label: 'OOS',        desc: 'Out of stock. Cannot fulfil.' },
+  critical:  { color: '#f97316', bg: 'bg-orange-500/15',  text: 'text-orange-300',   border: 'border-orange-500/40',  label: 'CRITICAL',   desc: 'Below reorder point — runway < lead time + safety.' },
+  low:       { color: '#f59e0b', bg: 'bg-amber-500/15',   text: 'text-amber-300',    border: 'border-amber-500/30',   label: 'LOW',        desc: 'Runway < 2× lead time. Queue a PO soon.' },
+  healthy:   { color: '#22c55e', bg: 'bg-emerald-500/10', text: 'text-emerald-300',  border: 'border-emerald-500/20', label: 'HEALTHY',    desc: 'Comfortable runway above reorder point.' },
+  overstock: { color: '#0ea5e9', bg: 'bg-sky-500/15',     text: 'text-sky-300',      border: 'border-sky-500/30',     label: 'OVERSTOCK',  desc: 'Runway > 180 days. Liquidate via bundles/flash.' },
+  stale:     { color: '#a855f7', bg: 'bg-purple-500/15',  text: 'text-purple-300',   border: 'border-purple-500/30',  label: 'STALE',      desc: 'Stock sitting, no forward velocity. Dead shelf.' },
+  unknown:   { color: '#64748b', bg: 'bg-gray-500/10',    text: 'text-slate-400',    border: 'border-gray-500/20',    label: 'NO DATA',    desc: 'Inventory map has no record for this SKU.' },
+};
+
+export const SEVERITY_STYLES = {
+  critical: { bg: 'bg-red-500/20',     text: 'text-red-200',     border: 'border-red-500/40' },
+  high:     { bg: 'bg-orange-500/15',  text: 'text-orange-200',  border: 'border-orange-500/30' },
+  medium:   { bg: 'bg-amber-500/15',   text: 'text-amber-200',   border: 'border-amber-500/30' },
+  info:     { bg: 'bg-slate-500/10',   text: 'text-slate-300',   border: 'border-slate-500/20' },
 };
