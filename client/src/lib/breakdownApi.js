@@ -112,7 +112,7 @@ async function fetchBreakdownPages(ver, token, accountId, spec, windowKey, dateR
 
   while (url && page < maxPages) {
     const json = await proxyGet(url, page === 0 ? params : {});
-    if (json.data?.length) out.push(...json.data);
+    if (json.data?.length) { for (const row of json.data) out.push(row); }
     url = json.paging?.next || '';
     page++;
     await new Promise(r => setTimeout(r, 150));
@@ -138,7 +138,7 @@ export async function pullAllBreakdowns({ ver, token, accounts, specs, window: w
           __bdKey:      spec.key,
           __window:     windowKey,
         }));
-        result[spec.key].push(...tagged);
+        for (const row of tagged) result[spec.key].push(row);
         onProgress?.(`[${account.key}] ${spec.label}: ${rows.length} rows`);
       } catch (err) {
         onProgress?.(`[${account.key}] ${spec.label}: ERROR — ${err.message}`);

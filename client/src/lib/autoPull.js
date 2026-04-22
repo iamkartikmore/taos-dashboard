@@ -81,7 +81,7 @@ export async function pullBrandOrders90d(brand, setBrandOrders, setBrandOrdersSt
         });
         try {
           const res = await fetchShopifyOrders(shop, clientId, clientSecret, cStart, cEnd);
-          all.push(...(res.orders || []));
+          if (res.orders?.length) { for (const o of res.orders) all.push(o); }
           done = true;
         } catch (e) {
           if (attempt >= 2) throw e;

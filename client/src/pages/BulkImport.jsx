@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { Upload, FileText, CheckCircle2, AlertCircle, X, Loader2, Package, Users, Sparkles, Table2, Brain } from 'lucide-react';
+import { Upload, FileText, CheckCircle2, AlertCircle, X, Loader2, Package, Users, Sparkles, Table2, Brain, Trash2 } from 'lucide-react';
 import { useStore } from '../store';
 import { parseBulkCsvFiles } from '../lib/shopifyCsvImport';
 import { buildAllFeatures } from '../lib/retention/features';
@@ -15,7 +15,8 @@ function fmtBytes(n) {
 }
 
 export default function BulkImport() {
-  const { brands, activeBrandIds, brandData, mergeBrandOrdersFromCsv, mergeBrandCustomersFromCsv } = useStore();
+  const { brands, activeBrandIds, brandData, mergeBrandOrdersFromCsv, mergeBrandCustomersFromCsv, clearBrandImport } = useStore();
+  const [clearing, setClearing] = useState(false);
   const activeBrands = brands.filter(b => activeBrandIds.includes(b.id));
   const [targetBrandId, setTargetBrandId] = useState(activeBrands[0]?.id || brands[0]?.id || '');
   const [files, setFiles] = useState([]);
@@ -95,6 +96,25 @@ export default function BulkImport() {
 
   const appendLog = msg => setLog(prev => [...prev.slice(-50), { t: Date.now(), msg }]);
 
+  const doClearImport = async () => {
+    if (!targetBrandId) return;
+    const ok = window.confirm(
+      `Clear all imported orders (${currentOrders.toLocaleString()}) and customers (${currentCustomers.toLocaleString()}) for ${brand?.name || 'this brand'}?\n\nThis removes them from memory AND IndexedDB. Cannot be undone — you'll need to re-import from CSV or pull fresh from Shopify.`
+    );
+    if (!ok) return;
+    setClearing(true); setResult(null);
+    try {
+      appendLog(`Clearing imported data for ${brand?.name}...`);
+      await clearBrandImport(targetBrandId);
+      appendLog(`✅ Cleared — 0 orders, 0 customers`);
+      setFiles([]);
+    } catch (e) {
+      appendLog(`❌ Clear failed: ${e.message}`);
+    } finally {
+      setClearing(false);
+    }
+  };
+
   const doImport = async () => {
     if (!targetBrandId || !files.length) return;
     setProcessing(true); setResult(null); setLog([]);
@@ -149,22 +169,34 @@ export default function BulkImport() {
           ))}
         </select>
         {brand && (
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <div className="bg-gray-950/50 rounded-lg px-3 py-2 flex items-center gap-2">
-              <Package size={14} className="text-emerald-400" />
-              <div>
-                <div className="text-[10px] text-slate-500">Orders on file</div>
-                <div className="text-sm font-semibold text-white">{currentOrders.toLocaleString()}</div>
+          <>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <div className="bg-gray-950/50 rounded-lg px-3 py-2 flex items-center gap-2">
+                <Package size={14} className="text-emerald-400" />
+                <div>
+                  <div className="text-[10px] text-slate-500">Orders on file</div>
+                  <div className="text-sm font-semibold text-white">{currentOrders.toLocaleString()}</div>
+                </div>
+              </div>
+              <div className="bg-gray-950/50 rounded-lg px-3 py-2 flex items-center gap-2">
+                <Users size={14} className="text-blue-400" />
+                <div>
+                  <div className="text-[10px] text-slate-500">Customers on file</div>
+                  <div className="text-sm font-semibold text-white">{currentCustomers.toLocaleString()}</div>
+                </div>
               </div>
             </div>
-            <div className="bg-gray-950/50 rounded-lg px-3 py-2 flex items-center gap-2">
-              <Users size={14} className="text-blue-400" />
-              <div>
-                <div className="text-[10px] text-slate-500">Customers on file</div>
-                <div className="text-sm font-semibold text-white">{currentCustomers.toLocaleString()}</div>
-              </div>
-            </div>
-          </div>
+            {(currentOrders > 0 || currentCustomers > 0) && (
+              <button
+                onClick={doClearImport}
+                disabled={clearing || processing}
+                className="mt-3 w-full px-3 py-2 rounded-lg bg-red-900/20 hover:bg-red-900/40 disabled:opacity-50 border border-red-800/40 text-red-300 text-xs font-medium flex items-center justify-center gap-2 transition-colors"
+              >
+                {clearing ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                {clearing ? 'Clearing…' : `Clear imported data for ${brand.name}`}
+              </button>
+            )}
+          </>
         )}
       </div>
 

@@ -2,8 +2,8 @@ import { create } from 'zustand';
 import { buildEnrichedRows } from '../lib/analytics';
 import { normalizeBreakdownRow } from '../lib/breakdownAnalytics';
 import { mergeCustomerCache } from '../lib/shopifyAnalytics';
-import { saveOrders, loadAllOrders } from '../lib/orderStorage';
-import { saveCustomers } from '../lib/customerStorage';
+import { saveOrders, loadAllOrders, clearOrders as idbClearOrders } from '../lib/orderStorage';
+import { saveCustomers, clearCustomers as idbClearCustomers } from '../lib/customerStorage';
 import { mergeOrders as mergeOrdersById, mergeCustomers as mergeCustomersByKey } from '../lib/shopifyCsvImport';
 
 /* ─── LOCALSTORAGE ──────────────────────────────────────────────── */
@@ -110,28 +110,31 @@ export const useStore = create((set, get) => {
 
     const active = brands.filter(b => activeBrandIds.includes(b.id));
 
-    // Meta
-    const all7d = [], all30d = [];
+    // Meta — use concat (returns new array, no spread) to avoid call-stack
+    // overflow when insights arrays grow large.
+    let all7d = [], all30d = [];
     const adsetMap = {}, campaignMap = {}, adMap = {};
     active.forEach(b => {
       const d = brandData[b.id];
       if (!d) return;
-      all7d.push(...(d.insights7d  || []));
-      all30d.push(...(d.insights30d || []));
+      if (d.insights7d?.length)  all7d  = all7d.concat(d.insights7d);
+      if (d.insights30d?.length) all30d = all30d.concat(d.insights30d);
       (d.adsets    || []).forEach(a => { adsetMap[a.id]    = a; });
       (d.campaigns || []).forEach(c => { campaignMap[c.id] = c; });
       (d.ads       || []).forEach(a => { adMap[a.id]       = a; });
     });
     const enrichedRows = buildEnrichedRows(all7d, all30d, manualMap, adsetMap, campaignMap, adMap);
 
-    // Shopify
+    // Shopify — same safe pattern. With CSV imports these arrays easily
+    // exceed 50k rows, and `push(...arr)` would throw "Maximum call stack
+    // size exceeded" at the V8 argument limit.
     const inventoryMap = {};
-    const shopifyOrders = [];
+    let shopifyOrders = [];
     active.forEach(b => {
       const d = brandData[b.id];
       if (!d) return;
       Object.assign(inventoryMap, d.inventoryMap || {});
-      shopifyOrders.push(...(d.orders || []));
+      if (d.orders?.length) shopifyOrders = shopifyOrders.concat(d.orders);
     });
 
     // Derive overall fetch status from brand statuses
@@ -332,6 +335,30 @@ export const useStore = create((set, get) => {
       set({ brandData, customerCache: newCache });
       _rebuild({ brandData });
       return { total: merged.length, added: merged.length - (cur.orders?.length || 0) };
+    },
+
+    /* Drop all imported orders + customers for a brand (memory + IDB +
+       light customer cache in localStorage). Used by Bulk CSV Import's
+       "Clear imported data" button so operators can reset before a
+       fresh re-import. */
+    clearBrandImport: async (brandId) => {
+      const cur = get().brandData[brandId] || {};
+      const brandData = { ...get().brandData, [brandId]: {
+        ...cur,
+        orders: [],
+        customers: [],
+        ordersStatus: 'idle',
+        ordersFetchedAt: null,
+        ordersWindow: null,
+        customersStatus: 'idle',
+        customersFetchedAt: null,
+      }};
+      const existingCache = lsGet(LS_CUST, {});
+      delete existingCache[brandId];
+      lsSet(LS_CUST, existingCache);
+      set({ brandData, customerCache: existingCache });
+      _rebuild({ brandData });
+      await Promise.all([idbClearOrders(brandId), idbClearCustomers(brandId)]);
     },
 
     mergeBrandCustomersFromCsv: (brandId, customers) => {

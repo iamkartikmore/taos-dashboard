@@ -58,7 +58,7 @@ async function fetchAllPages(baseUrl, params, maxPages = 20, onProgress, endpoin
 
   while (url && page < maxPages) {
     const json = await proxyGet(url, page === 0 ? pageParams : {}, endpoint);
-    if (json.data?.length) out.push(...json.data);
+    if (json.data?.length) { for (const row of json.data) out.push(row); }
     url = json.paging?.next || '';
     page++;
     onProgress?.(`page ${page} (${out.length} rows)`);
@@ -160,7 +160,7 @@ export async function fetchInsightsCustom(ver, token, accountId, since, until, o
       msg => onProgress?.(`  ${msg}`),
       '/api/meta/insights-range', // uses extended timeout endpoint
     );
-    all.push(...rows);
+    for (const row of rows) all.push(row);
     if (ci < chunks.length - 1) await new Promise(r => setTimeout(r, 300));
   }
 
@@ -295,7 +295,7 @@ export async function fetchShopifyOrders(shop, clientId, clientSecret, since, un
         if (data.type === 'log' || data.type === 'page') {
           onLog?.(data.msg);
         } else if (data.type === 'batch') {
-          accOrders.push(...(data.orders || []));
+          if (data.orders?.length) { for (const o of data.orders) accOrders.push(o); }
         } else if (data.type === 'error') {
           throw new Error(data.msg);
         } else if (data.type === 'done') {

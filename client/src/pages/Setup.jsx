@@ -164,15 +164,17 @@ function BrandCard({ brand, brandInfo }) {
           { ver: brand.meta.apiVersion, token: brand.meta.token, accountKey: acc.key, accountId: acc.id },
           msg => { appendLog(`[${brand.name}] ${msg}`); updatePullJob(jobId, { detail: `${acc.key}: ${msg.replace(/^\[[^\]]+\]\s*/, '')}` }); },
         );
-        combined.campaigns.push(...r.campaigns);
-        combined.adsets.push(...r.adsets);
-        combined.ads.push(...r.ads);
-        combined.insightsToday.push(...r.insightsToday);
-        combined.insightsYesterday.push(...(r.insightsYesterday || []));
-        combined.insights3d.push(...(r.insights3d || []));
-        combined.insights7d.push(...r.insights7d);
-        combined.insights14d.push(...r.insights14d);
-        combined.insights30d.push(...r.insights30d);
+        // Use concat instead of spread-push — large insight arrays can
+        // exceed V8's argument limit and throw "Maximum call stack size".
+        combined.campaigns         = combined.campaigns.concat(r.campaigns || []);
+        combined.adsets            = combined.adsets.concat(r.adsets || []);
+        combined.ads               = combined.ads.concat(r.ads || []);
+        combined.insightsToday     = combined.insightsToday.concat(r.insightsToday || []);
+        combined.insightsYesterday = combined.insightsYesterday.concat(r.insightsYesterday || []);
+        combined.insights3d        = combined.insights3d.concat(r.insights3d || []);
+        combined.insights7d        = combined.insights7d.concat(r.insights7d || []);
+        combined.insights14d       = combined.insights14d.concat(r.insights14d || []);
+        combined.insights30d       = combined.insights30d.concat(r.insights30d || []);
       } catch (e) {
         const msg = e.message || 'Meta error';
         failures.push(`${acc.key}: ${msg}`);
