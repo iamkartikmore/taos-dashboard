@@ -289,34 +289,51 @@ export const useStore = create((set, get) => {
     },
 
     setBrandOrders: (brandId, orders, window) => {
-      const tagged = (orders || []).map(o => ({ ...o, _brandId: brandId }));
-      const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), orders: tagged, ordersWindow: window, ordersStatus: 'success', ordersFetchedAt: Date.now() } };
+      // MERGE with existing orders instead of replacing. Shopify pulls
+      // return only the recent window (typically 60d on auto-pull); CSV
+      // imports provide the historical tail (years of data). A pure
+      // replace would wipe the CSV history every time auto-pull runs.
+      // mergeOrders preserves CSV-only IDs and prefers fresher API data
+      // when both sources have the same order.
+      const cur = get().brandData[brandId] || {};
+      const tagged = (orders || []).map(o => ({ ...o, _brandId: brandId, _source: 'api' }));
+      const merged = mergeOrdersById(cur.orders || [], tagged);
+
+      const brandData = { ...get().brandData, [brandId]: {
+        ...cur,
+        orders: merged,
+        ordersWindow: window,
+        ordersStatus: 'success',
+        ordersFetchedAt: Date.now(),
+      }};
       // Merge customer data into persistent cache
       const existingCache  = lsGet(LS_CUST, {});
       const brandCache     = existingCache[brandId] || {};
-      const updatedBrandCache = mergeCustomerCache(brandCache, orders || []);
+      const updatedBrandCache = mergeCustomerCache(brandCache, merged);
       const newCache = { ...existingCache, [brandId]: updatedBrandCache };
       lsSet(LS_CUST, newCache);
-      // Persist full orders to IndexedDB (fire-and-forget)
-      saveOrders(brandId, tagged, window);
+      // Persist the merged superset so IDB survives pull cycles
+      saveOrders(brandId, merged, window);
       set({ brandData, customerCache: newCache });
       _rebuild({ brandData });
     },
 
-    // Called by the boot hydration hook once IDB data is read
+    // Called by the boot hydration hook once IDB data is read. Merge
+    // (not replace) because in-memory might already hold orders from
+    // an earlier same-session pull.
     hydrateOrders: (records) => {
       if (!records?.length) return;
       const cur = get().brandData;
       const next = { ...cur };
       for (const r of records) {
         if (!r?.brandId) continue;
-        // Don't overwrite fresher in-memory orders
-        if (next[r.brandId]?.ordersFetchedAt && next[r.brandId].ordersFetchedAt >= (r.fetchedAt || 0)) continue;
+        const existing = next[r.brandId] || {};
+        const merged = mergeOrdersById(existing.orders || [], r.orders || []);
         next[r.brandId] = {
-          ...(next[r.brandId] || {}),
-          orders: r.orders || [],
-          ordersWindow: r.window,
-          ordersFetchedAt: r.fetchedAt,
+          ...existing,
+          orders: merged,
+          ordersWindow:    existing.ordersWindow    || r.window,
+          ordersFetchedAt: Math.max(existing.ordersFetchedAt || 0, r.fetchedAt || 0),
           ordersStatus: 'success',
         };
       }
@@ -391,11 +408,12 @@ export const useStore = create((set, get) => {
       const next = { ...cur };
       for (const r of records) {
         if (!r?.brandId) continue;
-        if (next[r.brandId]?.customersFetchedAt && next[r.brandId].customersFetchedAt >= (r.fetchedAt || 0)) continue;
+        const existing = next[r.brandId] || {};
+        const merged = mergeCustomersByKey(existing.customers || [], r.customers || []);
         next[r.brandId] = {
-          ...(next[r.brandId] || {}),
-          customers: r.customers || [],
-          customersFetchedAt: r.fetchedAt,
+          ...existing,
+          customers: merged,
+          customersFetchedAt: Math.max(existing.customersFetchedAt || 0, r.fetchedAt || 0),
           customersStatus: 'success',
         };
       }
