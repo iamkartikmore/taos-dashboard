@@ -9,11 +9,13 @@ import {
   Target, RefreshCw, Zap, ChevronRight, Download, Brain,
   Package, AlertTriangle, GhostIcon, PackageX, Link2Off,
   Stethoscope, TrendingDown, GitBranch,
+  Tag, ArrowUpCircle, ArrowDownCircle,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { totalsFromNormalized } from '../lib/googleAdsAnalytics';
-import { blendAdsMerchant, shopifyBySkuFromOrders } from '../lib/googleAdsMerchantBlend';
+import { blendAdsMerchant, shopifyBySkuFromOrders, aggregateShoppingBySku } from '../lib/googleAdsMerchantBlend';
 import { diagnose, skuImpactChain } from '../lib/dropDiagnostics';
+import { buildPriceSuggestions } from '../lib/priceSuggestions';
 import GoogleAdsIntel from './GoogleAdsIntel';
 
 /* ─── FORMATTERS ─────────────────────────────────────────────────── */
@@ -156,6 +158,7 @@ const TABS = [
   { id: 'overview',    label: 'Overview',     icon: Zap },
   { id: 'intel',       label: 'Intelligence', icon: Brain },
   { id: 'rootcause',   label: 'Root Cause',   icon: Stethoscope },
+  { id: 'pricing',     label: 'Pricing',      icon: Tag },
   { id: 'feed',        label: 'Feed Health',  icon: Package },
   { id: 'campaigns',   label: 'Campaigns',    icon: Target },
   { id: 'adgroups',    label: 'Ad Groups',    icon: Target },
@@ -408,6 +411,172 @@ function RootCauseTab({ diag, data, onDrillCampaign }) {
           })}
         </div>
       )}
+    </motion.div>
+  );
+}
+
+/* ─── PRICING TAB ─────────────────────────────────────────────────
+   Google Merchant Center-style sale-price suggestions, reconstructed
+   from 90d Shopify orders + Google Ads per-SKU metrics + feed peer
+   benchmarks. See priceSuggestions.js for the algorithm.
+   ─────────────────────────────────────────────────────────────────── */
+function PricingTab({ pricing }) {
+  const [filter, setFilter] = useState('all'); // all | lower | raise
+
+  if (!pricing || !pricing.suggestions.length) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center">
+        <Tag size={36} className="text-slate-600 mx-auto mb-3" />
+        <p className="text-sm text-slate-400">No price suggestions yet.</p>
+        <p className="text-[11px] text-slate-600 mt-1">We need Shopify orders + Google Ads shopping data (and ideally a merchant feed) to benchmark prices.</p>
+      </div>
+    );
+  }
+
+  const { suggestions, totals } = pricing;
+  const filtered = filter === 'lower' ? suggestions.filter(s => s.deltaPct < 0)
+                : filter === 'raise'  ? suggestions.filter(s => s.deltaPct > 0)
+                : suggestions;
+
+  const methodLabel = m => ({
+    historical:             'historical A/B',
+    discount_response:      'discount tested',
+    peer_benchmark:         'peer benchmark',
+    peer_benchmark_raise:   'peer benchmark',
+  })[m] || m;
+
+  const effPill = e =>
+    e === 'high'   ? 'bg-emerald-900/40 text-emerald-300' :
+    e === 'medium' ? 'bg-amber-900/40 text-amber-300'     :
+                     'bg-slate-800 text-slate-500';
+
+  const confDot = c =>
+    c === 'high'   ? '●●●' :
+    c === 'medium' ? '●●○' :
+                     '●○○';
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
+      {/* Verdict strip */}
+      <div className="px-5 py-4 rounded-xl border border-amber-800/40 bg-amber-900/20 text-amber-200">
+        <div className="flex items-center gap-3">
+          <Tag size={18} />
+          <div className="flex-1">
+            <div className="text-xs font-semibold uppercase tracking-wider opacity-70">Pricing review</div>
+            <div className="text-sm font-medium mt-0.5">
+              {totals.count} SKU{totals.count > 1 ? 's' : ''} flagged from the last {totals.windowDays} days of orders.
+              {totals.estRevUplift > 0 && <> Estimated upside if all applied: <span className="font-semibold">{cur(totals.estRevUplift)}</span>.</>}
+            </div>
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-3 mt-3 pt-3 border-t border-amber-800/30 text-[11px]">
+          <div><span className="opacity-60">Total:</span> <span className="font-semibold">{num(totals.count)}</span></div>
+          <div><span className="opacity-60">Lower price:</span> <span className="font-semibold text-orange-300">{num(totals.toLower)}</span></div>
+          <div><span className="opacity-60">Raise price:</span> <span className="font-semibold text-emerald-300">{num(totals.toRaise)}</span></div>
+        </div>
+      </div>
+
+      {/* Filter chips */}
+      <div className="flex gap-1.5">
+        {[
+          { id: 'all',   label: `All (${totals.count})` },
+          { id: 'lower', label: `Lower (${totals.toLower})`, icon: ArrowDownCircle },
+          { id: 'raise', label: `Raise (${totals.toRaise})`, icon: ArrowUpCircle  },
+        ].map(f => (
+          <button key={f.id} onClick={() => setFilter(f.id)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs ${filter === f.id ? 'bg-amber-900/30 text-amber-300 border border-amber-800/40' : 'bg-gray-900 text-slate-400 border border-gray-800 hover:text-slate-200'}`}>
+            {f.icon && <f.icon size={12} />} {f.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Suggestions table */}
+      <Card title={`${filtered.length} SKUs`} action={
+        <button onClick={() => exportCSV('price-suggestions.csv', filtered, [
+          { key: 'sku',             label: 'SKU' },
+          { key: 'title',           label: 'Title' },
+          { key: 'currentPrice',    label: 'Current Price' },
+          { key: 'suggestedPrice',  label: 'Suggested Price' },
+          { key: 'deltaPct',        label: 'Δ%', fn: r => (r.deltaPct * 100).toFixed(1) + '%' },
+          { key: 'method',          label: 'Method' },
+          { key: 'confidence',      label: 'Confidence' },
+          { key: 'evidence',        label: 'Evidence' },
+          { key: 'clickUplift',     label: 'Click Uplift', fn: r => r.clickUplift != null ? (r.clickUplift * 100).toFixed(1) + '%' : '' },
+          { key: 'conversionUplift', label: 'Conv Uplift', fn: r => r.conversionUplift != null ? (r.conversionUplift * 100).toFixed(1) + '%' : '' },
+          { key: 'effectiveness',   label: 'Effectiveness' },
+          { key: 'units90d',        label: 'Units 90d' },
+          { key: 'rev90d',          label: 'Revenue 90d' },
+          { key: 'adSpend',         label: 'Ad Spend' },
+        ])} className="text-[10px] text-slate-500 hover:text-white flex items-center gap-1"><Download size={10} /> CSV</button>
+      }>
+        <div className="overflow-auto" style={{ maxHeight: '640px' }}>
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-gray-900 border-b border-gray-800 z-10">
+              <tr>
+                <th className="px-3 py-2.5 text-left text-slate-400 font-semibold">Product</th>
+                <th className="px-3 py-2.5 text-right text-slate-400 font-semibold">Current</th>
+                <th className="px-3 py-2.5 text-right text-slate-400 font-semibold">Suggested</th>
+                <th className="px-3 py-2.5 text-right text-slate-400 font-semibold">Δ</th>
+                <th className="px-3 py-2.5 text-right text-slate-400 font-semibold">Click ↑</th>
+                <th className="px-3 py-2.5 text-right text-slate-400 font-semibold">Conv ↑</th>
+                <th className="px-3 py-2.5 text-left text-slate-400 font-semibold">Effect</th>
+                <th className="px-3 py-2.5 text-left text-slate-400 font-semibold">Evidence</th>
+                <th className="px-3 py-2.5 text-right text-slate-400 font-semibold">Units 90d</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((s, i) => (
+                <tr key={s.sku} className={`${i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'} hover:bg-amber-900/10`}>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-2">
+                      {s.image && <img src={s.image} alt="" className="w-8 h-8 rounded object-cover bg-gray-800" onError={e => { e.target.style.display = 'none'; }} />}
+                      <div className="min-w-0">
+                        {s.link ? (
+                          <a href={s.link} target="_blank" rel="noopener noreferrer" className="text-slate-200 hover:text-amber-300 truncate max-w-[220px] inline-block">{s.title}</a>
+                        ) : (
+                          <span className="text-slate-200 truncate max-w-[220px] inline-block">{s.title}</span>
+                        )}
+                        <div className="text-[10px] text-slate-600 font-mono truncate max-w-[220px]">{s.sku}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-slate-300">{cur(s.currentPrice)}</td>
+                  <td className="px-3 py-2 text-right font-mono font-semibold text-white">{cur(s.suggestedPrice)}</td>
+                  <td className={`px-3 py-2 text-right font-mono font-semibold ${s.deltaPct < 0 ? 'text-orange-400' : 'text-emerald-400'}`}>
+                    {s.deltaPct > 0 ? '+' : ''}{(s.deltaPct * 100).toFixed(1)}%
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-slate-400">
+                    {s.clickUplift != null ? <span className="text-emerald-400">+{(s.clickUplift * 100).toFixed(1)}%</span> : '—'}
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-slate-400">
+                    {s.conversionUplift != null ? <span className="text-emerald-400">+{(s.conversionUplift * 100).toFixed(1)}%</span> : '—'}
+                  </td>
+                  <td className="px-3 py-2">
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${effPill(s.effectiveness)}`}>{s.effectiveness}</span>
+                  </td>
+                  <td className="px-3 py-2 text-[11px] text-slate-500">
+                    <span className="text-slate-400">{methodLabel(s.method)}</span>{' '}
+                    <span className="text-slate-600 font-mono" title={`confidence: ${s.confidence}`}>{confDot(s.confidence)}</span>
+                    <div className="text-[10px] text-slate-600 truncate max-w-[260px]">{s.evidence}</div>
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-slate-500">{num(s.units90d)}</td>
+                </tr>
+              ))}
+              {!filtered.length && (
+                <tr><td colSpan={9} className="px-3 py-8 text-center text-slate-600 text-xs italic">No suggestions match this filter</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {/* How it works — tiny footnote so the user trusts the numbers */}
+      <div className="px-4 py-3 bg-gray-900 border border-gray-800 rounded-xl text-[11px] text-slate-500 leading-relaxed">
+        <div className="font-semibold text-slate-400 mb-1">How we compute this:</div>
+        <div><span className="text-slate-300">Historical A/B (●●●):</span> SKUs that sold at ≥2 price points in 90d — we pick the revenue-maximizing point. Strongest signal because it was tested in your store.</div>
+        <div><span className="text-slate-300">Discount tested (●●○):</span> Full-price vs discounted-order velocity from your Shopify line items.</div>
+        <div><span className="text-slate-300">Peer benchmark (●○○):</span> SKUs priced &gt;15% above same-category median with CTR/CVR trailing peers.</div>
+      </div>
     </motion.div>
   );
 }
@@ -687,6 +856,19 @@ export default function GoogleAds() {
     });
   }, [data, merchantData, orders]);
 
+  /* Pricing suggestions — reconstructs Merchant Center's sale price
+     recommendations from 90d orders + per-SKU ad metrics + peer median. */
+  const pricing = useMemo(() => {
+    if (!orders.length) return null;
+    const shoppingRows = data?.shoppingByCampaign?.length ? data.shoppingByCampaign : data?.shopping || [];
+    const adBySku = shoppingRows.length ? aggregateShoppingBySku(shoppingRows) : null;
+    return buildPriceSuggestions({
+      orders,
+      merchantBySku: merchantData?.bySku || null,
+      adBySku,
+    });
+  }, [orders, data, merchantData]);
+
   /* Drop diagnostics — SKU outages → campaign drops → ad/keyword/search-term chain */
   const diag = useMemo(() => {
     if (!data) return null;
@@ -953,6 +1135,11 @@ export default function GoogleAds() {
             setTab(noSearch ? 'shopping' : 'searchterms');
           }}
         />
+      )}
+
+      {/* ── PRICING ──────────────────────────────────────────────── */}
+      {tab === 'pricing' && (
+        <PricingTab pricing={pricing} />
       )}
 
       {/* ── FEED HEALTH ──────────────────────────────────────────── */}
