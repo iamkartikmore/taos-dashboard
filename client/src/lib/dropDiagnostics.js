@@ -375,15 +375,19 @@ export function rootCauseForCampaign({
     .sort((a, b) => b.costShare - a.costShare);
 
   if (oosItems.length) {
-    const topShare = oosItems[0].costShare;
     const totalShare = oosItems.reduce((a, i) => a + i.costShare, 0);
+    const lostSpend  = oosItems.reduce((a, i) => a + i.cost, 0);
     if (totalShare >= 0.03) {
       const severity = totalShare >= 0.25 ? 'critical' : totalShare >= 0.10 ? 'high' : 'medium';
       const top = oosItems[0];
       causes.push({
         cause: 'sku_outage',
         severity,
-        narrative: `${oosItems.length} SKU${oosItems.length > 1 ? 's' : ''} that carried ${(totalShare * 100).toFixed(0)}% of this campaign's spend went out of stock — top offender: ${top.sku} (${(topShare * 100).toFixed(0)}% of campaign, out ${top.outage.daysOut ?? '?'}d).`,
+        headline: `${oosItems.length} SKU${oosItems.length > 1 ? 's' : ''} out of stock carrying ${(totalShare * 100).toFixed(0)}% of spend`,
+        action: totalShare >= 0.25
+          ? `Restock or pause this campaign — ${(totalShare * 100).toFixed(0)}% of its budget is going to empty shelves.`
+          : `Exclude the OOS SKUs from the feed or restock top offender (${top.title || top.sku}, out ${top.outage.daysOut ?? '?'}d).`,
+        impactSpend: lostSpend,
         evidence: oosItems.slice(0, 5).map(i => ({
           sku: i.sku, title: i.title, costShare: i.costShare, cost: i.cost,
           daysOut: i.outage.daysOut, outageDate: i.outage.outageDate, feedAvail: i.outage.feedAvail,
@@ -398,13 +402,27 @@ export function rootCauseForCampaign({
       .map(i => ({ ...i, feed: merchantBySku.get(i.sku) }))
       .filter(i => i.feed?.status?.primaryStatus === 'disapproved')
       .map(i => ({ ...i, costShare: campaignCost > 0 ? i.cost / campaignCost : 0 }));
-    const totalShare = disapproved.reduce((a, i) => a + i.costShare, 0);
+    const totalShare  = disapproved.reduce((a, i) => a + i.costShare, 0);
+    const wastedSpend = disapproved.reduce((a, i) => a + i.cost, 0);
+    // Group by issue so we can tell the operator ONE thing to fix
+    const byIssue = new Map();
+    for (const i of disapproved) {
+      const iss = i.feed.status?.itemIssues?.[0]?.description || 'disapproved';
+      const cur = byIssue.get(iss) || { issue: iss, count: 0, cost: 0 };
+      cur.count++; cur.cost += i.cost;
+      byIssue.set(iss, cur);
+    }
+    const topIssue = [...byIssue.values()].sort((a, b) => b.cost - a.cost)[0];
     if (totalShare >= 0.03) {
       const severity = totalShare >= 0.25 ? 'critical' : totalShare >= 0.10 ? 'high' : 'medium';
       causes.push({
         cause: 'feed_disapproval',
         severity,
-        narrative: `${disapproved.length} SKU${disapproved.length > 1 ? 's' : ''} in this campaign (${(totalShare * 100).toFixed(0)}% of spend) are disapproved in Google Merchant Center — they're spending but can't serve.`,
+        headline: `${disapproved.length} disapproved SKUs burning ${(totalShare * 100).toFixed(0)}% of spend`,
+        action: topIssue
+          ? `Fix feed issue: "${topIssue.issue}" (affects ${topIssue.count} SKUs, ≈₹${Math.round(topIssue.cost).toLocaleString('en-IN')} of wasted spend).`
+          : `Open Merchant Center → Diagnostics and resolve the disapprovals.`,
+        impactSpend: wastedSpend,
         evidence: disapproved.slice(0, 5).map(i => ({
           sku: i.sku, title: i.title, costShare: i.costShare, cost: i.cost,
           issue: i.feed.status?.itemIssues?.[0]?.description || 'disapproved',
@@ -420,10 +438,12 @@ export function rootCauseForCampaign({
     return resStr.includes(`/campaigns/${cid}`);
   });
   if (relatedChanges.length) {
+    const topUser = relatedChanges[0].userEmail;
     causes.push({
       cause: 'change_event',
       severity: relatedChanges.length >= 3 ? 'high' : 'medium',
-      narrative: `${relatedChanges.length} change event${relatedChanges.length > 1 ? 's' : ''} on this campaign during the drop window — check whether someone edited bids, budgets, or targeting.`,
+      headline: `${relatedChanges.length} recent edit${relatedChanges.length > 1 ? 's' : ''} by ${topUser || 'someone'}`,
+      action: `Check the Change History in Google Ads — revert if bids, budgets, or targeting were tightened.`,
       evidence: relatedChanges.slice(0, 5).map(ev => ({
         ts: ev.ts, user: ev.userEmail, operation: ev.operation,
         resourceType: ev.resourceType, fields: ev.changedFields,
@@ -437,7 +457,8 @@ export function rootCauseForCampaign({
       causes.push({
         cause: 'impression_collapse',
         severity: 'medium',
-        narrative: `Impressions fell ${Math.abs(campaignDelta.deltaImprPct * 100).toFixed(0)}% but spend is roughly flat — auction pressure increased or your Quality Score / bid strategy hit a ceiling.`,
+        headline: `Impressions down ${Math.abs(campaignDelta.deltaImprPct * 100).toFixed(0)}% with spend flat`,
+        action: `Auction got more competitive — raise max-CPC or check Impression Share Lost (Rank) in Google Ads.`,
         evidence: [{ deltaImprPct: campaignDelta.deltaImprPct, deltaCostPct: campaignDelta.deltaCostPct }],
       });
     }
@@ -450,7 +471,8 @@ export function rootCauseForCampaign({
     causes.push({
       cause: 'conversion_collapse',
       severity: 'high',
-      narrative: `Clicks are steady but conversion rate fell to ${((recentCvr / priorCvr) * 100).toFixed(0)}% of its prior level — check landing page, pricing, or stock on the destination PDP.`,
+      headline: `Conversion rate fell to ${((recentCvr / priorCvr) * 100).toFixed(0)}% of prior`,
+      action: `Clicks held but conversions didn't — open a top landing page and check stock, price, and PDP load speed.`,
       evidence: [{ priorCvr, recentCvr }],
     });
   }

@@ -164,226 +164,237 @@ const TABS = [
    or a demand-wide softening.
    ─────────────────────────────────────────────────────────────────── */
 function RootCauseTab({ diag, data, onDrillCampaign }) {
-  const [expanded, setExpanded] = useState(null);
+  const [open, setOpen] = useState({}); // { [campaignId]: 'evidence' | 'chain' | null }
 
   if (!diag) {
     return (
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center">
         <Stethoscope size={36} className="text-slate-600 mx-auto mb-3" />
         <p className="text-sm text-slate-400">No Google Ads daily data to diagnose.</p>
-        <p className="text-[11px] text-slate-600 mt-1">Pull Google Ads with daily segmentation to enable root-cause analysis.</p>
       </div>
     );
   }
 
-  const { droppingCampaigns, outages, meta, shop, totals } = diag;
+  const { droppingCampaigns, meta, shop, totals } = diag;
 
-  const severityColor = s =>
-    s === 'critical' ? 'text-red-400 bg-red-900/30 border-red-800/40' :
-    s === 'high'     ? 'text-orange-400 bg-orange-900/30 border-orange-800/40' :
-    s === 'medium'   ? 'text-amber-400 bg-amber-900/30 border-amber-800/40' :
-                       'text-slate-400 bg-slate-800 border-slate-700';
+  /* ── ONE-LINE VERDICT ──────────────────────────────────────────── */
+  const verdict = (() => {
+    const gAdsNeg = totals.totalRevDelta < 0;
+    const shopPct = shop?.totals?.deltaRevPct;
+    const metaPct = meta?.deltaRevPct;
+    if (!gAdsNeg) return { tone: 'good', text: 'Google Ads revenue is flat or up week-over-week. No systemic drop.' };
+    if (shopPct != null && shopPct < -0.05 && metaPct != null && metaPct < -0.05)
+      return { tone: 'warn', text: 'All channels are down — this is a demand-side issue, not a Google problem.' };
+    if ((shopPct == null || shopPct >= -0.05) && (metaPct == null || metaPct >= -0.05))
+      return { tone: 'bad', text: 'Drop is Google-only. Shopify + Meta are holding, so fix the feed, check change events, or look for OOS SKUs.' };
+    return { tone: 'warn', text: 'Partial channel drop. Check SKU overlap between dropping campaigns and stockouts.' };
+  })();
+
+  const toneColors = {
+    good: 'border-emerald-800/40 bg-emerald-900/20 text-emerald-200',
+    warn: 'border-amber-800/40  bg-amber-900/20  text-amber-200',
+    bad:  'border-red-800/40    bg-red-900/20    text-red-200',
+  };
+
+  const causeLabel = c => ({
+    sku_outage:          'Out of stock',
+    feed_disapproval:    'Feed disapproved',
+    change_event:        'Someone edited settings',
+    impression_collapse: 'Lost auctions',
+    conversion_collapse: 'Landing page / offer',
+  })[c] || c;
 
   const causeIcon = c =>
-    c === 'sku_outage'          ? <PackageX size={12} /> :
-    c === 'feed_disapproval'    ? <AlertTriangle size={12} /> :
-    c === 'change_event'        ? <GitBranch size={12} /> :
-    c === 'impression_collapse' ? <TrendingDown size={12} /> :
-    c === 'conversion_collapse' ? <TrendingDown size={12} /> :
-                                  <Stethoscope size={12} />;
+    c === 'sku_outage'          ? <PackageX       size={14} className="text-orange-400" /> :
+    c === 'feed_disapproval'    ? <AlertTriangle  size={14} className="text-red-400"    /> :
+    c === 'change_event'        ? <GitBranch      size={14} className="text-blue-400"   /> :
+    c === 'impression_collapse' ? <TrendingDown   size={14} className="text-amber-400"  /> :
+    c === 'conversion_collapse' ? <TrendingDown   size={14} className="text-amber-400"  /> :
+                                  <Stethoscope    size={14} />;
+
+  const sevPill = s =>
+    s === 'critical' ? 'bg-red-900/50 text-red-200'     :
+    s === 'high'     ? 'bg-orange-900/50 text-orange-200' :
+    s === 'medium'   ? 'bg-amber-900/40 text-amber-300'   :
+                       'bg-slate-800 text-slate-400';
 
   return (
-    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-5">
-      {/* Cross-channel corroboration banner */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        <KPI label="Dropping Campaigns"
-          value={num(totals.droppingCount)}
-          sub={totals.totalRevDelta < 0 ? `${cur(totals.totalRevDelta)} WoW net rev delta` : 'WoW revenue net positive'}
-          color={totals.droppingCount > 0 ? '#ef4444' : '#22c55e'} />
-        <KPI label="Shopify WoW (all orders)"
-          value={shop?.totals?.deltaRevPct != null ? `${shop.totals.deltaRevPct > 0 ? '+' : ''}${(shop.totals.deltaRevPct * 100).toFixed(1)}%` : '—'}
-          sub={`${cur(shop?.totals?.recentRev || 0)} vs ${cur(shop?.totals?.priorRev || 0)}`}
-          color={(shop?.totals?.deltaRevPct ?? 0) >= 0 ? '#22c55e' : '#ef4444'} />
-        <KPI label="Meta WoW Revenue"
-          value={meta?.deltaRevPct != null ? `${meta.deltaRevPct > 0 ? '+' : ''}${(meta.deltaRevPct * 100).toFixed(1)}%` : '—'}
-          sub={meta ? `ROAS ${dec(meta.recentRoas, 2)} vs ${dec(meta.priorRoas, 2)}` : 'no Meta data'}
-          color={(meta?.deltaRevPct ?? 0) >= 0 ? '#22c55e' : '#ef4444'} />
-      </div>
-
-      {/* Demand context narrative */}
-      <div className="px-4 py-3 bg-gray-900 border border-gray-800 rounded-xl text-xs text-slate-300 leading-relaxed">
-        {(() => {
-          const shopPct = shop?.totals?.deltaRevPct;
-          const metaPct = meta?.deltaRevPct;
-          const gAdsNeg = totals.totalRevDelta < 0;
-          if (!gAdsNeg) return <>Google Ads revenue is <span className="text-emerald-400 font-semibold">up or flat</span> week-over-week — nothing systemic to diagnose. Review individual dropping campaigns below if any.</>;
-          if (shopPct != null && shopPct < -0.05 && metaPct != null && metaPct < -0.05) {
-            return <>All three channels are down. Demand-side softening — check <span className="text-amber-400">category trend, seasonality, or a broad stockout across top sellers</span>. Feed/auction issues are secondary.</>;
-          }
-          if ((shopPct == null || shopPct >= -0.05) && (metaPct == null || metaPct >= -0.05)) {
-            return <>Google Ads is down but <span className="text-emerald-400">Shopify + Meta are holding</span> — the drop is channel-isolated. Look for feed disapprovals, change events, auction pressure, or OOS SKUs that Google is feeling but organic isn't yet.</>;
-          }
-          return <>Partial correlation — Google Ads is down and {shopPct != null && shopPct < 0 ? 'Shopify is soft' : 'Meta is soft'}. Check SKU-level overlap between the dropping campaigns and any stockouts.</>;
-        })()}
-      </div>
-
-      {/* Top outages, summarized */}
-      {outages.length > 0 && (
-        <Card title={<span className="flex items-center gap-2"><PackageX size={14} className="text-orange-400" /> Detected SKU Outages ({outages.length})</span>}>
-          <p className="text-[11px] text-slate-500 mb-3">These are the out-of-stock or below-reorder SKUs that would hurt campaigns they appear in.</p>
-          <div className="overflow-auto" style={{ maxHeight: '280px' }}>
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
-                <tr>
-                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">SKU</th>
-                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Title</th>
-                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Stock</th>
-                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Feed Avail</th>
-                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Last Order</th>
-                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Days Out</th>
-                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Severity</th>
-                </tr>
-              </thead>
-              <tbody>
-                {outages.slice(0, 40).map((o, i) => (
-                  <tr key={o.sku} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
-                    <td className="px-3 py-2 font-mono text-[11px] text-slate-300">{o.sku}</td>
-                    <td className="px-3 py-2 text-slate-400 truncate max-w-[260px]">{o.title}</td>
-                    <td className="px-3 py-2 text-right font-mono text-white">{o.stock ?? '—'}</td>
-                    <td className="px-3 py-2"><span className="text-[10px] text-slate-500">{o.feedAvail || '—'}</span></td>
-                    <td className="px-3 py-2 text-[11px] text-slate-500">{o.lastOrderDate || '—'}</td>
-                    <td className="px-3 py-2 text-right font-mono text-orange-300">{o.daysOut ?? '—'}</td>
-                    <td className="px-3 py-2"><span className={`text-[10px] px-1.5 py-0.5 rounded border ${severityColor(o.severity)}`}>{o.severity}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
+      {/* ── VERDICT STRIP ─────────────────────────────────────────── */}
+      <div className={`px-5 py-4 rounded-xl border ${toneColors[verdict.tone]}`}>
+        <div className="flex items-center gap-3">
+          <Stethoscope size={18} />
+          <div className="flex-1">
+            <div className="text-xs font-semibold uppercase tracking-wider opacity-70">Verdict</div>
+            <div className="text-sm font-medium mt-0.5">{verdict.text}</div>
           </div>
-        </Card>
-      )}
+          <div className="text-right">
+            <div className="text-[10px] opacity-70 uppercase tracking-wider">WoW Rev Δ</div>
+            <div className="text-lg font-bold font-mono">{cur(totals.totalRevDelta)}</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-3 mt-3 pt-3 border-t border-current/10 text-[11px]">
+          <div><span className="opacity-60">Dropping campaigns:</span> <span className="font-semibold">{num(totals.droppingCount)}</span></div>
+          <div><span className="opacity-60">Shopify WoW:</span> <span className="font-semibold">{shop?.totals?.deltaRevPct != null ? `${shop.totals.deltaRevPct > 0 ? '+' : ''}${(shop.totals.deltaRevPct * 100).toFixed(0)}%` : '—'}</span></div>
+          <div><span className="opacity-60">Meta WoW:</span> <span className="font-semibold">{meta?.deltaRevPct != null ? `${meta.deltaRevPct > 0 ? '+' : ''}${(meta.deltaRevPct * 100).toFixed(0)}%` : '—'}</span></div>
+        </div>
+      </div>
 
-      {/* Dropping campaigns with ranked causes */}
+      {/* ── PER-CAMPAIGN ACTION CARDS ─────────────────────────────── */}
       {droppingCampaigns.length === 0 ? (
-        <Card title="Dropping Campaigns">
-          <div className="text-center text-slate-500 py-8 text-xs italic">No campaigns materially down week-over-week. Nothing to diagnose.</div>
-        </Card>
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center text-sm text-slate-400">
+          No campaigns materially down week-over-week. Nothing to fix today.
+        </div>
       ) : (
-        <Card title={`Dropping Campaigns — Ranked Causes (${droppingCampaigns.length})`}>
-          <p className="text-[11px] text-slate-500 mb-4">Campaigns where revenue fell &gt;10% or ROAS fell &gt;0.5 WoW. Each has an ordered list of likely root causes based on SKU outages, feed disapprovals, change events, and funnel collapse patterns.</p>
-          <div className="space-y-3">
-            {droppingCampaigns.map(c => {
-              const isOpen = expanded === c.campaignId;
-              const chain = isOpen ? skuImpactChain({
-                sku: c.causes.find(x => x.cause === 'sku_outage')?.evidence?.[0]?.sku,
-                shoppingByCampaign: data?.shoppingByCampaign || [],
-                adGroups: data?.adGroups || [],
-                ads: data?.ads || [],
-                keywords: data?.keywords || [],
-                searchTerms: data?.searchTerms || [],
-              }) : null;
-              return (
-                <div key={c.campaignId} className="border border-gray-800 rounded-lg bg-gray-950/40 overflow-hidden">
-                  {/* Campaign header */}
-                  <div className="px-4 py-3 flex flex-wrap items-center gap-3 bg-gray-900/60 border-b border-gray-800">
+        <div className="space-y-3">
+          {droppingCampaigns.map(c => {
+            const top = c.causes[0];
+            const openMode = open[c.campaignId];
+            const showEvidence = openMode === 'evidence';
+            const showChain    = openMode === 'chain';
+            const chain = showChain ? skuImpactChain({
+              sku: c.causes.find(x => x.cause === 'sku_outage')?.evidence?.[0]?.sku,
+              shoppingByCampaign: data?.shoppingByCampaign || [],
+              adGroups: data?.adGroups || [],
+              ads: data?.ads || [],
+              keywords: data?.keywords || [],
+              searchTerms: data?.searchTerms || [],
+            }) : null;
+
+            return (
+              <div key={c.campaignId} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                {/* Headline row */}
+                <div className="px-5 py-4">
+                  <div className="flex flex-wrap items-start gap-3">
                     <div className="flex-1 min-w-[200px]">
-                      <div className="text-sm font-semibold text-white truncate">{c.campaignName || c.campaignId}</div>
-                      <div className="text-[11px] text-slate-500 mt-0.5 flex flex-wrap gap-3">
-                        <span>Rev: <span className="text-red-400">{cur(c.recentRev)}</span> <span className="text-slate-600">vs {cur(c.priorRev)}</span></span>
-                        <span>ΔRev: <span className="text-red-400">{c.deltaRevPct != null ? `${(c.deltaRevPct * 100).toFixed(0)}%` : '—'}</span></span>
-                        <span>ROAS: <span className="text-slate-300">{dec(c.recentRoas, 2)}</span> <span className="text-slate-600">vs {dec(c.priorRoas, 2)}</span></span>
-                        <span>Impr Δ: <span className="text-slate-300">{c.deltaImprPct != null ? `${(c.deltaImprPct * 100).toFixed(0)}%` : '—'}</span></span>
+                      <div className="text-sm font-semibold text-white truncate mb-1">{c.campaignName || c.campaignId}</div>
+                      <div className="text-[11px] text-slate-500">
+                        Revenue <span className="text-red-400 font-semibold">{cur(c.recentRev)}</span>
+                        <span className="text-slate-600"> (was {cur(c.priorRev)}, </span>
+                        <span className="text-red-400">{c.deltaRevPct != null ? `${(c.deltaRevPct * 100).toFixed(0)}%` : '—'}</span>
+                        <span className="text-slate-600">)</span>
+                        <span className="mx-2 text-slate-700">·</span>
+                        ROAS <span className="text-slate-300">{dec(c.recentRoas, 2)}</span>
+                        <span className="text-slate-600"> was {dec(c.priorRoas, 2)}</span>
                       </div>
                     </div>
-                    <button onClick={() => setExpanded(isOpen ? null : c.campaignId)}
-                      className="text-[10px] px-2.5 py-1 rounded bg-gray-800 text-slate-300 hover:bg-gray-700">
-                      {isOpen ? 'Collapse' : 'Drill chain'}
-                    </button>
-                    <button onClick={() => onDrillCampaign({ id: c.campaignId, name: c.campaignName })}
-                      className="text-[10px] px-2.5 py-1 rounded bg-amber-900/30 text-amber-300 border border-amber-800/40 hover:bg-amber-900/50">
-                      Filter to campaign
-                    </button>
                   </div>
 
-                  {/* Ranked causes */}
-                  <div className="px-4 py-3 space-y-2">
-                    {c.causes.length === 0 ? (
-                      <div className="text-[11px] text-slate-500 italic">No strong signal for a specific cause. Could be auction-side softening, seasonality, or low-volume noise.</div>
-                    ) : c.causes.map((cs, i) => (
-                      <div key={i} className={`rounded-lg border px-3 py-2 ${severityColor(cs.severity)}`}>
-                        <div className="flex items-center gap-2 mb-1">
+                  {/* THE headline cause (top one only) */}
+                  {!top ? (
+                    <div className="mt-3 px-3 py-3 rounded-lg bg-gray-950 border border-gray-800 text-[12px] text-slate-400">
+                      No specific signal. Likely auction noise or seasonality — monitor another week.
+                    </div>
+                  ) : (
+                    <div className="mt-3 px-3 py-3 rounded-lg bg-gray-950 border border-gray-800">
+                      <div className="flex items-center gap-2 mb-1.5">
+                        {causeIcon(top.cause)}
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-300">{causeLabel(top.cause)}</span>
+                        <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase tracking-wider ${sevPill(top.severity)}`}>{top.severity}</span>
+                        {c.causes.length > 1 && <span className="text-[10px] text-slate-600">+{c.causes.length - 1} more</span>}
+                      </div>
+                      <div className="text-[13px] text-slate-200 font-semibold">{top.headline}</div>
+                      <div className="text-[12px] text-amber-300 mt-1.5 flex items-start gap-1.5">
+                        <span className="text-amber-500">→</span>
+                        <span>{top.action}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Collapsed action buttons */}
+                  <div className="flex flex-wrap gap-2 mt-3">
+                    {c.causes.length > 0 && (
+                      <button onClick={() => setOpen(o => ({ ...o, [c.campaignId]: showEvidence ? null : 'evidence' }))}
+                        className="text-[10px] px-2.5 py-1.5 rounded bg-gray-800 text-slate-300 hover:bg-gray-700">
+                        {showEvidence ? 'Hide' : 'Show'} evidence {c.causes.length > 1 ? `& ${c.causes.length - 1} other cause${c.causes.length > 2 ? 's' : ''}` : ''}
+                      </button>
+                    )}
+                    {c.causes.some(x => x.cause === 'sku_outage') && (
+                      <button onClick={() => setOpen(o => ({ ...o, [c.campaignId]: showChain ? null : 'chain' }))}
+                        className="text-[10px] px-2.5 py-1.5 rounded bg-gray-800 text-slate-300 hover:bg-gray-700">
+                        {showChain ? 'Hide' : 'Trace'} SKU → ad → search term
+                      </button>
+                    )}
+                    <button onClick={() => onDrillCampaign({ id: c.campaignId, name: c.campaignName })}
+                      className="text-[10px] px-2.5 py-1.5 rounded bg-amber-900/30 text-amber-300 border border-amber-800/40 hover:bg-amber-900/50 ml-auto">
+                      Open search terms →
+                    </button>
+                  </div>
+                </div>
+
+                {/* Evidence panel (collapsed by default) */}
+                {showEvidence && (
+                  <div className="border-t border-gray-800 bg-gray-950/60 px-5 py-4 space-y-3">
+                    {c.causes.map((cs, i) => (
+                      <div key={i} className="space-y-1.5">
+                        <div className="flex items-center gap-2">
                           {causeIcon(cs.cause)}
-                          <span className="text-[10px] font-bold uppercase tracking-wider">{cs.cause.replace(/_/g, ' ')}</span>
-                          <span className="ml-auto text-[10px] uppercase tracking-wider opacity-80">{cs.severity}</span>
+                          <span className="text-[11px] font-bold text-slate-300">{causeLabel(cs.cause)}</span>
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase tracking-wider ${sevPill(cs.severity)}`}>{cs.severity}</span>
+                          {cs.impactSpend > 0 && <span className="text-[10px] text-slate-500">{cur(cs.impactSpend)} affected</span>}
                         </div>
-                        <div className="text-xs leading-relaxed">{cs.narrative}</div>
+                        <div className="text-[12px] text-slate-300 pl-5">{cs.headline}</div>
+                        <div className="text-[11px] text-amber-300/80 pl-5">→ {cs.action}</div>
                         {cs.evidence?.length > 0 && (
-                          <div className="mt-2 pl-5 space-y-1 text-[11px] text-slate-400">
-                            {cs.evidence.slice(0, 5).map((ev, j) => (
-                              <div key={j} className="font-mono">
-                                {ev.sku ? `${ev.sku} — ${ev.title || ''} · ${ev.costShare != null ? `${(ev.costShare * 100).toFixed(0)}% of campaign spend` : ''}${ev.daysOut != null ? ` · ${ev.daysOut}d out` : ''}${ev.issue ? ` · ${ev.issue}` : ''}` :
-                                 ev.operation ? `${ev.ts || ''} · ${ev.user || 'unknown'} · ${ev.operation} on ${ev.resourceType}` :
-                                 JSON.stringify(ev)}
-                              </div>
+                          <ul className="pl-5 mt-1 text-[11px] text-slate-400 space-y-0.5">
+                            {cs.evidence.slice(0, 3).map((ev, j) => (
+                              <li key={j} className="truncate">
+                                {ev.sku ? (
+                                  <>
+                                    <span className="text-slate-200">{ev.title || ev.sku}</span>
+                                    <span className="text-slate-600"> · </span>
+                                    {ev.costShare != null && <span>{(ev.costShare * 100).toFixed(0)}% of spend · </span>}
+                                    {ev.daysOut != null && <span className="text-orange-400">{ev.daysOut}d out</span>}
+                                    {ev.issue && <span className="text-red-400">{ev.issue}</span>}
+                                  </>
+                                ) : ev.operation ? (
+                                  <span>{ev.ts?.slice(0, 10)} · {ev.user || 'unknown'} · {ev.operation} on {ev.resourceType}</span>
+                                ) : null}
+                              </li>
                             ))}
-                          </div>
+                            {cs.evidence.length > 3 && (
+                              <li className="text-slate-600 italic">+ {cs.evidence.length - 3} more</li>
+                            )}
+                          </ul>
                         )}
                       </div>
                     ))}
                   </div>
+                )}
 
-                  {/* Drill chain: SKU → ad group → ad → keyword → search term */}
-                  {isOpen && chain && chain.campaigns?.length > 0 && (
-                    <div className="px-4 py-3 border-t border-gray-800 bg-gray-950/60">
-                      <div className="text-[11px] font-semibold text-amber-300 uppercase tracking-wider mb-2">Impact chain for SKU: <span className="font-mono text-white">{chain.sku}</span></div>
-                      {chain.campaigns.filter(cc => cc.campaignId === c.campaignId).map(cc => (
-                        <div key={cc.campaignId} className="space-y-3 text-[11px]">
-                          <div className="text-slate-400">
-                            This SKU accounted for <span className="text-amber-300 font-semibold">{(cc.costShareInCampaign * 100).toFixed(0)}%</span> of this campaign's shopping spend ({cur(cc.skuCost)} / {cur(cc.campaignTotalCost)}).
-                          </div>
-                          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                            <div>
-                              <div className="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Top Ad Groups in campaign</div>
-                              {cc.topAdGroups.length === 0 ? <div className="text-slate-600 italic">—</div> :
-                                cc.topAdGroups.map(ag => (
-                                  <div key={ag.id} className="font-mono text-slate-300 truncate">{ag.name} — {cur(ag.cost)} · ROAS {dec(ag.roas, 2)}</div>
-                                ))}
-                            </div>
-                            <div>
-                              <div className="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Top Ads</div>
-                              {cc.topAds.length === 0 ? <div className="text-slate-600 italic">—</div> :
-                                cc.topAds.map(ad => (
-                                  <div key={ad.id} className="font-mono text-slate-300 truncate">{ad.name} — {cur(ad.cost)} · {num(ad.clicks)} clicks</div>
-                                ))}
-                            </div>
-                            <div>
-                              <div className="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Top Keywords</div>
-                              {cc.topKeywords.length === 0 ? <div className="text-slate-600 italic">—</div> :
-                                cc.topKeywords.map((kw, ki) => (
-                                  <div key={ki} className="font-mono text-slate-300">{kw.keyword} <span className="text-slate-600">[{kw.matchType}]</span> — {cur(kw.cost)}</div>
-                                ))}
-                            </div>
-                            <div>
-                              <div className="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Top Search Terms</div>
-                              {cc.topSearchTerms.length === 0 ? <div className="text-slate-600 italic">—</div> :
-                                cc.topSearchTerms.map((st, si) => (
-                                  <div key={si} className="font-mono text-slate-300 truncate">"{st.searchTerm}" — {cur(st.cost)} · {dec(st.conversions, 1)} conv</div>
-                                ))}
-                            </div>
-                          </div>
+                {/* Chain trace */}
+                {showChain && chain?.campaigns?.length > 0 && (() => {
+                  const cc = chain.campaigns.find(x => x.campaignId === c.campaignId);
+                  if (!cc) return null;
+                  return (
+                    <div className="border-t border-gray-800 bg-gray-950/60 px-5 py-4 text-[11px] space-y-3">
+                      <div className="text-slate-400">
+                        SKU <span className="font-mono text-white">{chain.sku}</span> accounted for{' '}
+                        <span className="text-amber-300 font-semibold">{(cc.costShareInCampaign * 100).toFixed(0)}%</span> of this campaign's shopping spend.
+                      </div>
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-3">
+                        <div>
+                          <div className="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Top ad groups</div>
+                          {cc.topAdGroups.length === 0 ? <div className="text-slate-600 italic">—</div> :
+                            cc.topAdGroups.map(ag => (
+                              <div key={ag.id} className="text-slate-300 truncate">{ag.name} · {cur(ag.cost)}</div>
+                            ))}
                         </div>
-                      ))}
+                        <div>
+                          <div className="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Top search terms</div>
+                          {cc.topSearchTerms.length === 0 ? <div className="text-slate-600 italic">—</div> :
+                            cc.topSearchTerms.map((st, si) => (
+                              <div key={si} className="text-slate-300 truncate">"{st.searchTerm}" · {cur(st.cost)}</div>
+                            ))}
+                        </div>
+                      </div>
                     </div>
-                  )}
-                  {isOpen && (!chain || !chain.campaigns?.length) && (
-                    <div className="px-4 py-3 border-t border-gray-800 bg-gray-950/60 text-[11px] text-slate-500 italic">
-                      No SKU outage directly implicates this campaign — inspect the change events or landing-page funnel.
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </Card>
+                  );
+                })()}
+              </div>
+            );
+          })}
+        </div>
       )}
     </motion.div>
   );
