@@ -545,10 +545,12 @@ async function gadsQuery({ accessToken, devToken, loginCustomerId, customerId, q
   };
   if (loginCustomerId) headers['login-customer-id'] = loginCustomerId;
 
+  // v23 removed pageSize — the server returns a fixed 10000-row page and
+  // we paginate via nextPageToken. Sending pageSize now errors out.
   const allRows = [];
   let pageToken;
   do {
-    const body = { query, pageSize: 10000 };
+    const body = { query };
     if (pageToken) body.pageToken = pageToken;
     const r = await withRetry(() => axios.post(url, body, { headers, timeout: 60000 }));
     if (r.data.results?.length) allRows.push(...r.data.results);
