@@ -10,12 +10,14 @@ import {
   Package, AlertTriangle, GhostIcon, PackageX, Link2Off,
   Stethoscope, TrendingDown, GitBranch,
   Tag, ArrowUpCircle, ArrowDownCircle,
+  Lightbulb, Rocket, Ban, Clock3, MousePointerClick, ExternalLink, Layers,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { totalsFromNormalized } from '../lib/googleAdsAnalytics';
 import { blendAdsMerchant, shopifyBySkuFromOrders, aggregateShoppingBySku } from '../lib/googleAdsMerchantBlend';
 import { diagnose, skuImpactChain } from '../lib/dropDiagnostics';
 import { buildPriceSuggestions } from '../lib/priceSuggestions';
+import { analyzeOpportunities } from '../lib/googleAdsOpportunities';
 import GoogleAdsIntel from './GoogleAdsIntel';
 
 /* ─── FORMATTERS ─────────────────────────────────────────────────── */
@@ -157,6 +159,7 @@ function SortableTable({ rows, cols, defaultSort, maxHeight = '520px', onRowClic
 const TABS = [
   { id: 'overview',    label: 'Overview',     icon: Zap },
   { id: 'intel',       label: 'Intelligence', icon: Brain },
+  { id: 'opps',        label: 'Opportunities', icon: Lightbulb },
   { id: 'rootcause',   label: 'Root Cause',   icon: Stethoscope },
   { id: 'pricing',     label: 'Pricing',      icon: Tag },
   { id: 'feed',        label: 'Feed Health',  icon: Package },
@@ -170,6 +173,353 @@ const TABS = [
   { id: 'demo',        label: 'Demographics', icon: Users },
   { id: 'shopping',    label: 'Shopping',     icon: ShoppingBag },
 ];
+
+/* ─── OPPORTUNITIES TAB ───────────────────────────────────────────
+   Six panels, each answering a concrete operator question. Collapsed
+   by default except the summary counts — click into any panel for
+   full evidence and per-item actions.
+   ─────────────────────────────────────────────────────────────────── */
+function OpportunitiesTab({ opps, brand }) {
+  const [open, setOpen] = useState(null);
+
+  if (!opps) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center">
+        <Lightbulb size={36} className="text-slate-600 mx-auto mb-3" />
+        <p className="text-sm text-slate-400">Pull Google Ads data to unlock opportunities.</p>
+      </div>
+    );
+  }
+
+  const panels = [
+    {
+      id: 'recs', icon: Lightbulb, title: "Google's own recommendations",
+      blurb: 'Ranked suggestions from Google, filtered against your inventory so OOS-SKU recs are hidden.',
+      count: opps.recs.totals.count,
+      secondary: opps.recs.totals.estRev > 0 ? `+₹${Math.round(opps.recs.totals.estRev).toLocaleString('en-IN')} est. revenue` : `+${Math.round(opps.recs.totals.estConv)} conv estimated`,
+      color: '#f59e0b',
+    },
+    {
+      id: 'hidden', icon: Rocket, title: 'Hidden scale SKUs',
+      blurb: "Shopify winners Google isn't scaling. Selling organically, approved in feed, in stock — just needs a campaign.",
+      count: opps.hidden.totals.count,
+      secondary: opps.hidden.totals.estPotential > 0 ? `~₹${Math.round(opps.hidden.totals.estPotential).toLocaleString('en-IN')}/mo potential` : '',
+      color: '#22c55e',
+    },
+    {
+      id: 'negatives', icon: Ban, title: 'Smart negative keywords',
+      blurb: 'Wasteful search terms clustered by root word. Add as a shared negative set to block a family of queries at once.',
+      count: opps.negatives.totals.count,
+      secondary: opps.negatives.totals.wasted > 0 ? `${cur(opps.negatives.totals.wasted)} burned in ${opps.negatives.totals.termsCovered} terms` : '',
+      color: '#ef4444',
+    },
+    {
+      id: 'dayparting', icon: Clock3, title: 'Dayparting / schedule',
+      blurb: 'Hour × day-of-week combos where ROAS is half the account median. Plus winners to boost.',
+      count: opps.dayparting.totals.count,
+      secondary: opps.dayparting.totals.wastedCost > 0 ? `${cur(opps.dayparting.totals.wastedCost)} in underperforming slots` : '',
+      color: '#a78bfa',
+    },
+    {
+      id: 'pdp', icon: MousePointerClick, title: 'PDP conversion leaks',
+      blurb: 'Landing pages with clicks but CVR below peer median. Usually stock, price, or page-speed issues.',
+      count: opps.pdp.totals.count,
+      secondary: opps.pdp.totals.lostRev > 0 ? `${cur(opps.pdp.totals.lostRev)} est. revenue lost` : '',
+      color: '#fb923c',
+    },
+    {
+      id: 'scorecard', icon: Layers, title: 'Channel scorecard',
+      blurb: 'One joined row per SKU: Shopify × Google × Meta × feed. Pre-tiered into star / scale / fix / leak / drop.',
+      count: opps.scorecard.totals.count,
+      secondary: opps.scorecard.totals.byTier
+        ? `${opps.scorecard.totals.byTier.star} star · ${opps.scorecard.totals.byTier.scale} scale · ${opps.scorecard.totals.byTier.fix} fix · ${opps.scorecard.totals.byTier.leak} leak`
+        : '',
+      color: '#60a5fa',
+    },
+  ];
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
+      {/* Panel grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        {panels.map(p => {
+          const Icon = p.icon;
+          const isOpen = open === p.id;
+          return (
+            <button
+              key={p.id}
+              onClick={() => setOpen(isOpen ? null : p.id)}
+              className={`text-left p-4 rounded-xl border transition-all ${isOpen ? 'bg-gray-900 border-amber-600/40 ring-1 ring-amber-600/30' : 'bg-gray-900 border-gray-800 hover:border-gray-700'}`}
+            >
+              <div className="flex items-start gap-3">
+                <div className="p-2 rounded-lg" style={{ background: `${p.color}22` }}>
+                  <Icon size={16} style={{ color: p.color }} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm font-semibold text-white">{p.title}</div>
+                    <div className="text-2xl font-bold font-mono" style={{ color: p.color }}>{p.count}</div>
+                  </div>
+                  <div className="text-[11px] text-slate-500 mt-1 line-clamp-2">{p.blurb}</div>
+                  {p.secondary && <div className="text-[11px] font-semibold mt-1.5" style={{ color: p.color }}>{p.secondary}</div>}
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Detail panels — shown one at a time */}
+      {open === 'recs'       && <RecsPanel      opps={opps.recs} />}
+      {open === 'hidden'     && <HiddenPanel    opps={opps.hidden} brand={brand} />}
+      {open === 'negatives'  && <NegativesPanel opps={opps.negatives} />}
+      {open === 'dayparting' && <DaypartingPanel opps={opps.dayparting} />}
+      {open === 'pdp'        && <PdpPanel       opps={opps.pdp} />}
+      {open === 'scorecard'  && <ScorecardPanel opps={opps.scorecard} brand={brand} />}
+    </motion.div>
+  );
+}
+
+function RecsPanel({ opps }) {
+  if (!opps.items.length) return <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center text-sm text-slate-500">No active recommendations from Google right now.</div>;
+  return (
+    <Card title={`${opps.items.length} recommendations from Google`}>
+      <div className="space-y-2">
+        {opps.items.slice(0, 30).map((r, i) => (
+          <div key={i} className="px-3 py-2.5 rounded-lg bg-gray-950 border border-gray-800">
+            <div className="flex items-start gap-2">
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 uppercase tracking-wider shrink-0 mt-0.5">{r.label}</span>
+              <div className="flex-1 min-w-0">
+                <div className="text-[13px] text-slate-200 font-semibold">{r.headline}</div>
+                {r.action && <div className="text-[11px] text-amber-300/80 mt-1">→ {r.action}</div>}
+                {r.inventoryNote && <div className="text-[10px] text-slate-600 mt-1">{r.inventoryNote}</div>}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function HiddenPanel({ opps, brand }) {
+  if (!opps.items.length) return <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center text-sm text-slate-500">No hidden-scale SKUs detected. Either Google is already scaling your Shopify winners, or inventory/feed is blocking them.</div>;
+  return (
+    <Card title={`${opps.items.length} SKUs ready for a new Google campaign`}>
+      <p className="text-[11px] text-slate-500 mb-3">Each of these sells organically + is approved in feed + is in stock — but has &lt;100 Google impressions. Launch a Shopping asset group or dedicated Search campaign for each.</p>
+      <div className="overflow-auto" style={{ maxHeight: '560px' }}>
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+            <tr>
+              <th className="px-3 py-2 text-left text-slate-400 font-semibold">Product</th>
+              <th className="px-3 py-2 text-right text-slate-400 font-semibold">Shopify Rev</th>
+              <th className="px-3 py-2 text-right text-slate-400 font-semibold">Units</th>
+              <th className="px-3 py-2 text-right text-slate-400 font-semibold">Meta ROAS</th>
+              <th className="px-3 py-2 text-right text-slate-400 font-semibold">Google Impr</th>
+              <th className="px-3 py-2 text-left text-slate-400 font-semibold">Suggested Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {opps.items.slice(0, 50).map((r, i) => (
+              <tr key={r.sku} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                <td className="px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    {r.image && <img src={r.image} alt="" className="w-8 h-8 rounded object-cover bg-gray-800" onError={e => { e.target.style.display = 'none'; }} />}
+                    <div className="min-w-0">
+                      {r.feedLink ? (
+                        <a href={r.feedLink} target="_blank" rel="noreferrer" className="text-slate-200 hover:text-amber-300 truncate max-w-[200px] inline-block">{r.title}</a>
+                      ) : <span className="text-slate-200 truncate max-w-[200px] inline-block">{r.title}</span>}
+                      <div className="text-[10px] text-slate-600 font-mono">{r.sku}</div>
+                    </div>
+                  </div>
+                </td>
+                <td className="px-3 py-2 text-right font-mono text-emerald-400">{cur(r.shopRevenue)}</td>
+                <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.shopUnits)}</td>
+                <td className="px-3 py-2 text-right font-mono text-slate-300">{r.metaRoas ? dec(r.metaRoas, 1) : '—'}</td>
+                <td className="px-3 py-2 text-right font-mono text-slate-500">{num(r.adImpr)}</td>
+                <td className="px-3 py-2 text-[11px] text-amber-300/80 max-w-[300px]">{r.action}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function NegativesPanel({ opps }) {
+  const hasAny = opps.items.length || opps.singles?.length;
+  if (!hasAny) return <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center text-sm text-slate-500">No wasteful search terms above floor.</div>;
+  return (
+    <div className="space-y-4">
+      {opps.items.length > 0 && (
+        <Card title={`${opps.items.length} negative keyword clusters — ${cur(opps.totals.wasted)} wasted`}>
+          <p className="text-[11px] text-slate-500 mb-3">Each cluster's root word appears in ≥3 non-converting search terms. Add as a phrase-match negative to block the whole family. Export as a shared negative list if several campaigns share them.</p>
+          <div className="space-y-2">
+            {opps.items.slice(0, 30).map((c, i) => (
+              <div key={i} className="px-3 py-2.5 rounded-lg bg-gray-950 border border-gray-800">
+                <div className="flex items-center gap-3 mb-1">
+                  <code className="text-sm font-bold text-red-300 font-mono">{c.suggested}</code>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-800 text-slate-400">{c.matchType}</span>
+                  <span className="text-[11px] text-slate-500 ml-auto">{c.termsCount} terms · {cur(c.cost)} wasted · {num(c.clicks)} clicks</span>
+                </div>
+                <div className="text-[10px] text-slate-600 truncate">e.g. {c.examples.slice(0, 4).join(' · ')}</div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+      {opps.singles?.length > 0 && (
+        <Card title={`${opps.singles.length} individual high-waste terms (exact-match candidates)`}>
+          <div className="space-y-1.5">
+            {opps.singles.map((s, i) => (
+              <div key={i} className="flex items-center gap-3 px-3 py-1.5 text-xs">
+                <code className="text-red-300 font-mono">{s.suggested}</code>
+                <span className="text-[11px] text-slate-500 ml-auto">{cur(s.cost)} · {num(s.clicks)} clicks · CPA {s.cpa > 0 ? cur(s.cpa) : '∞'}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function DaypartingPanel({ opps }) {
+  const hasAny = opps.items.length || opps.winners?.length;
+  if (!hasAny) return <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center text-sm text-slate-500">All time slots performing above 0.5× median. No obvious schedule changes needed.</div>;
+  return (
+    <div className="space-y-4">
+      {opps.items.length > 0 && (
+        <Card title={`${opps.items.length} underperforming time slots — ${cur(opps.totals.wastedCost)} total`}>
+          <p className="text-[11px] text-slate-500 mb-3">ROAS below 0.5× account median ({dec(opps.totals.medianRoas, 2)}). Consider pausing or reducing bids during these windows in Google Ads → Campaign settings → Ad schedule.</p>
+          <div className="space-y-1.5">
+            {opps.items.map((r, i) => (
+              <div key={i} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-gray-950 border border-gray-800">
+                <Clock3 size={12} className="text-purple-400" />
+                <span className="text-sm font-mono font-semibold text-white min-w-[80px]">{r.bucket}</span>
+                <span className="text-[11px] text-slate-500 min-w-[80px]">ROAS {dec(r.roas, 2)}</span>
+                <span className="text-[11px] text-slate-600">{cur(r.cost)} spend</span>
+                <span className="text-[11px] text-slate-400 ml-auto text-right truncate max-w-[400px]">{r.action}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+      {opps.winners?.length > 0 && (
+        <Card title={`${opps.winners.length} hot time slots — consider raising bids`}>
+          <div className="space-y-1.5">
+            {opps.winners.map((r, i) => (
+              <div key={i} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-emerald-900/10 border border-emerald-800/30">
+                <Clock3 size={12} className="text-emerald-400" />
+                <span className="text-sm font-mono font-semibold text-emerald-300 min-w-[80px]">{r.bucket}</span>
+                <span className="text-[11px] text-emerald-400 min-w-[80px]">ROAS {dec(r.roas, 2)}</span>
+                <span className="text-[11px] text-slate-400 ml-auto truncate">{r.action}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function PdpPanel({ opps }) {
+  if (!opps.items.length) return <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center text-sm text-slate-500">No landing pages with enough volume to flag.</div>;
+  return (
+    <Card title={`${opps.items.length} PDPs with low conversion rate`}>
+      <p className="text-[11px] text-slate-500 mb-3">These URLs receive Google clicks but convert at &lt;70% of peer median ({(opps.totals.peerCvr * 100).toFixed(2)}%). Usually stock, price, page-speed, or above-fold issues. Est. lost revenue: {cur(opps.totals.lostRev)}.</p>
+      <div className="space-y-2">
+        {opps.items.slice(0, 30).map((r, i) => (
+          <div key={i} className="px-3 py-2.5 rounded-lg bg-gray-950 border border-gray-800">
+            <div className="flex items-start gap-2">
+              <a href={r.url} target="_blank" rel="noreferrer" className="text-[12px] text-amber-300 hover:text-amber-200 flex-1 truncate">
+                {r.url}
+                <ExternalLink size={10} className="inline ml-1 opacity-60" />
+              </a>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded ${r.severity === 'critical' ? 'bg-red-900/40 text-red-300' : r.severity === 'high' ? 'bg-orange-900/40 text-orange-300' : 'bg-amber-900/40 text-amber-300'}`}>{r.severity}</span>
+            </div>
+            <div className="flex items-center gap-4 text-[11px] text-slate-500 mt-1.5">
+              <span>{num(r.clicks)} clicks</span>
+              <span>CVR <span className="text-red-300">{(r.convRate * 100).toFixed(2)}%</span> vs {(r.medianCvr * 100).toFixed(2)}% peer</span>
+              <span>Spend {cur(r.cost)}</span>
+              {r.organicUnits > 0 && <span className="text-emerald-400">Organic: {r.organicUnits}u / {cur(r.organicRev)}</span>}
+            </div>
+            <div className="text-[11px] text-amber-300/80 mt-1">→ {r.action}</div>
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function ScorecardPanel({ opps }) {
+  const [filter, setFilter] = useState('all');
+  const tierColor = { star: '#22c55e', scale: '#3b82f6', fix: '#ef4444', leak: '#fb923c', drop: '#6b7280', monitor: '#64748b' };
+  const tierLabel = { star: 'Star', scale: 'Scale', fix: 'Fix', leak: 'Leak', drop: 'Drop', monitor: 'Monitor' };
+  const filtered = filter === 'all' ? opps.items : opps.items.filter(i => i.tier === filter);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex gap-1.5 flex-wrap">
+        <button onClick={() => setFilter('all')} className={`px-2.5 py-1 rounded text-[11px] ${filter === 'all' ? 'bg-amber-900/30 text-amber-300 border border-amber-800/40' : 'bg-gray-900 text-slate-400 border border-gray-800'}`}>All ({opps.totals.count})</button>
+        {Object.entries(opps.totals.byTier || {}).filter(([, c]) => c > 0).map(([tier, count]) => (
+          <button key={tier} onClick={() => setFilter(tier)} className={`px-2.5 py-1 rounded text-[11px] border ${filter === tier ? '' : 'opacity-70'}`}
+            style={{ background: `${tierColor[tier]}22`, borderColor: `${tierColor[tier]}66`, color: tierColor[tier] }}>
+            {tierLabel[tier]} ({count})
+          </button>
+        ))}
+      </div>
+      <Card title={`${filtered.length} SKUs — ${filter === 'all' ? 'all tiers' : tierLabel[filter]}`}>
+        <div className="overflow-auto" style={{ maxHeight: '580px' }}>
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+              <tr>
+                <th className="px-3 py-2 text-left text-slate-400 font-semibold">Product</th>
+                <th className="px-3 py-2 text-left text-slate-400 font-semibold">Tier</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold">Shopify</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold">Google</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold">Meta</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold">Blended ROAS</th>
+                <th className="px-3 py-2 text-left text-slate-400 font-semibold">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.slice(0, 200).map((r, i) => (
+                <tr key={r.sku} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-2">
+                      {r.image && <img src={r.image} alt="" className="w-7 h-7 rounded object-cover bg-gray-800" onError={e => { e.target.style.display = 'none'; }} />}
+                      <div className="min-w-0">
+                        <div className="text-slate-200 truncate max-w-[200px]">{r.title}</div>
+                        <div className="text-[10px] text-slate-600 font-mono truncate">{r.sku}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wider"
+                      style={{ background: `${tierColor[r.tier]}22`, color: tierColor[r.tier] }}>
+                      {tierLabel[r.tier]}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-slate-300">{cur(r.shopRevenue)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-slate-300">
+                    {r.googleCost > 0 ? <>{cur(r.googleCost)}<div className="text-[10px] text-slate-500">ROAS {dec(r.googleRoas, 1)}</div></> : '—'}
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-slate-300">
+                    {r.metaCost > 0 ? <>{cur(r.metaCost)}<div className="text-[10px] text-slate-500">ROAS {dec(r.metaRoas, 1)}</div></> : '—'}
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-white font-semibold">{r.blendedRoas ? dec(r.blendedRoas, 2) : '—'}</td>
+                  <td className="px-3 py-2 text-[11px] text-slate-400 max-w-[320px]">{r.action}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
 
 /* ─── ROOT CAUSE TAB ──────────────────────────────────────────────
    For every dropping campaign, show ranked causes with auto-generated
@@ -869,6 +1219,39 @@ export default function GoogleAds() {
     });
   }, [orders, data, merchantData]);
 
+  /* Meta per-SKU map (from enriched Meta rows) — used for Hidden Scale and
+     Channel Scorecard to join Google × Shopify × Meta into one view. */
+  const { enrichedRows } = useStore();
+  const metaBySku = useMemo(() => {
+    const map = new Map();
+    (enrichedRows || []).forEach(r => {
+      if ((r._brandId || r.brandId) && selectedBrandId && (r._brandId || r.brandId) !== selectedBrandId) return;
+      const sku = (r.sku || '').trim().toUpperCase();
+      if (!sku) return;
+      const cur = map.get(sku) || { sku, spend: 0, revenue: 0, purchases: 0, clicks: 0, impressions: 0 };
+      cur.spend       += Number(r.spend || 0);
+      cur.purchases   += Number(r.purchases || 0);
+      cur.revenue     += Number(r.purchaseValue || r.purchaseValue30 || (r.metaRoas ? r.metaRoas * r.spend : 0));
+      cur.clicks      += Number(r.clicks || 0);
+      cur.impressions += Number(r.impressions || 0);
+      map.set(sku, cur);
+    });
+    return map;
+  }, [enrichedRows, selectedBrandId]);
+
+  /* Opportunities — six-analysis cross-system engine */
+  const opps = useMemo(() => {
+    if (!data) return null;
+    const shopifyBySku = orders.length ? shopifyBySkuFromOrders(orders) : null;
+    return analyzeOpportunities({
+      data, blend,
+      merchantBySku: merchantData?.bySku || null,
+      orders,
+      shopifyBySku,
+      metaBySku,
+    });
+  }, [data, blend, merchantData, orders, metaBySku]);
+
   /* Drop diagnostics — SKU outages → campaign drops → ad/keyword/search-term chain */
   const diag = useMemo(() => {
     if (!data) return null;
@@ -1119,6 +1502,11 @@ export default function GoogleAds() {
           skuMargin={active?.skuMargin}
           defaultMarginPct={active?.defaultMarginPct || 0.25}
         />
+      )}
+
+      {/* ── OPPORTUNITIES ────────────────────────────────────────── */}
+      {tab === 'opps' && (
+        <OpportunitiesTab opps={opps} brand={active} />
       )}
 
       {/* ── ROOT CAUSE ────────────────────────────────────────────── */}

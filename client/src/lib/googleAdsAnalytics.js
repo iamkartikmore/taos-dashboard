@@ -414,6 +414,86 @@ export function normalizeChangeEvents(rows = []) {
   });
 }
 
+/* Google's own recommendations. The `impact` block is the money field —
+   (potential - base) metrics gives us Google's estimate of uplift if the
+   recommendation is applied. */
+export function normalizeRecommendations(rows = []) {
+  return rows.map(r => {
+    const rec = r.recommendation || {};
+    const base = rec.impact?.baseMetrics || {};
+    const pot  = rec.impact?.potentialMetrics || {};
+    const bCost = fromMicros(base.costMicros);
+    const pCost = fromMicros(pot.costMicros);
+    const bConv = num(base.conversions);
+    const pConv = num(pot.conversions);
+    const bRev  = num(base.conversionsValue);
+    const pRev  = num(pot.conversionsValue);
+
+    // Type-specific payload — exactly one of these is populated per rec
+    const payload = {
+      keyword:              rec.keywordRecommendation?.keyword?.text || null,
+      keywordMatchType:     rec.keywordRecommendation?.keyword?.matchType || null,
+      keywordRecommendedCpc: fromMicros(rec.keywordRecommendation?.recommendedCpcBidMicros),
+      currentBudget:        fromMicros(rec.campaignBudgetRecommendation?.currentBudgetAmountMicros),
+      recommendedBudget:    fromMicros(rec.campaignBudgetRecommendation?.recommendedBudgetAmountMicros),
+      targetCpa:            fromMicros(rec.targetCpaOptInRecommendation?.recommendedTargetCpaMicros),
+      maxClicksBudget:      fromMicros(rec.maximizeClicksOptInRecommendation?.recommendedBudgetAmountMicros),
+      maxConvBudget:        fromMicros(rec.maximizeConversionsOptInRecommendation?.recommendedBudgetAmountMicros),
+      adHeadline1:          rec.textAdRecommendation?.ad?.expandedTextAd?.headlinePart1 || null,
+      adHeadline2:          rec.textAdRecommendation?.ad?.expandedTextAd?.headlinePart2 || null,
+      adDescription:        rec.textAdRecommendation?.ad?.expandedTextAd?.description   || null,
+    };
+
+    const campaignResource = rec.campaign || '';
+    const campaignId       = campaignResource.split('/').pop() || null;
+
+    return {
+      resourceName: rec.resourceName,
+      type:         rec.type,
+      dismissed:    !!rec.dismissed,
+      campaignId,
+      // Impact — the (potential - base) delta is Google's predicted uplift
+      upliftCost:        pCost - bCost,
+      upliftConversions: pConv - bConv,
+      upliftRevenue:     pRev - bRev,
+      baseCost:  bCost, baseConv: bConv, baseRev: bRev,
+      potCost:   pCost, potConv:  pConv, potRev:  pRev,
+      ...payload,
+    };
+  }).filter(r => r.type);
+}
+
+/* Per landing-page URL. Scope is the whole account; we join to campaign
+   via the served URL when it matches a campaign's final_urls. Primary
+   use: join to Shopify product handles to find PDP CRO opportunities. */
+export function normalizeLandingPages(rows = []) {
+  const map = new Map();
+  rows.forEach(r => {
+    const url = r.landingPageView?.unexpandedFinalUrl;
+    if (!url) return;
+    const existing = map.get(url) || {
+      url,
+      campaignId:   r.campaign?.id || null,
+      campaignName: r.campaign?.name || '',
+      impressions: 0, clicks: 0, cost: 0, conversions: 0, conversionValue: 0,
+    };
+    const m = commonMetrics(r.metrics || {});
+    existing.impressions     += m.impressions;
+    existing.clicks          += m.clicks;
+    existing.cost            += m.cost;
+    existing.conversions     += m.conversions;
+    existing.conversionValue += m.conversionValue;
+    map.set(url, existing);
+  });
+  return Array.from(map.values()).map(p => ({
+    ...p,
+    ctr:      p.impressions > 0 ? p.clicks / p.impressions : 0,
+    roas:     p.cost > 0 ? p.conversionValue / p.cost : 0,
+    cpa:      p.conversions > 0 ? p.cost / p.conversions : 0,
+    convRate: p.clicks > 0 ? p.conversions / p.clicks : 0,
+  }));
+}
+
 export function normalizeBudgets(rows = []) {
   return rows.map(r => {
     const b = r.campaignBudget || {};
@@ -446,6 +526,8 @@ export function normalizeGoogleAdsResponse(raw = {}) {
     shoppingByCampaign: normalizeShoppingByCampaign(raw.shopping),
     changeEvents:   normalizeChangeEvents(raw.changeEvents),
     budgets:        normalizeBudgets(raw.budgets),
+    recommendations: normalizeRecommendations(raw.recommendations),
+    landingPages:   normalizeLandingPages(raw.landingPages),
     errors:         raw.errors || {},
     fetchMs:        raw.fetchMs,
   };

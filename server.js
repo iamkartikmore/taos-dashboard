@@ -719,6 +719,47 @@ app.post('/api/google-ads/pull', async (req, res) => {
           campaign_budget.has_recommended_budget
         FROM campaign_budget
         WHERE campaign_budget.status != 'REMOVED'`,
+
+      // Google's own recommendations, ranked by impact. Active recommendations
+      // only — dismissed ones are noise. The impact block is the money field;
+      // we expose it so the UI can sort and annotate against our inventory.
+      recommendations: `
+        SELECT recommendation.resource_name, recommendation.type,
+          recommendation.dismissed, recommendation.campaign, recommendation.ad_group,
+          recommendation.impact.base_metrics.impressions,
+          recommendation.impact.base_metrics.clicks,
+          recommendation.impact.base_metrics.cost_micros,
+          recommendation.impact.base_metrics.conversions,
+          recommendation.impact.base_metrics.all_conversions,
+          recommendation.impact.base_metrics.conversions_value,
+          recommendation.impact.potential_metrics.impressions,
+          recommendation.impact.potential_metrics.clicks,
+          recommendation.impact.potential_metrics.cost_micros,
+          recommendation.impact.potential_metrics.conversions,
+          recommendation.impact.potential_metrics.all_conversions,
+          recommendation.impact.potential_metrics.conversions_value,
+          recommendation.campaign_budget_recommendation.current_budget_amount_micros,
+          recommendation.campaign_budget_recommendation.recommended_budget_amount_micros,
+          recommendation.keyword_recommendation.keyword.text,
+          recommendation.keyword_recommendation.keyword.match_type,
+          recommendation.keyword_recommendation.recommended_cpc_bid_micros,
+          recommendation.text_ad_recommendation.ad.expanded_text_ad.headline_part1,
+          recommendation.text_ad_recommendation.ad.expanded_text_ad.headline_part2,
+          recommendation.text_ad_recommendation.ad.expanded_text_ad.description,
+          recommendation.target_cpa_opt_in_recommendation.recommended_target_cpa_micros,
+          recommendation.maximize_clicks_opt_in_recommendation.recommended_budget_amount_micros,
+          recommendation.maximize_conversions_opt_in_recommendation.recommended_budget_amount_micros
+        FROM recommendation
+        WHERE recommendation.dismissed = false`,
+
+      // Per-URL performance — joins against Shopify handles downstream to
+      // surface PDPs with high Google traffic + low CVR (= CRO opportunity).
+      landingPages: `
+        SELECT landing_page_view.unexpanded_final_url, campaign.id, campaign.name,
+          metrics.impressions, metrics.clicks, metrics.cost_micros,
+          metrics.conversions, metrics.conversions_value, metrics.ctr, metrics.average_cpc
+        FROM landing_page_view
+        WHERE segments.date DURING ${during}`,
     };
 
     // Run in parallel; individual failures are tolerated (e.g., shopping fails on non-ecommerce accounts)
