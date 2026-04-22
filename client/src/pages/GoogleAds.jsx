@@ -8,10 +8,12 @@ import {
   Search, TrendingUp, Monitor, Clock, Users, ShoppingBag,
   Target, RefreshCw, Zap, ChevronRight, Download, Brain,
   Package, AlertTriangle, GhostIcon, PackageX, Link2Off,
+  Stethoscope, TrendingDown, GitBranch,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { totalsFromNormalized } from '../lib/googleAdsAnalytics';
 import { blendAdsMerchant, shopifyBySkuFromOrders } from '../lib/googleAdsMerchantBlend';
+import { diagnose, skuImpactChain } from '../lib/dropDiagnostics';
 import GoogleAdsIntel from './GoogleAdsIntel';
 
 /* ─── FORMATTERS ─────────────────────────────────────────────────── */
@@ -141,6 +143,7 @@ function SortableTable({ rows, cols, defaultSort, maxHeight = '520px', onRowClic
 const TABS = [
   { id: 'overview',    label: 'Overview',     icon: Zap },
   { id: 'intel',       label: 'Intelligence', icon: Brain },
+  { id: 'rootcause',   label: 'Root Cause',   icon: Stethoscope },
   { id: 'feed',        label: 'Feed Health',  icon: Package },
   { id: 'campaigns',   label: 'Campaigns',    icon: Target },
   { id: 'adgroups',    label: 'Ad Groups',    icon: Target },
@@ -152,6 +155,239 @@ const TABS = [
   { id: 'demo',        label: 'Demographics', icon: Users },
   { id: 'shopping',    label: 'Shopping',     icon: ShoppingBag },
 ];
+
+/* ─── ROOT CAUSE TAB ──────────────────────────────────────────────
+   For every dropping campaign, show ranked causes with auto-generated
+   narrative + drill-down to the exact SKU → ad group → ad → keyword →
+   search term chain. Cross-referenced against Shopify organic WoW and
+   Meta WoW so the operator can see whether the drop is Google-specific
+   or a demand-wide softening.
+   ─────────────────────────────────────────────────────────────────── */
+function RootCauseTab({ diag, data, onDrillCampaign }) {
+  const [expanded, setExpanded] = useState(null);
+
+  if (!diag) {
+    return (
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-8 text-center">
+        <Stethoscope size={36} className="text-slate-600 mx-auto mb-3" />
+        <p className="text-sm text-slate-400">No Google Ads daily data to diagnose.</p>
+        <p className="text-[11px] text-slate-600 mt-1">Pull Google Ads with daily segmentation to enable root-cause analysis.</p>
+      </div>
+    );
+  }
+
+  const { droppingCampaigns, outages, meta, shop, totals } = diag;
+
+  const severityColor = s =>
+    s === 'critical' ? 'text-red-400 bg-red-900/30 border-red-800/40' :
+    s === 'high'     ? 'text-orange-400 bg-orange-900/30 border-orange-800/40' :
+    s === 'medium'   ? 'text-amber-400 bg-amber-900/30 border-amber-800/40' :
+                       'text-slate-400 bg-slate-800 border-slate-700';
+
+  const causeIcon = c =>
+    c === 'sku_outage'          ? <PackageX size={12} /> :
+    c === 'feed_disapproval'    ? <AlertTriangle size={12} /> :
+    c === 'change_event'        ? <GitBranch size={12} /> :
+    c === 'impression_collapse' ? <TrendingDown size={12} /> :
+    c === 'conversion_collapse' ? <TrendingDown size={12} /> :
+                                  <Stethoscope size={12} />;
+
+  return (
+    <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-5">
+      {/* Cross-channel corroboration banner */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <KPI label="Dropping Campaigns"
+          value={num(totals.droppingCount)}
+          sub={totals.totalRevDelta < 0 ? `${cur(totals.totalRevDelta)} WoW net rev delta` : 'WoW revenue net positive'}
+          color={totals.droppingCount > 0 ? '#ef4444' : '#22c55e'} />
+        <KPI label="Shopify WoW (all orders)"
+          value={shop?.totals?.deltaRevPct != null ? `${shop.totals.deltaRevPct > 0 ? '+' : ''}${(shop.totals.deltaRevPct * 100).toFixed(1)}%` : '—'}
+          sub={`${cur(shop?.totals?.recentRev || 0)} vs ${cur(shop?.totals?.priorRev || 0)}`}
+          color={(shop?.totals?.deltaRevPct ?? 0) >= 0 ? '#22c55e' : '#ef4444'} />
+        <KPI label="Meta WoW Revenue"
+          value={meta?.deltaRevPct != null ? `${meta.deltaRevPct > 0 ? '+' : ''}${(meta.deltaRevPct * 100).toFixed(1)}%` : '—'}
+          sub={meta ? `ROAS ${dec(meta.recentRoas, 2)} vs ${dec(meta.priorRoas, 2)}` : 'no Meta data'}
+          color={(meta?.deltaRevPct ?? 0) >= 0 ? '#22c55e' : '#ef4444'} />
+      </div>
+
+      {/* Demand context narrative */}
+      <div className="px-4 py-3 bg-gray-900 border border-gray-800 rounded-xl text-xs text-slate-300 leading-relaxed">
+        {(() => {
+          const shopPct = shop?.totals?.deltaRevPct;
+          const metaPct = meta?.deltaRevPct;
+          const gAdsNeg = totals.totalRevDelta < 0;
+          if (!gAdsNeg) return <>Google Ads revenue is <span className="text-emerald-400 font-semibold">up or flat</span> week-over-week — nothing systemic to diagnose. Review individual dropping campaigns below if any.</>;
+          if (shopPct != null && shopPct < -0.05 && metaPct != null && metaPct < -0.05) {
+            return <>All three channels are down. Demand-side softening — check <span className="text-amber-400">category trend, seasonality, or a broad stockout across top sellers</span>. Feed/auction issues are secondary.</>;
+          }
+          if ((shopPct == null || shopPct >= -0.05) && (metaPct == null || metaPct >= -0.05)) {
+            return <>Google Ads is down but <span className="text-emerald-400">Shopify + Meta are holding</span> — the drop is channel-isolated. Look for feed disapprovals, change events, auction pressure, or OOS SKUs that Google is feeling but organic isn't yet.</>;
+          }
+          return <>Partial correlation — Google Ads is down and {shopPct != null && shopPct < 0 ? 'Shopify is soft' : 'Meta is soft'}. Check SKU-level overlap between the dropping campaigns and any stockouts.</>;
+        })()}
+      </div>
+
+      {/* Top outages, summarized */}
+      {outages.length > 0 && (
+        <Card title={<span className="flex items-center gap-2"><PackageX size={14} className="text-orange-400" /> Detected SKU Outages ({outages.length})</span>}>
+          <p className="text-[11px] text-slate-500 mb-3">These are the out-of-stock or below-reorder SKUs that would hurt campaigns they appear in.</p>
+          <div className="overflow-auto" style={{ maxHeight: '280px' }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                <tr>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">SKU</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Title</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Stock</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Feed Avail</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Last Order</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Days Out</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Severity</th>
+                </tr>
+              </thead>
+              <tbody>
+                {outages.slice(0, 40).map((o, i) => (
+                  <tr key={o.sku} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                    <td className="px-3 py-2 font-mono text-[11px] text-slate-300">{o.sku}</td>
+                    <td className="px-3 py-2 text-slate-400 truncate max-w-[260px]">{o.title}</td>
+                    <td className="px-3 py-2 text-right font-mono text-white">{o.stock ?? '—'}</td>
+                    <td className="px-3 py-2"><span className="text-[10px] text-slate-500">{o.feedAvail || '—'}</span></td>
+                    <td className="px-3 py-2 text-[11px] text-slate-500">{o.lastOrderDate || '—'}</td>
+                    <td className="px-3 py-2 text-right font-mono text-orange-300">{o.daysOut ?? '—'}</td>
+                    <td className="px-3 py-2"><span className={`text-[10px] px-1.5 py-0.5 rounded border ${severityColor(o.severity)}`}>{o.severity}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* Dropping campaigns with ranked causes */}
+      {droppingCampaigns.length === 0 ? (
+        <Card title="Dropping Campaigns">
+          <div className="text-center text-slate-500 py-8 text-xs italic">No campaigns materially down week-over-week. Nothing to diagnose.</div>
+        </Card>
+      ) : (
+        <Card title={`Dropping Campaigns — Ranked Causes (${droppingCampaigns.length})`}>
+          <p className="text-[11px] text-slate-500 mb-4">Campaigns where revenue fell &gt;10% or ROAS fell &gt;0.5 WoW. Each has an ordered list of likely root causes based on SKU outages, feed disapprovals, change events, and funnel collapse patterns.</p>
+          <div className="space-y-3">
+            {droppingCampaigns.map(c => {
+              const isOpen = expanded === c.campaignId;
+              const chain = isOpen ? skuImpactChain({
+                sku: c.causes.find(x => x.cause === 'sku_outage')?.evidence?.[0]?.sku,
+                shoppingByCampaign: data?.shoppingByCampaign || [],
+                adGroups: data?.adGroups || [],
+                ads: data?.ads || [],
+                keywords: data?.keywords || [],
+                searchTerms: data?.searchTerms || [],
+              }) : null;
+              return (
+                <div key={c.campaignId} className="border border-gray-800 rounded-lg bg-gray-950/40 overflow-hidden">
+                  {/* Campaign header */}
+                  <div className="px-4 py-3 flex flex-wrap items-center gap-3 bg-gray-900/60 border-b border-gray-800">
+                    <div className="flex-1 min-w-[200px]">
+                      <div className="text-sm font-semibold text-white truncate">{c.campaignName || c.campaignId}</div>
+                      <div className="text-[11px] text-slate-500 mt-0.5 flex flex-wrap gap-3">
+                        <span>Rev: <span className="text-red-400">{cur(c.recentRev)}</span> <span className="text-slate-600">vs {cur(c.priorRev)}</span></span>
+                        <span>ΔRev: <span className="text-red-400">{c.deltaRevPct != null ? `${(c.deltaRevPct * 100).toFixed(0)}%` : '—'}</span></span>
+                        <span>ROAS: <span className="text-slate-300">{dec(c.recentRoas, 2)}</span> <span className="text-slate-600">vs {dec(c.priorRoas, 2)}</span></span>
+                        <span>Impr Δ: <span className="text-slate-300">{c.deltaImprPct != null ? `${(c.deltaImprPct * 100).toFixed(0)}%` : '—'}</span></span>
+                      </div>
+                    </div>
+                    <button onClick={() => setExpanded(isOpen ? null : c.campaignId)}
+                      className="text-[10px] px-2.5 py-1 rounded bg-gray-800 text-slate-300 hover:bg-gray-700">
+                      {isOpen ? 'Collapse' : 'Drill chain'}
+                    </button>
+                    <button onClick={() => onDrillCampaign({ id: c.campaignId, name: c.campaignName })}
+                      className="text-[10px] px-2.5 py-1 rounded bg-amber-900/30 text-amber-300 border border-amber-800/40 hover:bg-amber-900/50">
+                      Filter to campaign
+                    </button>
+                  </div>
+
+                  {/* Ranked causes */}
+                  <div className="px-4 py-3 space-y-2">
+                    {c.causes.length === 0 ? (
+                      <div className="text-[11px] text-slate-500 italic">No strong signal for a specific cause. Could be auction-side softening, seasonality, or low-volume noise.</div>
+                    ) : c.causes.map((cs, i) => (
+                      <div key={i} className={`rounded-lg border px-3 py-2 ${severityColor(cs.severity)}`}>
+                        <div className="flex items-center gap-2 mb-1">
+                          {causeIcon(cs.cause)}
+                          <span className="text-[10px] font-bold uppercase tracking-wider">{cs.cause.replace(/_/g, ' ')}</span>
+                          <span className="ml-auto text-[10px] uppercase tracking-wider opacity-80">{cs.severity}</span>
+                        </div>
+                        <div className="text-xs leading-relaxed">{cs.narrative}</div>
+                        {cs.evidence?.length > 0 && (
+                          <div className="mt-2 pl-5 space-y-1 text-[11px] text-slate-400">
+                            {cs.evidence.slice(0, 5).map((ev, j) => (
+                              <div key={j} className="font-mono">
+                                {ev.sku ? `${ev.sku} — ${ev.title || ''} · ${ev.costShare != null ? `${(ev.costShare * 100).toFixed(0)}% of campaign spend` : ''}${ev.daysOut != null ? ` · ${ev.daysOut}d out` : ''}${ev.issue ? ` · ${ev.issue}` : ''}` :
+                                 ev.operation ? `${ev.ts || ''} · ${ev.user || 'unknown'} · ${ev.operation} on ${ev.resourceType}` :
+                                 JSON.stringify(ev)}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Drill chain: SKU → ad group → ad → keyword → search term */}
+                  {isOpen && chain && chain.campaigns?.length > 0 && (
+                    <div className="px-4 py-3 border-t border-gray-800 bg-gray-950/60">
+                      <div className="text-[11px] font-semibold text-amber-300 uppercase tracking-wider mb-2">Impact chain for SKU: <span className="font-mono text-white">{chain.sku}</span></div>
+                      {chain.campaigns.filter(cc => cc.campaignId === c.campaignId).map(cc => (
+                        <div key={cc.campaignId} className="space-y-3 text-[11px]">
+                          <div className="text-slate-400">
+                            This SKU accounted for <span className="text-amber-300 font-semibold">{(cc.costShareInCampaign * 100).toFixed(0)}%</span> of this campaign's shopping spend ({cur(cc.skuCost)} / {cur(cc.campaignTotalCost)}).
+                          </div>
+                          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                            <div>
+                              <div className="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Top Ad Groups in campaign</div>
+                              {cc.topAdGroups.length === 0 ? <div className="text-slate-600 italic">—</div> :
+                                cc.topAdGroups.map(ag => (
+                                  <div key={ag.id} className="font-mono text-slate-300 truncate">{ag.name} — {cur(ag.cost)} · ROAS {dec(ag.roas, 2)}</div>
+                                ))}
+                            </div>
+                            <div>
+                              <div className="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Top Ads</div>
+                              {cc.topAds.length === 0 ? <div className="text-slate-600 italic">—</div> :
+                                cc.topAds.map(ad => (
+                                  <div key={ad.id} className="font-mono text-slate-300 truncate">{ad.name} — {cur(ad.cost)} · {num(ad.clicks)} clicks</div>
+                                ))}
+                            </div>
+                            <div>
+                              <div className="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Top Keywords</div>
+                              {cc.topKeywords.length === 0 ? <div className="text-slate-600 italic">—</div> :
+                                cc.topKeywords.map((kw, ki) => (
+                                  <div key={ki} className="font-mono text-slate-300">{kw.keyword} <span className="text-slate-600">[{kw.matchType}]</span> — {cur(kw.cost)}</div>
+                                ))}
+                            </div>
+                            <div>
+                              <div className="text-slate-500 uppercase tracking-wider text-[10px] mb-1">Top Search Terms</div>
+                              {cc.topSearchTerms.length === 0 ? <div className="text-slate-600 italic">—</div> :
+                                cc.topSearchTerms.map((st, si) => (
+                                  <div key={si} className="font-mono text-slate-300 truncate">"{st.searchTerm}" — {cur(st.cost)} · {dec(st.conversions, 1)} conv</div>
+                                ))}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {isOpen && (!chain || !chain.campaigns?.length) && (
+                    <div className="px-4 py-3 border-t border-gray-800 bg-gray-950/60 text-[11px] text-slate-500 italic">
+                      No SKU outage directly implicates this campaign — inspect the change events or landing-page funnel.
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
+    </motion.div>
+  );
+}
 
 /* ─── FEED HEALTH TAB ─────────────────────────────────────────────
    Answers three questions an operator can't get from Google Ads alone:
@@ -413,6 +649,9 @@ export default function GoogleAds() {
   /* Merchant blend — joins shopping × merchant feed × shopify orders */
   const merchantData = brandData?.[selectedBrandId]?.merchantData;
   const orders       = brandData?.[selectedBrandId]?.orders || [];
+  const inventoryMap = brandData?.[selectedBrandId]?.inventoryMap || {};
+  const insights7d   = brandData?.[selectedBrandId]?.insights7d;
+  const insights30d  = brandData?.[selectedBrandId]?.insights30d;
   const blend = useMemo(() => {
     if (!data) return null;
     const shoppingRows = data.shoppingByCampaign?.length ? data.shoppingByCampaign : data.shopping || [];
@@ -424,6 +663,19 @@ export default function GoogleAds() {
       shopifyBySku,
     });
   }, [data, merchantData, orders]);
+
+  /* Drop diagnostics — SKU outages → campaign drops → ad/keyword/search-term chain */
+  const diag = useMemo(() => {
+    if (!data) return null;
+    return diagnose({
+      googleAdsData: data,
+      merchantBySku: merchantData?.bySku || null,
+      orders,
+      inventoryMap,
+      metaInsights: (insights7d || insights30d) ? { insights7d: insights7d || [], insights30d: insights30d || [] } : null,
+      windowDays: 7,
+    });
+  }, [data, merchantData, orders, inventoryMap, insights7d, insights30d]);
 
   // { [sku]: stock } derived from brand's persisted inventoryMap — used by
   // the intelligence tab's OOS kill-switch.
@@ -654,6 +906,15 @@ export default function GoogleAds() {
           monthlyTarget={active?.googleAdsMonthlyTarget}
           skuMargin={active?.skuMargin}
           defaultMarginPct={active?.defaultMarginPct || 0.25}
+        />
+      )}
+
+      {/* ── ROOT CAUSE ────────────────────────────────────────────── */}
+      {tab === 'rootcause' && (
+        <RootCauseTab
+          diag={diag}
+          data={data}
+          onDrillCampaign={c => { setDrillCampaign(c); setTab('searchterms'); }}
         />
       )}
 
