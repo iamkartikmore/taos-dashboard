@@ -1593,6 +1593,59 @@ function suppressionAppend(records) {
   return { added, total: existing.size };
 }
 
+/* ─── MANUAL LABELS / NOTES REGISTRY ────────────────────────────────
+   Per-ad Notes + Collection + Override fields edited in Boards /
+   Setup / Procurement / Star Products. Previously localStorage-only,
+   so every browser had its own stale copy. Now server-persisted so
+   a change by one operator shows up for everyone on reload / focus.
+
+   Shape on disk: { [adId]: { Notes: '...', Collection: '...', ... } }
+   Keys are whatever field names the client writes. Server is dumb —
+   it just stores the map and returns it. The client merges on boot. */
+const MANUAL_FILE = path.join(DATA_DIR, 'manual.json');
+
+function manualRead() {
+  ensureDataDir();
+  try {
+    if (!fs.existsSync(MANUAL_FILE)) return { map: {}, updatedAt: 0 };
+    const raw = fs.readFileSync(MANUAL_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    // Tolerate both old flat shape and the new wrapped shape
+    if (data?.map) return { map: data.map, updatedAt: data.updatedAt || 0 };
+    return { map: data || {}, updatedAt: 0 };
+  } catch { return { map: {}, updatedAt: 0 }; }
+}
+
+function manualWriteAtomic(newMap) {
+  ensureDataDir();
+  const body = JSON.stringify({ map: newMap, updatedAt: Date.now() });
+  const tmp  = MANUAL_FILE + '.tmp';
+  fs.writeFileSync(tmp, body);
+  fs.renameSync(tmp, MANUAL_FILE); // atomic replace prevents readers seeing a half-written file
+}
+
+// GET /api/manual — returns the full map so the client can merge on boot + on focus
+app.get('/api/manual', (_req, res) => {
+  const { map, updatedAt } = manualRead();
+  res.json({ map, updatedAt });
+});
+
+// POST /api/manual — body: { updates: { [adId]: { fields } }, removals?: [adId] }
+// Shallow-merges per-ad, deletes listed adIds.
+app.post('/api/manual', (req, res) => {
+  const { updates = {}, removals = [] } = req.body || {};
+  const { map } = manualRead();
+  for (const [adId, fields] of Object.entries(updates)) {
+    if (!adId) continue;
+    map[adId] = { ...(map[adId] || {}), ...(fields || {}) };
+  }
+  for (const adId of removals) {
+    if (adId && map[adId]) delete map[adId];
+  }
+  manualWriteAtomic(map);
+  res.json({ ok: true, total: Object.keys(map).length, updatedAt: Date.now() });
+});
+
 app.get('/api/retention/suppression', (req, res) => {
   const brand_id = req.query.brand_id || null;
   const rows = suppressionRead();

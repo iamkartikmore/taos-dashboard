@@ -82,6 +82,59 @@ function loadBrands() {
   return brands;
 }
 
+/* ─── MANUAL-MAP SERVER PUSH (debounced, queue-based) ─────────────
+   Every local edit enqueues the changed fields. A 700ms trailing
+   debounce flushes the queue to POST /api/manual. If multiple tabs
+   edit in parallel, last-write-wins per field (same semantics as
+   the local store). Failed pushes are retried once after 3s. */
+let _pushQueue = {};
+let _pushTimer = null;
+let _pushRetryAt = 0;
+
+function _queuePush(adId, fields) {
+  if (!adId || !fields || !Object.keys(fields).length) return;
+  _pushQueue[adId] = { ...(_pushQueue[adId] || {}), ...fields };
+  if (_pushTimer) clearTimeout(_pushTimer);
+  _pushTimer = setTimeout(_flushPush, 700);
+}
+
+function _schedulePushAll(fullMap) {
+  if (fullMap) { _pushQueue = { ..._pushQueue, ...fullMap }; }
+  else {
+    // Best-effort: grab the whole current map (import via dynamic ref at flush)
+    _pushQueue.__FULL__ = true;
+  }
+  if (_pushTimer) clearTimeout(_pushTimer);
+  _pushTimer = setTimeout(_flushPush, 700);
+}
+
+async function _flushPush() {
+  _pushTimer = null;
+  if (!Object.keys(_pushQueue).length) return;
+  const payload = _pushQueue;
+  _pushQueue = {};
+  try {
+    const mod = await import('../lib/api');
+    let toSend = payload;
+    if (payload.__FULL__) {
+      // Shouldn't happen often; drop sentinel and no-op (the per-edit
+      // path already covers the common case).
+      delete payload.__FULL__;
+      toSend = payload;
+      if (!Object.keys(toSend).length) return;
+    }
+    await mod.pushManualUpdates(toSend);
+    _pushRetryAt = 0;
+  } catch (e) {
+    console.warn('[manual] push failed, will retry', e.message);
+    _pushQueue = { ..._pushQueue, ...payload };
+    if (!_pushRetryAt || Date.now() > _pushRetryAt) {
+      _pushRetryAt = Date.now() + 3000;
+      setTimeout(_flushPush, 3000);
+    }
+  }
+}
+
 /* ─── STORE ─────────────────────────────────────────────────────── */
 export const useStore = create((set, get) => {
   const initialBrands  = loadBrands();
@@ -605,14 +658,18 @@ export const useStore = create((set, get) => {
     },
     setBreakdownStatus: s => set({ breakdownStatus: s }),
 
-    /* ── Manual labels ───────────────────────────────────────────── */
+    /* ── Manual labels — server-synced so Notes + Collection + Override
+         edits propagate to every operator on reload/focus. ───────── */
     manualMap: lsGet(LS_MANUAL, {}),
     manualLog: lsGet(LS_MANUAL_LOG, []),
-    setManualMap: m => { lsSet(LS_MANUAL, m); set({ manualMap: m }); },
+    manualSyncedAt: 0,
+
+    setManualMap: m => { lsSet(LS_MANUAL, m); set({ manualMap: m }); _schedulePushAll(); },
     setManualRow: (adId, fields) => {
       const manualMap = { ...get().manualMap, [adId]: { ...(get().manualMap[adId] || {}), ...fields } };
       lsSet(LS_MANUAL, manualMap);
       set({ manualMap });
+      _queuePush(adId, fields);
     },
     // Same as setManualRow but records a per-field diff entry to manualLog and
     // triggers enrichedRows rebuild so the change propagates across views.
@@ -634,8 +691,36 @@ export const useStore = create((set, get) => {
       lsSet(LS_MANUAL_LOG, manualLog);
       set({ manualMap, manualLog });
       _rebuild();
+      _queuePush(adId, actual);
     },
     clearManualLog: () => { lsSet(LS_MANUAL_LOG, []); set({ manualLog: [] }); },
+
+    // Pull the server's manual map and merge. Server wins on conflicts
+    // (so edits from another operator propagate here). Local-only adIds
+    // that haven't been pushed yet are preserved.
+    syncManualFromServer: async () => {
+      try {
+        const mod = await import('../lib/api');
+        const { map: serverMap, updatedAt } = await mod.fetchManualMap();
+        const local = get().manualMap || {};
+        const merged = { ...local };
+        // Server wins for every adId it has a record for
+        for (const [adId, fields] of Object.entries(serverMap || {})) {
+          merged[adId] = { ...(local[adId] || {}), ...fields };
+        }
+        lsSet(LS_MANUAL, merged);
+        set({ manualMap: merged, manualSyncedAt: updatedAt || Date.now() });
+        _rebuild();
+        // If we have local-only adIds the server didn't know about, push them
+        const localOnly = {};
+        for (const [adId, fields] of Object.entries(local)) {
+          if (!serverMap?.[adId]) localOnly[adId] = fields;
+        }
+        if (Object.keys(localOnly).length) _schedulePushAll(localOnly);
+      } catch (e) {
+        console.warn('[manual] server sync failed', e.message);
+      }
+    },
 
     /* ── Dynamic lists ───────────────────────────────────────────── */
     dynamicLists: lsGet(LS_LISTS, DEFAULT_LISTS),

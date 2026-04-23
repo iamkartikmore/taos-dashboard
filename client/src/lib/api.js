@@ -381,6 +381,24 @@ export async function fetchPmaxSearchTerms(creds, campaignIds, datePreset = 'las
   return json.rows || [];
 }
 
+/* ─── MANUAL LABELS / NOTES SYNC ───────────────────────────────────── */
+
+export async function fetchManualMap() {
+  const res = await fetch('/api/manual');
+  if (!res.ok) throw new Error('manual fetch failed');
+  return res.json(); // { map, updatedAt }
+}
+
+export async function pushManualUpdates(updates = {}, removals = []) {
+  const res = await fetch('/api/manual', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ updates, removals }),
+  });
+  if (!res.ok) throw new Error('manual push failed');
+  return res.json();
+}
+
 /* ─── MICROSOFT CLARITY ────────────────────────────────────────────── */
 
 export async function verifyClarity(apiToken) {

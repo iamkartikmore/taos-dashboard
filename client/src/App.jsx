@@ -53,7 +53,7 @@ function PageFallback() {
 }
 
 function BootHydrateAndAutoPull() {
-  const { hydrateOrders, hydrateCustomers, brands, setBrandOrders, setBrandOrdersStatus } = useStore();
+  const { hydrateOrders, hydrateCustomers, brands, setBrandOrders, setBrandOrdersStatus, syncManualFromServer } = useStore();
 
   // 1) Hydrate persisted orders + customers from IndexedDB on first mount
   useEffect(() => {
@@ -73,6 +73,22 @@ function BootHydrateAndAutoPull() {
     const interval = setInterval(check, 60 * 60 * 1000); // hourly
     return () => { clearTimeout(boot); clearInterval(interval); };
   }, [setBrandOrders, setBrandOrdersStatus]);
+
+  // 3) Manual-map sync — pull server's Notes/Labels on mount and on tab
+  //    focus so another operator's edits propagate here. Pushes are
+  //    debounced from each edit in the store.
+  useEffect(() => {
+    syncManualFromServer();
+    const onFocus = () => { if (document.visibilityState === 'visible') syncManualFromServer(); };
+    document.addEventListener('visibilitychange', onFocus);
+    window.addEventListener('focus', onFocus);
+    const interval = setInterval(syncManualFromServer, 60_000); // poll every minute while open
+    return () => {
+      document.removeEventListener('visibilitychange', onFocus);
+      window.removeEventListener('focus', onFocus);
+      clearInterval(interval);
+    };
+  }, [syncManualFromServer]);
 
   return null;
 }
