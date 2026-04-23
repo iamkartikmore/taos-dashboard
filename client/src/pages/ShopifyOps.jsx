@@ -10,7 +10,7 @@ import {
   AlertTriangle, CheckCircle, Clock, Edit2, Check, X,
   Plus, Trash2, Hash, MapPin, ArrowUpRight, Filter,
   Clipboard, Tag, DollarSign, TrendingUp, TrendingDown,
-  Zap, Activity,
+  Zap, Activity, Globe2, Warehouse as WarehouseIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -943,6 +943,275 @@ function ReturnsTab({ orders, overrides, setOverrides }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   LOGISTICS TAB — pincode + warehouse breakdown of refunds / reshipped
+   ────────────────────────────────────────────────────────────────────
+   Tags we recognise on Shopify orders:
+     status:reshipped   → order was reshipped (you pass this tag)
+     warehouse:<name>   → fulfilled from that warehouse
+     wh:<name>          → alternate prefix (tolerated)
+   Any tag format the operator wants can be added to extractOrderMeta.
+═══════════════════════════════════════════════════════════════════ */
+
+function extractOrderMeta(order) {
+  const raw = String(order?.tags || '');
+  const tags = raw.split(',').map(t => t.trim()).filter(Boolean);
+  const lower = tags.map(t => t.toLowerCase());
+  const reshipped = lower.some(t => t === 'status:reshipped' || t === 'reshipped' || t.endsWith(':reshipped'));
+  let warehouse = null;
+  for (const t of lower) {
+    if (t.startsWith('warehouse:')) { warehouse = t.slice('warehouse:'.length); break; }
+    if (t.startsWith('wh:'))        { warehouse = t.slice('wh:'.length);        break; }
+    if (t.startsWith('fulfilled:')) { warehouse = t.slice('fulfilled:'.length); break; }
+  }
+  const hasRefund = (order?.refunds?.length || 0) > 0;
+  const refundAmount = (order?.refunds || []).reduce((s, r) =>
+    s + (r.transactions || []).reduce((ts, t) => ts + p(t.amount), 0), 0);
+  const zip = String(order?.shipping_address?.zip || order?.billing_address?.zip || '').trim();
+  const city = order?.shipping_address?.city || order?.billing_address?.city || '';
+  const state = order?.shipping_address?.province || order?.billing_address?.province || '';
+  return { tags, reshipped, warehouse, hasRefund, refundAmount, zip, city, state };
+}
+
+function aggregateBy(orders, keyFn, { minOrders = 5 } = {}) {
+  const map = new Map();
+  for (const o of orders) {
+    if (o.cancelled_at) continue;
+    const meta = extractOrderMeta(o);
+    const key = keyFn(o, meta);
+    if (!key) continue;
+    const cur = map.get(key) || { key, orders: 0, refunds: 0, reshipped: 0, refundAmt: 0, cities: new Set(), states: new Set(), warehouses: new Set() };
+    cur.orders++;
+    if (meta.hasRefund)  { cur.refunds++;   cur.refundAmt += meta.refundAmount; }
+    if (meta.reshipped)    cur.reshipped++;
+    if (meta.city)  cur.cities.add(meta.city);
+    if (meta.state) cur.states.add(meta.state);
+    if (meta.warehouse) cur.warehouses.add(meta.warehouse);
+    map.set(key, cur);
+  }
+  return [...map.values()].map(v => ({
+    ...v,
+    cities: [...v.cities].slice(0, 3),
+    states: [...v.states].slice(0, 3),
+    warehouses: [...v.warehouses],
+    refundRate:    v.orders > 0 ? v.refunds / v.orders : 0,
+    reshippedRate: v.orders > 0 ? v.reshipped / v.orders : 0,
+  })).filter(v => v.orders >= minOrders);
+}
+
+function LogisticsTab({ rawOrders }) {
+  const [minOrders, setMinOrders] = useState(5);
+  const [sortBy, setSortBy]       = useState('refundRate');
+
+  const orders = useMemo(() => rawOrders.filter(o => !o.cancelled_at), [rawOrders]);
+
+  const metaStats = useMemo(() => {
+    let total = 0, refunded = 0, reshipped = 0, refundAmt = 0;
+    let warehouseCount = 0, warehouseOrders = 0;
+    for (const o of orders) {
+      total++;
+      const m = extractOrderMeta(o);
+      if (m.hasRefund)  { refunded++; refundAmt += m.refundAmount; }
+      if (m.reshipped)  reshipped++;
+      if (m.warehouse)  warehouseOrders++;
+    }
+    return { total, refunded, reshipped, refundAmt, warehouseOrders };
+  }, [orders]);
+
+  const byPincode = useMemo(() =>
+    aggregateBy(orders, (o, m) => m.zip || null, { minOrders })
+      .sort((a, b) => (b[sortBy] ?? 0) - (a[sortBy] ?? 0)),
+    [orders, minOrders, sortBy]);
+
+  const byWarehouse = useMemo(() =>
+    aggregateBy(orders, (o, m) => m.warehouse || null, { minOrders: 1 })
+      .sort((a, b) => b.orders - a.orders),
+    [orders]);
+
+  const byState = useMemo(() =>
+    aggregateBy(orders, (o, m) => m.state || null, { minOrders: 5 })
+      .sort((a, b) => (b[sortBy] ?? 0) - (a[sortBy] ?? 0)),
+    [orders, sortBy]);
+
+  const exportPincodeCsv = () => {
+    const rows = [['Pincode', 'Cities', 'State', 'Orders', 'Refunds', 'Refund Rate %', 'Reshipped', 'Reshipped Rate %', 'Refund Amount']];
+    for (const r of byPincode) {
+      rows.push([r.key, r.cities.join('|'), r.states.join('|'), r.orders, r.refunds, (r.refundRate * 100).toFixed(1), r.reshipped, (r.reshippedRate * 100).toFixed(1), r.refundAmt.toFixed(2)]);
+    }
+    const csv = '﻿' + rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const a = Object.assign(document.createElement('a'), {
+      href: URL.createObjectURL(new Blob([csv], { type: 'text/csv' })),
+      download: `logistics-pincode-${new Date().toISOString().slice(0, 10)}.csv`,
+    });
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  };
+
+  return (
+    <div className="space-y-5">
+      {/* KPIs */}
+      <div className="grid grid-cols-2 xl:grid-cols-5 gap-3">
+        <KPI label="Orders (not cancelled)" value={num(metaStats.total)} color="#06b6d4" icon={Package}/>
+        <KPI label="Refunded"               value={num(metaStats.refunded)} color="#ef4444" icon={RotateCcw}/>
+        <KPI label="Refund rate"            value={`${metaStats.total > 0 ? ((metaStats.refunded / metaStats.total) * 100).toFixed(2) : '0.00'}%`} color="#ef4444"/>
+        <KPI label="Reshipped"              value={num(metaStats.reshipped)} color="#f59e0b" icon={ArrowUpRight}/>
+        <KPI label="Reshipped rate"         value={`${metaStats.total > 0 ? ((metaStats.reshipped / metaStats.total) * 100).toFixed(2) : '0.00'}%`} color="#f59e0b"/>
+      </div>
+
+      {/* BY WAREHOUSE */}
+      <div className="rounded-xl border border-gray-800 bg-gray-900 overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-800/60 flex items-center gap-2">
+          <WarehouseIcon size={14} className="text-slate-400"/>
+          <h3 className="text-xs font-semibold text-white">By warehouse · {byWarehouse.length} detected from <code className="text-[10px] text-slate-500">warehouse:*</code> or <code className="text-[10px] text-slate-500">wh:*</code> tags</h3>
+        </div>
+        {byWarehouse.length === 0 ? (
+          <div className="p-6 text-xs text-slate-500 italic">
+            No warehouse tags found on any order. Expected format: <code className="text-slate-300">warehouse:mumbai</code>, <code className="text-slate-300">wh:delhi</code>, etc. on each Shopify order.
+          </div>
+        ) : (
+          <div className="overflow-auto" style={{ maxHeight: '340px' }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                <tr>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Warehouse</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Orders</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refunds</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refund %</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Reshipped</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Reshipped %</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refund ₹</th>
+                </tr>
+              </thead>
+              <tbody>
+                {byWarehouse.map((r, i) => (
+                  <tr key={r.key} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                    <td className="px-3 py-2 text-slate-200 font-medium">{r.key}</td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.orders)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.refunds)}</td>
+                    <td className="px-3 py-2 text-right font-mono" style={{ color: r.refundRate > 0.1 ? '#ef4444' : r.refundRate > 0.05 ? '#f59e0b' : '#64748b' }}>
+                      {(r.refundRate * 100).toFixed(2)}%
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.reshipped)}</td>
+                    <td className="px-3 py-2 text-right font-mono" style={{ color: r.reshippedRate > 0.05 ? '#f59e0b' : '#64748b' }}>
+                      {(r.reshippedRate * 100).toFixed(2)}%
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-red-400">{cur(r.refundAmt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* BY PINCODE */}
+      <div className="rounded-xl border border-gray-800 bg-gray-900 overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-800/60 flex items-center gap-2 flex-wrap">
+          <Globe2 size={14} className="text-slate-400"/>
+          <h3 className="text-xs font-semibold text-white">By pincode · {byPincode.length} shown (min {minOrders}+ orders)</h3>
+          <div className="ml-auto flex items-center gap-2">
+            <label className="text-[10px] text-slate-500">Min orders</label>
+            <select value={minOrders} onChange={e => setMinOrders(Number(e.target.value))} className="text-[11px] bg-gray-800 border border-gray-700 rounded px-2 py-1 text-slate-200">
+              {[1, 3, 5, 10, 20, 50].map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+            <label className="text-[10px] text-slate-500 ml-2">Sort by</label>
+            <select value={sortBy} onChange={e => setSortBy(e.target.value)} className="text-[11px] bg-gray-800 border border-gray-700 rounded px-2 py-1 text-slate-200">
+              <option value="refundRate">Refund rate</option>
+              <option value="reshippedRate">Reshipped rate</option>
+              <option value="orders">Order volume</option>
+              <option value="refunds">Refund count</option>
+              <option value="refundAmt">Refund ₹</option>
+            </select>
+            <button onClick={exportPincodeCsv} className="ml-2 flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-slate-300 border border-gray-700">
+              <Download size={11}/> CSV
+            </button>
+          </div>
+        </div>
+        <div className="overflow-auto" style={{ maxHeight: '560px' }}>
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+              <tr>
+                <th className="px-3 py-2 text-left text-slate-400 font-semibold">Pincode</th>
+                <th className="px-3 py-2 text-left text-slate-400 font-semibold">Cities</th>
+                <th className="px-3 py-2 text-left text-slate-400 font-semibold">State</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold">Orders</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refunds</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refund %</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold">Reshipped</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold">Reshipped %</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refund ₹</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byPincode.length === 0 && (
+                <tr><td colSpan={9} className="py-10 text-center text-slate-600 text-xs italic">No pincodes meet the filter. Try lowering Min orders.</td></tr>
+              )}
+              {byPincode.slice(0, 500).map((r, i) => (
+                <tr key={r.key} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                  <td className="px-3 py-2 font-mono text-slate-200">{r.key}</td>
+                  <td className="px-3 py-2 text-[11px] text-slate-500 truncate max-w-[160px]">{r.cities.join(', ')}</td>
+                  <td className="px-3 py-2 text-[11px] text-slate-500 truncate max-w-[140px]">{r.states.join(', ')}</td>
+                  <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.orders)}</td>
+                  <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.refunds)}</td>
+                  <td className="px-3 py-2 text-right font-mono font-semibold" style={{ color: r.refundRate > 0.15 ? '#ef4444' : r.refundRate > 0.08 ? '#f59e0b' : '#64748b' }}>
+                    {(r.refundRate * 100).toFixed(1)}%
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.reshipped)}</td>
+                  <td className="px-3 py-2 text-right font-mono font-semibold" style={{ color: r.reshippedRate > 0.10 ? '#f59e0b' : '#64748b' }}>
+                    {(r.reshippedRate * 100).toFixed(1)}%
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono text-red-400">{cur(r.refundAmt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* BY STATE — broader zoom */}
+      {byState.length > 0 && (
+        <div className="rounded-xl border border-gray-800 bg-gray-900 overflow-hidden">
+          <div className="px-4 py-3 border-b border-gray-800/60 flex items-center gap-2">
+            <MapPin size={14} className="text-slate-400"/>
+            <h3 className="text-xs font-semibold text-white">By state · {byState.length} states</h3>
+          </div>
+          <div className="overflow-auto" style={{ maxHeight: '340px' }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                <tr>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">State</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Orders</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refunds</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refund %</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Reshipped</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Reshipped %</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refund ₹</th>
+                </tr>
+              </thead>
+              <tbody>
+                {byState.map((r, i) => (
+                  <tr key={r.key} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                    <td className="px-3 py-2 text-slate-200 font-medium">{r.key}</td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.orders)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.refunds)}</td>
+                    <td className="px-3 py-2 text-right font-mono" style={{ color: r.refundRate > 0.1 ? '#ef4444' : r.refundRate > 0.05 ? '#f59e0b' : '#64748b' }}>
+                      {(r.refundRate * 100).toFixed(2)}%
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.reshipped)}</td>
+                    <td className="px-3 py-2 text-right font-mono" style={{ color: r.reshippedRate > 0.05 ? '#f59e0b' : '#64748b' }}>
+                      {(r.reshippedRate * 100).toFixed(2)}%
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-red-400">{cur(r.refundAmt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
    MAIN PAGE
 ═══════════════════════════════════════════════════════════════════ */
 const DEPT_TABS = [
@@ -950,6 +1219,7 @@ const DEPT_TABS = [
   { id: 'warehouse', label: 'Warehouse',      icon: Package  },
   { id: 'support',   label: 'Customer Care',  icon: Users    },
   { id: 'returns',   label: 'Returns',        icon: RotateCcw },
+  { id: 'logistics', label: 'Logistics',      icon: Globe2    },
 ];
 
 export default function ShopifyOps() {
@@ -994,6 +1264,7 @@ export default function ShopifyOps() {
       warehouse: 0,
       support:   tickets.filter(t => t.status === 'Open' || t.status === 'Escalated').length,
       returns:   active.filter(o => o.refunds?.length > 0 || String(o.tags || '').toLowerCase().includes('return')).length,
+      logistics: active.filter(o => String(o.tags || '').toLowerCase().includes('status:reshipped') || String(o.tags || '').toLowerCase() === 'reshipped').length,
     };
   }, [rawOrders, tickets]);
 
@@ -1106,6 +1377,7 @@ export default function ShopifyOps() {
           {activeTab === 'warehouse' && <WarehouseTab brandData={brandData} activeBrandId={viewBrandId} overrides={overrides} setOverrides={setOverrides}/>}
           {activeTab === 'support'   && <SupportTab   orders={rawOrders} tickets={tickets} setTickets={setTickets}/>}
           {activeTab === 'returns'   && <ReturnsTab   orders={rawOrders} overrides={overrides} setOverrides={setOverrides}/>}
+          {activeTab === 'logistics' && <LogisticsTab rawOrders={rawOrders}/>}
         </motion.div>
       </AnimatePresence>
     </div>
