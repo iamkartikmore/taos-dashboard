@@ -12,6 +12,7 @@ import clsx from 'clsx';
 import { useStore } from '../store';
 import { fmt } from '../lib/analytics';
 import { buildStarProducts, PRESETS, ACTION_STYLES, POSTURE_STYLES, SEVERITY_STYLES } from '../lib/starProducts';
+import { enrichStarProducts } from '../lib/starProductsEnrich';
 import { pullBrandOrders90d } from '../lib/autoPull';
 import MetricCard from '../components/ui/MetricCard';
 
@@ -647,7 +648,28 @@ export default function StarProducts() {
     [orders, inventoryMap, plan, procurement, merchantBySku, preset, windowDays],
   );
 
-  const { skus, summary, concentration, bundles, medians } = analysis;
+  /* Advanced-stats enrichment — EWMA, Mann-Kendall trend, Holt-Winters
+     forecast, stockout probability, changepoint, seasonality, anomalies,
+     price elasticity, k-means archetypes, FP-growth bundles, BG/NBD CLV.
+     Computed lazily so the base quadrant UI always renders fast. */
+  const [advanced, setAdvanced] = useState(null);
+  useEffect(() => {
+    if (!orders.length || !analysis?.skus?.length) { setAdvanced(null); return; }
+    // Defer heavy compute off the render path
+    const t = setTimeout(() => {
+      try {
+        setAdvanced(enrichStarProducts({ skus: analysis.skus, orders }));
+      } catch (err) { console.warn('[enrichStarProducts] failed', err); setAdvanced(null); }
+    }, 50);
+    return () => clearTimeout(t);
+  }, [orders, analysis]);
+
+  const skus = advanced?.skus || analysis.skus;
+  const { summary, concentration, bundles, medians } = analysis;
+  const advancedBundles    = advanced?.bundles    || null;
+  const advancedArchetypes = advanced?.archetypes || null;
+  const advancedClv        = advanced?.clv        || null;
+  const advancedDiagnostics = advanced?.diagnostics || null;
 
   const hasShopifyConfig = selectedBrandObj?.shopify?.shop && selectedBrandObj?.shopify?.clientId;
 
@@ -734,6 +756,71 @@ export default function StarProducts() {
               Thin-data SKUs (&lt; {Math.min(60, Math.max(3, Math.round(windowDays * 0.4)))} days of history or &lt; 5 orders) are flagged INVESTIGATE — excluded from quadrant placement but shown in the table.
             </div>
           </div>
+
+          {/* Advanced-stats diagnostic strip */}
+          {advancedDiagnostics && (
+            <div className="bg-gradient-to-br from-cyan-900/10 to-blue-900/10 rounded-xl border border-cyan-800/30 p-3 text-[11px] text-slate-400 grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-3">
+              <div><span className="text-slate-500">Orders span:</span> <span className="text-cyan-300 font-semibold">{advancedDiagnostics.spanDays}d</span></div>
+              <div><span className="text-slate-500">Oldest:</span> <span className="text-slate-300">{advancedDiagnostics.oldestOrder || '—'}</span></div>
+              <div><span className="text-slate-500">Newest:</span> <span className="text-slate-300">{advancedDiagnostics.newestOrder || '—'}</span></div>
+              <div><span className="text-slate-500">Last 14d:</span> <span className="text-slate-300">{advancedDiagnostics.last14dOrders} orders</span></div>
+              <div><span className="text-slate-500">SKUs w/ trend sig.:</span> <span className="text-emerald-300 font-semibold">{advancedDiagnostics.skusWithTrend}</span> / {advancedDiagnostics.skusWithData}</div>
+              <div><span className="text-slate-500">Archetypes:</span> <span className="text-purple-300 font-semibold">{advancedDiagnostics.archetypeCount}</span></div>
+            </div>
+          )}
+
+          {/* Archetype row — k-means clusters */}
+          {advancedArchetypes && advancedArchetypes.length > 0 && (
+            <div className="bg-gray-900/40 rounded-xl border border-gray-800/40 p-3">
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                <Layers size={11} /> SKU Archetypes · k-means on velocity × trend × rates × elasticity × seasonality
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {advancedArchetypes.map(a => (
+                  <span key={a.id} className="text-[11px] px-2 py-1 rounded-lg bg-purple-900/20 border border-purple-800/30 text-purple-200">
+                    {a.name} <span className="text-purple-400/60">({a.size})</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* CLV summary (BG/NBD + Gamma-Gamma) */}
+          {advancedClv && (
+            <div className="bg-gradient-to-br from-emerald-900/10 to-teal-900/10 rounded-xl border border-emerald-800/30 p-3">
+              <div className="text-[10px] text-emerald-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                <Award size={11} /> Customer projections · BG/NBD + Gamma-Gamma · {advancedClv.summary.customersModeled.toLocaleString()} customers
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[11px]">
+                <div><span className="text-slate-500">Active (P&gt;0.7):</span> <span className="text-emerald-300 font-semibold">{advancedClv.summary.activeCount}</span></div>
+                <div><span className="text-slate-500">At risk (P&lt;0.3):</span> <span className="text-red-300 font-semibold">{advancedClv.summary.atRiskCount}</span></div>
+                <div><span className="text-slate-500">Expected orders (60d):</span> <span className="text-slate-200 font-semibold">{Math.round(advancedClv.summary.expected60dTotal).toLocaleString()}</span></div>
+                <div><span className="text-slate-500">Projected CLV (60d):</span> <span className="text-emerald-300 font-semibold">₹{Math.round(advancedClv.summary.clv60dTotal).toLocaleString('en-IN')}</span></div>
+                {advancedClv.summary.medianNextOrderDays != null && (
+                  <div className="col-span-2 md:col-span-4"><span className="text-slate-500">Median days to next order (KM):</span> <span className="text-slate-200 font-semibold">{Math.round(advancedClv.summary.medianNextOrderDays)}d</span></div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* FP-growth triplets (advanced bundles) */}
+          {advancedBundles?.triplets?.length > 0 && (
+            <div className="bg-gray-900/40 rounded-xl border border-gray-800/40 p-3">
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                <GitMerge size={11} /> Triplet Bundle Candidates · FP-growth · ≥3 co-occurrences · lift ≥ 1.8
+              </div>
+              <div className="space-y-1">
+                {advancedBundles.triplets.slice(0, 5).map((t, i) => (
+                  <div key={i} className="text-[11px] text-slate-300 flex items-center gap-2">
+                    <span className="font-mono text-slate-500">#{i + 1}</span>
+                    <span>{t.a} + {t.b} + {t.c}</span>
+                    <span className="text-amber-400 ml-auto">lift {t.lift.toFixed(2)}</span>
+                    <span className="text-slate-500">· {t.count}×</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Filters */}
           <div className="flex items-center gap-3 flex-wrap">
