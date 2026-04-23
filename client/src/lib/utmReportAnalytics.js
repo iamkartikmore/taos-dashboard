@@ -354,8 +354,8 @@ export function channelTrends(snapshots = [], { metric = 'revenue' } = {}) {
    Used by the UI for pie/bar/matrix visualizations. Returns top N
    plus a synthetic "Other" row aggregating the tail, plus totals
    so the pie chart can show percentages. */
-export function breakdownBy(snapshot, dimension = 'utmSource', { topN = 8 } = {}) {
-  if (!snapshot?.rows?.length) return { items: [], other: null, totals: {} };
+export function breakdownBy(snapshot, dimension = 'utmSource') {
+  if (!snapshot?.rows?.length) return { items: [], totals: {} };
   const map = new Map();
   for (const r of snapshot.rows) {
     const key = r[dimension] || '(unknown)';
@@ -367,43 +367,25 @@ export function breakdownBy(snapshot, dimension = 'utmSource', { topN = 8 } = {}
     cur.rows++;
     map.set(key, cur);
   }
-  const all = [...map.values()].map(x => ({
+  const items = [...map.values()].map(x => ({
     ...x,
     cvr: x.checkoutInitiated > 0 ? x.orders / x.checkoutInitiated : (x.sessions > 0 ? x.orders / x.sessions : 0),
   }));
-  // Sort by whichever primary metric has volume
-  const hasRevenue = all.some(x => x.revenue > 0);
+  const hasRevenue = items.some(x => x.revenue > 0);
   const primary = hasRevenue ? 'revenue' : 'orders';
-  all.sort((a, b) => b[primary] - a[primary]);
+  items.sort((a, b) => b[primary] - a[primary]);
 
-  const head = all.slice(0, topN);
-  const tail = all.slice(topN);
-  let other = null;
-  if (tail.length) {
-    other = tail.reduce((acc, x) => ({
-      name: `Other (${tail.length})`,
-      orders:            acc.orders + x.orders,
-      revenue:           acc.revenue + x.revenue,
-      checkoutInitiated: acc.checkoutInitiated + x.checkoutInitiated,
-      sessions:          acc.sessions + x.sessions,
-      rows:              acc.rows + x.rows,
-    }), { name: '', orders: 0, revenue: 0, checkoutInitiated: 0, sessions: 0, rows: 0 });
-    other.cvr = other.checkoutInitiated > 0 ? other.orders / other.checkoutInitiated : 0;
-  }
-
-  const totals = all.reduce((t, x) => ({
+  const totals = items.reduce((t, x) => ({
     orders:            t.orders + x.orders,
     revenue:           t.revenue + x.revenue,
     checkoutInitiated: t.checkoutInitiated + x.checkoutInitiated,
     sessions:          t.sessions + x.sessions,
   }), { orders: 0, revenue: 0, checkoutInitiated: 0, sessions: 0 });
 
-  // Attach % share of primary metric for the UI
   const total = totals[primary] || 1;
-  head.forEach(x => { x.share = x[primary] / total; });
-  if (other) other.share = other[primary] / total;
+  items.forEach(x => { x.share = x[primary] / total; });
 
-  return { items: head, other, totals, dimension, primary };
+  return { items, totals, dimension, primary };
 }
 
 /* Source × Medium matrix — two-dim grid for heatmap visuals */
@@ -427,6 +409,166 @@ export function crossBreakdown(snapshot, rowDim = 'utmSource', colDim = 'utmMedi
   const rowList = [...rowKeys.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k).slice(0, 10);
   const colList = [...colKeys.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k).slice(0, 10);
   return { rows: rowList, cols: colList, matrix };
+}
+
+/* ─── CVR ANOMALIES (per campaign, z-score across peer set) ────── */
+export function cvrAnomalies(snapshot, { minCheckouts = 3 } = {}) {
+  if (!snapshot?.rows?.length) return { overperformers: [], underperformers: [], zeroCvr: [] };
+  const rows = snapshot.rows.filter(r => r.checkoutInitiated >= minCheckouts);
+  if (rows.length < 5) return { overperformers: [], underperformers: [], zeroCvr: [] };
+
+  const cvrs = rows.map(r => (r.checkoutInitiated > 0 ? r.orders / r.checkoutInitiated : 0));
+  const mean = cvrs.reduce((s, v) => s + v, 0) / cvrs.length;
+  const variance = cvrs.reduce((s, v) => s + (v - mean) ** 2, 0) / cvrs.length;
+  const std = Math.sqrt(variance);
+
+  const scored = rows.map((r, i) => ({
+    ...r,
+    cvr: cvrs[i],
+    zScore: std > 0 ? (cvrs[i] - mean) / std : 0,
+  }));
+
+  // Overperformers: CVR significantly above peer median with real volume
+  const overperformers = scored
+    .filter(r => r.zScore > 1.5 && r.checkoutInitiated >= 5)
+    .sort((a, b) => b.zScore - a.zScore)
+    .slice(0, 20);
+
+  // Underperformers: high checkouts, near-zero orders
+  const underperformers = scored
+    .filter(r => r.zScore < -1.0 && r.checkoutInitiated >= 10 && r.cvr < mean * 0.5)
+    .sort((a, b) => b.checkoutInitiated - a.checkoutInitiated)
+    .slice(0, 20);
+
+  // Zero-conversion campaigns with >10 checkouts — total leaks
+  const zeroCvr = scored
+    .filter(r => r.orders === 0 && r.checkoutInitiated >= 10)
+    .sort((a, b) => b.checkoutInitiated - a.checkoutInitiated)
+    .slice(0, 15);
+
+  return { overperformers, underperformers, zeroCvr, mean, std };
+}
+
+/* ─── META × UTM JOIN ────────────────────────────────────────────
+   Fuzzy-matches UTM campaign names against Meta enrichedRows
+   (ad/adset/campaign names). Returns joined rows with both Meta
+   spend and UTM orders so you can compute real cost-per-order. */
+
+// Tokenize a string for fuzzy matching: lowercase, split on
+// non-alphanumeric, drop short tokens + generic stopwords.
+const MATCH_STOPWORDS = new Set(['ad', 'ads', 'ca', 'as', 'ls', 'the', 'and', 'of', 'for', 'in', 'on', 'at', 'to', 'a', 'an', 'is', 'by', 'test', 'new', 'old']);
+function tokenize(s) {
+  return String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 3 && !MATCH_STOPWORDS.has(t));
+}
+function jaccard(a, b) {
+  const sa = new Set(a); const sb = new Set(b);
+  const inter = [...sa].filter(x => sb.has(x)).length;
+  const uni = new Set([...sa, ...sb]).size;
+  return uni > 0 ? inter / uni : 0;
+}
+
+export function joinMetaByCampaign(snapshot, enrichedRows = [], { minScore = 0.35 } = {}) {
+  if (!snapshot?.rows?.length || !enrichedRows?.length) return { matched: [], unmatched: [], totals: {} };
+
+  // Aggregate Meta entities by each level (ad / adset / campaign)
+  const metaByName = new Map();
+  for (const r of enrichedRows) {
+    const add = (name, spend, purchases, value) => {
+      if (!name) return;
+      const cur = metaByName.get(name) || { name, spend: 0, purchases: 0, value: 0, tokens: tokenize(name) };
+      cur.spend     += Number(spend) || 0;
+      cur.purchases += Number(purchases) || 0;
+      cur.value     += Number(value) || 0;
+      metaByName.set(name, cur);
+    };
+    add(r.adName,       r.spend, r.purchases, r.purchaseValue || r.metaRoas * r.spend);
+    add(r.adSetName,    r.spend, r.purchases, r.purchaseValue || r.metaRoas * r.spend);
+    add(r.campaignName, r.spend, r.purchases, r.purchaseValue || r.metaRoas * r.spend);
+  }
+  const metaEntities = [...metaByName.values()];
+
+  // Aggregate UTM by Campaign
+  const utmByCampaign = new Map();
+  for (const r of snapshot.rows) {
+    const name = r.utmCampaign || '';
+    if (!name) continue;
+    const cur = utmByCampaign.get(name) || {
+      name, tokens: tokenize(name),
+      orders: 0, checkoutInitiated: 0, revenue: 0, sessions: 0,
+    };
+    cur.orders            += r.orders || 0;
+    cur.checkoutInitiated += r.checkoutInitiated || 0;
+    cur.revenue           += r.revenue || 0;
+    cur.sessions          += r.sessions || 0;
+    utmByCampaign.set(name, cur);
+  }
+
+  // For each UTM campaign, find the best Meta entity by Jaccard
+  const matched = [];
+  const unmatched = [];
+  for (const u of utmByCampaign.values()) {
+    if (!u.tokens.length) { unmatched.push(u); continue; }
+    let best = null, bestScore = 0;
+    for (const m of metaEntities) {
+      if (!m.tokens.length) continue;
+      const score = jaccard(u.tokens, m.tokens);
+      if (score > bestScore) { bestScore = score; best = m; }
+    }
+    if (best && bestScore >= minScore) {
+      const utmOrders = u.orders;
+      matched.push({
+        utmCampaign: u.name,
+        metaEntity:  best.name,
+        matchScore:  bestScore,
+        metaSpend:   best.spend,
+        metaPurchases: best.purchases,
+        metaValue:   best.value,
+        utmOrders,
+        utmCheckouts: u.checkoutInitiated,
+        utmCvr:      u.checkoutInitiated > 0 ? utmOrders / u.checkoutInitiated : 0,
+        cpoMeta:     utmOrders > 0 ? best.spend / utmOrders : null,
+        attributionDelta: best.purchases - utmOrders,  // positive = Meta reports more than UTM captured
+      });
+    } else {
+      unmatched.push(u);
+    }
+  }
+  matched.sort((a, b) => b.metaSpend - a.metaSpend);
+
+  const totals = {
+    matchedCount: matched.length,
+    unmatchedCount: unmatched.length,
+    metaSpendTotal:     matched.reduce((s, m) => s + m.metaSpend, 0),
+    metaPurchasesTotal: matched.reduce((s, m) => s + m.metaPurchases, 0),
+    utmOrdersTotal:     matched.reduce((s, m) => s + m.utmOrders, 0),
+    unmatchedOrders:    unmatched.reduce((s, u) => s + u.orders, 0),
+  };
+
+  return { matched, unmatched, totals };
+}
+
+/* ─── FUNNEL LEAKAGE ────────────────────────────────────────────
+   For every (dimension, key) row: how many checkouts didn't
+   convert into orders? Ranked by absolute leak volume so the
+   operator sees the biggest fixes first. */
+export function funnelLeakage(snapshot, dimension = 'utmCampaign') {
+  if (!snapshot?.rows?.length) return [];
+  const agg = new Map();
+  for (const r of snapshot.rows) {
+    const k = r[dimension] || '(unknown)';
+    const cur = agg.get(k) || { name: k, checkoutInitiated: 0, orders: 0, source: r.utmSource || '', medium: r.utmMedium || '' };
+    cur.checkoutInitiated += r.checkoutInitiated || 0;
+    cur.orders            += r.orders || 0;
+    agg.set(k, cur);
+  }
+  return [...agg.values()]
+    .map(x => ({
+      ...x,
+      leaked: Math.max(0, x.checkoutInitiated - x.orders),
+      cvr:    x.checkoutInitiated > 0 ? x.orders / x.checkoutInitiated : 0,
+    }))
+    .filter(x => x.checkoutInitiated > 0 && x.leaked > 0)
+    .sort((a, b) => b.leaked - a.leaked);
 }
 
 /* Per-source (or any dim) daily time series — one line per key */

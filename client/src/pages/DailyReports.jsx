@@ -14,6 +14,7 @@ import { listPublicDriveFolder, downloadPublicDriveFile } from '../lib/api';
 import {
   parseUtmReport, extractBrandFromName, analyzeReports,
   breakdownBy, crossBreakdown, trendByDimension,
+  cvrAnomalies, joinMetaByCampaign, funnelLeakage,
 } from '../lib/utmReportAnalytics';
 
 const cur = v => `₹${Math.round(Number(v) || 0).toLocaleString('en-IN')}`;
@@ -88,14 +89,16 @@ function ChannelRow({ row, mode }) {
 const PIE_COLORS = ['#22c55e', '#06b6d4', '#a78bfa', '#f59e0b', '#f472b6', '#34d399', '#60a5fa', '#fb923c', '#ef4444', '#eab308'];
 const TREND_COLORS = ['#22c55e', '#06b6d4', '#a78bfa', '#f59e0b', '#f472b6', '#fb923c'];
 
-function BreakdownVisuals({ breakBySource, breakByMedium, breakByCampaign, matrix, perSourceTrend, perMediumTrend }) {
+function BreakdownVisuals({ breakBySource, breakByMedium, breakByCampaign, matrix, perSourceTrend, perMediumTrend, anomalies, leakage, metaJoin }) {
   if (!breakBySource || !breakByMedium) return null;
 
+  // Show ALL items — no "Other" collapse. Filter out zero-value items so the
+  // pie is readable but nothing meaningful is hidden.
   const makePieData = (b) => {
     if (!b) return [];
-    const arr = [...b.items.map(x => ({ name: x.name || '(unknown)', value: x[b.primary] || 0, orders: x.orders, checkouts: x.checkoutInitiated, cvr: x.cvr }))];
-    if (b.other && b.other[b.primary] > 0) arr.push({ name: b.other.name, value: b.other[b.primary], orders: b.other.orders, checkouts: b.other.checkoutInitiated, cvr: b.other.cvr });
-    return arr.filter(x => x.value > 0);
+    return b.items
+      .filter(x => (x[b.primary] || 0) > 0)
+      .map(x => ({ name: x.name || '(unknown)', value: x[b.primary] || 0, orders: x.orders, checkouts: x.checkoutInitiated, cvr: x.cvr }));
   };
   const pieSrc = makePieData(breakBySource);
   const pieMed = makePieData(breakByMedium);
@@ -104,9 +107,9 @@ function BreakdownVisuals({ breakBySource, breakByMedium, breakByCampaign, matri
 
   return (
     <div className="space-y-4">
-      {/* Row 1: Two pie charts */}
+      {/* Row 1: Two pie charts — all segments */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <Card title={`${primaryLabel} by source · ${breakBySource.items.length + (breakBySource.other ? 1 : 0)} segments`}>
+        <Card title={`${primaryLabel} by source · all ${breakBySource.items.length} segments`}>
           {pieSrc.length === 0 ? <div className="text-xs italic text-slate-500">No source data.</div> : (
             <div className="flex items-center gap-4">
               <ResponsiveContainer width="55%" height={240}>
@@ -131,7 +134,7 @@ function BreakdownVisuals({ breakBySource, breakByMedium, breakByCampaign, matri
             </div>
           )}
         </Card>
-        <Card title={`${primaryLabel} by medium · ${breakByMedium.items.length + (breakByMedium.other ? 1 : 0)} segments`}>
+        <Card title={`${primaryLabel} by medium · all ${breakByMedium.items.length} segments`}>
           {pieMed.length === 0 ? <div className="text-xs italic text-slate-500">No medium data.</div> : (
             <div className="flex items-center gap-4">
               <ResponsiveContainer width="55%" height={240}>
@@ -158,24 +161,28 @@ function BreakdownVisuals({ breakBySource, breakByMedium, breakByCampaign, matri
         </Card>
       </div>
 
-      {/* Row 2: Top campaigns bar chart — horizontal, dual metric */}
-      <Card title={`Top ${breakByCampaign?.items.length || 0} campaigns · orders (bars) + CVR (labels)`}>
-        {!breakByCampaign?.items.length ? <div className="text-xs italic text-slate-500">No campaign data.</div> : (
-          <ResponsiveContainer width="100%" height={Math.max(240, (breakByCampaign.items.length + (breakByCampaign.other ? 1 : 0)) * 28)}>
-            <BarChart data={[...breakByCampaign.items, ...(breakByCampaign.other ? [breakByCampaign.other] : [])].map(c => ({ ...c, cvrPct: c.cvr * 100 }))} layout="vertical" margin={{ left: 140, right: 80 }}>
-              <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
-              <XAxis type="number" tick={{ fill: '#64748b', fontSize: 10 }} />
-              <YAxis type="category" dataKey="name" tick={{ fill: '#94a3b8', fontSize: 10 }} width={130} />
-              <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #1e293b', fontSize: 11 }}
-                formatter={(v, n, p) => n === 'orders' ? [num(v), 'Orders']
-                  : n === 'checkoutInitiated' ? [num(v), 'Checkouts']
-                  : [`${v.toFixed(1)}%`, 'CVR']} />
-              <Bar dataKey="orders" fill="#22c55e" radius={[0, 4, 4, 0]}>
-                <LabelList dataKey="cvrPct" position="right" formatter={v => v > 0 ? `${v.toFixed(0)}%` : ''} fill="#64748b" fontSize={10} />
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        )}
+      {/* Row 2: All campaigns bar chart — scrolls if long */}
+      <Card title={`All ${breakByCampaign?.items.length || 0} campaigns · orders (bars) + CVR (labels)`}>
+        {!breakByCampaign?.items.length ? <div className="text-xs italic text-slate-500">No campaign data.</div> : (() => {
+          const data = breakByCampaign.items.filter(c => c.orders > 0 || c.checkoutInitiated > 0).map(c => ({ ...c, cvrPct: c.cvr * 100 }));
+          const chartHeight = Math.min(2400, Math.max(240, data.length * 24));
+          return (
+            <div className="overflow-auto" style={{ maxHeight: '640px' }}>
+              <ResponsiveContainer width="100%" height={chartHeight}>
+                <BarChart data={data} layout="vertical" margin={{ left: 200, right: 80 }}>
+                  <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
+                  <XAxis type="number" tick={{ fill: '#64748b', fontSize: 10 }} />
+                  <YAxis type="category" dataKey="name" tick={{ fill: '#94a3b8', fontSize: 10 }} width={190} interval={0} />
+                  <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #1e293b', fontSize: 11 }}
+                    formatter={(v, n) => n === 'orders' ? [num(v), 'Orders'] : [`${v.toFixed(1)}%`, 'CVR']} />
+                  <Bar dataKey="orders" fill="#22c55e" radius={[0, 4, 4, 0]}>
+                    <LabelList dataKey="cvrPct" position="right" formatter={v => v > 0 ? `${v.toFixed(0)}%` : ''} fill="#64748b" fontSize={10} />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          );
+        })()}
       </Card>
 
       {/* Row 3: Source × Medium matrix heatmap */}
@@ -247,13 +254,137 @@ function BreakdownVisuals({ breakBySource, breakByMedium, breakByCampaign, matri
           </ResponsiveContainer>
         </Card>
       )}
+
+      {/* Row 6: CVR anomalies — overperformers, underperformers, zero-CVR */}
+      {anomalies && (anomalies.overperformers.length > 0 || anomalies.underperformers.length > 0 || anomalies.zeroCvr.length > 0) && (
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <Card title={`CVR Overperformers · ${anomalies.overperformers.length}`} tone="good">
+            <p className="text-[10px] text-slate-500 mb-2">Campaigns &gt;1.5σ above peer mean CVR ({(anomalies.mean * 100).toFixed(1)}%). Scale candidates.</p>
+            {anomalies.overperformers.length === 0 ? <div className="text-xs italic text-slate-500">None detected.</div> :
+              <div className="space-y-1">
+                {anomalies.overperformers.map((r, i) => (
+                  <div key={i} className="text-[11px] flex items-center gap-2 py-1 border-b border-gray-800/40">
+                    <span className="text-slate-200 truncate flex-1">{r.utmCampaign || '(no campaign)'}</span>
+                    <span className="text-emerald-300 font-mono">{(r.cvr * 100).toFixed(0)}% CVR</span>
+                    <span className="text-slate-500 font-mono">{r.orders}o</span>
+                  </div>
+                ))}
+              </div>
+            }
+          </Card>
+          <Card title={`CVR Underperformers · ${anomalies.underperformers.length}`} tone="warn">
+            <p className="text-[10px] text-slate-500 mb-2">Real checkout volume but CVR &gt;1σ below mean. Offer/page/pricing issues.</p>
+            {anomalies.underperformers.length === 0 ? <div className="text-xs italic text-slate-500">None detected.</div> :
+              <div className="space-y-1">
+                {anomalies.underperformers.map((r, i) => (
+                  <div key={i} className="text-[11px] flex items-center gap-2 py-1 border-b border-gray-800/40">
+                    <span className="text-slate-200 truncate flex-1">{r.utmCampaign || '(no campaign)'}</span>
+                    <span className="text-amber-300 font-mono">{(r.cvr * 100).toFixed(0)}%</span>
+                    <span className="text-slate-500 font-mono">{r.checkoutInitiated} ci</span>
+                  </div>
+                ))}
+              </div>
+            }
+          </Card>
+          <Card title={`Zero-CVR Bleeders · ${anomalies.zeroCvr.length}`} tone="bad">
+            <p className="text-[10px] text-slate-500 mb-2">10+ checkouts, 0 orders. Total conversion leaks.</p>
+            {anomalies.zeroCvr.length === 0 ? <div className="text-xs italic text-slate-500">None detected.</div> :
+              <div className="space-y-1">
+                {anomalies.zeroCvr.map((r, i) => (
+                  <div key={i} className="text-[11px] flex items-center gap-2 py-1 border-b border-gray-800/40">
+                    <span className="text-slate-200 truncate flex-1">{r.utmCampaign || '(no campaign)'}</span>
+                    <span className="text-red-300 font-mono">{r.checkoutInitiated} ci</span>
+                  </div>
+                ))}
+              </div>
+            }
+          </Card>
+        </div>
+      )}
+
+      {/* Row 7: Funnel leakage — where are checkouts dying */}
+      {leakage && leakage.length > 0 && (
+        <Card title={`Funnel leakage · ${leakage.length} campaigns lose ${num(leakage.reduce((s, l) => s + l.leaked, 0))} checkouts before order`} icon={AlertTriangle} tone="warn">
+          <div className="overflow-auto" style={{ maxHeight: '360px' }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                <tr>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Campaign</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Source / Medium</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Checkouts</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Orders</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Leaked</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">CVR</th>
+                </tr>
+              </thead>
+              <tbody>
+                {leakage.slice(0, 60).map((l, i) => (
+                  <tr key={i} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                    <td className="px-3 py-2 text-slate-200 truncate max-w-[240px]">{l.name}</td>
+                    <td className="px-3 py-2 text-[11px] text-slate-500">{l.source} / {l.medium}</td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{num(l.checkoutInitiated)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{num(l.orders)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-red-400 font-semibold">{num(l.leaked)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-amber-400">{(l.cvr * 100).toFixed(1)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* Row 8: Meta × UTM join — cross-channel attribution */}
+      {metaJoin && metaJoin.matched.length > 0 && (
+        <Card title={`Meta × UTM join · ${metaJoin.matched.length} matched campaigns · ${num(metaJoin.totals.unmatchedCount)} unmatched`}>
+          <p className="text-[11px] text-slate-500 mb-3">
+            Fuzzy-matched UTM campaign names against Meta ad/adset/campaign names (Jaccard ≥ 0.35).
+            Meta spend: {cur(metaJoin.totals.metaSpendTotal)} · Meta-reported purchases: {num(metaJoin.totals.metaPurchasesTotal)} · UTM-observed orders: {num(metaJoin.totals.utmOrdersTotal)}.
+            Attribution delta lets you see where Meta over/under-counts vs ground-truth UTM.
+          </p>
+          <div className="overflow-auto" style={{ maxHeight: '460px' }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                <tr>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">UTM Campaign</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Meta match</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Meta spend</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Meta purch.</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">UTM orders</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Δ (Meta − UTM)</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">CPO (Meta/UTM)</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">CVR</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Match</th>
+                </tr>
+              </thead>
+              <tbody>
+                {metaJoin.matched.slice(0, 100).map((m, i) => (
+                  <tr key={i} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                    <td className="px-3 py-2 text-slate-200 truncate max-w-[220px]">{m.utmCampaign}</td>
+                    <td className="px-3 py-2 text-[11px] text-slate-500 truncate max-w-[220px]">{m.metaEntity}</td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{cur(m.metaSpend)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{num(m.metaPurchases)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{num(m.utmOrders)}</td>
+                    <td className={`px-3 py-2 text-right font-mono ${m.attributionDelta > 0 ? 'text-emerald-400' : m.attributionDelta < 0 ? 'text-amber-400' : 'text-slate-500'}`}>
+                      {m.attributionDelta > 0 ? '+' : ''}{m.attributionDelta}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{m.cpoMeta != null ? cur(m.cpoMeta) : '—'}</td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-500">{(m.utmCvr * 100).toFixed(0)}%</td>
+                    <td className="px-3 py-2 text-right font-mono text-[10px] text-slate-600">{(m.matchScore * 100).toFixed(0)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
 
 export default function DailyReports() {
   const {
-    brands, activeBrandIds, brandData,
+    brands, activeBrandIds, brandData, enrichedRows,
     upsertBrandUtmReport, removeBrandUtmSnapshot,
   } = useStore();
 
@@ -347,13 +478,20 @@ export default function DailyReports() {
   const trendHasSessions = trendData.some(d => d.sessions > 0);
   const trendHasCheckouts = trendData.some(d => d.checkoutInitiated > 0);
 
-  /* Breakdowns for visualization */
-  const breakBySource   = useMemo(() => analysis?.latest ? breakdownBy(analysis.latest, 'utmSource',   { topN: 8 }) : null, [analysis]);
-  const breakByMedium   = useMemo(() => analysis?.latest ? breakdownBy(analysis.latest, 'utmMedium',   { topN: 8 }) : null, [analysis]);
-  const breakByCampaign = useMemo(() => analysis?.latest ? breakdownBy(analysis.latest, 'utmCampaign', { topN: 12 }) : null, [analysis]);
+  /* Breakdowns — no topN cap, show ALL segments */
+  const breakBySource   = useMemo(() => analysis?.latest ? breakdownBy(analysis.latest, 'utmSource')   : null, [analysis]);
+  const breakByMedium   = useMemo(() => analysis?.latest ? breakdownBy(analysis.latest, 'utmMedium')   : null, [analysis]);
+  const breakByCampaign = useMemo(() => analysis?.latest ? breakdownBy(analysis.latest, 'utmCampaign') : null, [analysis]);
   const matrix          = useMemo(() => analysis?.latest ? crossBreakdown(analysis.latest, 'utmSource', 'utmMedium') : null, [analysis]);
-  const perSourceTrend  = useMemo(() => snapshots.length >= 2 ? trendByDimension(snapshots.slice(-14), 'utmSource', { topN: 5 }) : null, [snapshots]);
-  const perMediumTrend  = useMemo(() => snapshots.length >= 2 ? trendByDimension(snapshots.slice(-14), 'utmMedium', { topN: 5 }) : null, [snapshots]);
+  const perSourceTrend  = useMemo(() => snapshots.length >= 2 ? trendByDimension(snapshots.slice(-14), 'utmSource', { topN: 10 }) : null, [snapshots]);
+  const perMediumTrend  = useMemo(() => snapshots.length >= 2 ? trendByDimension(snapshots.slice(-14), 'utmMedium', { topN: 10 }) : null, [snapshots]);
+
+  /* Advanced patterns */
+  const anomalies  = useMemo(() => analysis?.latest ? cvrAnomalies(analysis.latest) : null, [analysis]);
+  const leakage    = useMemo(() => analysis?.latest ? funnelLeakage(analysis.latest, 'utmCampaign') : [], [analysis]);
+  // Meta rows scoped to the selected brand (enrichedRows tags each row with _brandId / brandId)
+  const brandEnriched = useMemo(() => (enrichedRows || []).filter(r => !selectedBrandId || r._brandId === selectedBrandId || r.brandId === selectedBrandId), [enrichedRows, selectedBrandId]);
+  const metaJoin   = useMemo(() => analysis?.latest ? joinMetaByCampaign(analysis.latest, brandEnriched) : null, [analysis, brandEnriched]);
 
   if (!bBrands.length) {
     return (
@@ -525,6 +663,9 @@ export default function DailyReports() {
             matrix={matrix}
             perSourceTrend={perSourceTrend}
             perMediumTrend={perMediumTrend}
+            anomalies={anomalies}
+            leakage={leakage}
+            metaJoin={metaJoin}
           />
 
           {/* Classified panels */}
