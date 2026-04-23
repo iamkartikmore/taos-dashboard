@@ -14,6 +14,7 @@ import { fmt } from '../lib/analytics';
 import { buildStarProducts, PRESETS, ACTION_STYLES, POSTURE_STYLES, SEVERITY_STYLES } from '../lib/starProducts';
 import { enrichStarProducts } from '../lib/starProductsEnrich';
 import { pullBrandOrders90d } from '../lib/autoPull';
+import { fetchShopifyInventory } from '../lib/api';
 import MetricCard from '../components/ui/MetricCard';
 
 /* ─── product link resolver ──────────────────────────────────────
@@ -606,7 +607,9 @@ function RestockUrgencyList({ skus }) {
 }
 
 export default function StarProducts() {
-  const { brands, activeBrandIds, brandData, procurement, setBrandOrders, setBrandOrdersStatus } = useStore();
+  const { brands, activeBrandIds, brandData, procurement, setBrandOrders, setBrandOrdersStatus, setBrandInventory, setBrandInventoryStatus } = useStore();
+  const [pullingInv, setPullingInv] = useState(false);
+  const [invErr, setInvErr] = useState(null);
 
   const defaultViewId = brands.find(b => activeBrandIds.includes(b.id))?.id || activeBrandIds[0] || brands[0]?.id;
   const [viewingBrandId, setViewingBrandId] = useState(defaultViewId);
@@ -640,6 +643,23 @@ export default function StarProducts() {
     setFetching(false);
     if (!res.ok) setFetchErr(res.error || res.reason || 'Fetch failed');
   }, [selectedBrandObj, setBrandOrders, setBrandOrdersStatus]);
+
+  const handlePullInventory = useCallback(async () => {
+    if (!selectedBrandObj?.shopify?.shop) return;
+    setPullingInv(true); setInvErr(null);
+    try {
+      setBrandInventoryStatus?.(selectedBrandObj.id, 'loading');
+      const { shop, clientId, clientSecret } = selectedBrandObj.shopify;
+      const result = await fetchShopifyInventory(shop, clientId, clientSecret);
+      const invMap = result.map || result.inventoryMap || {};
+      setBrandInventory(selectedBrandObj.id, invMap, result.locations, null, result.skuToItemId, result.collections);
+    } catch (e) {
+      setInvErr(e.message || 'Inventory pull failed');
+      setBrandInventoryStatus?.(selectedBrandObj.id, 'error');
+    } finally { setPullingInv(false); }
+  }, [selectedBrandObj, setBrandInventory, setBrandInventoryStatus]);
+
+  const inventoryEmpty = Object.keys(inventoryMap).length === 0;
 
   const plan = useMemo(() => ({ grossMarginPct: loadPlanMargin(viewingBrandId) }), [viewingBrandId]);
 
@@ -747,6 +767,28 @@ export default function StarProducts() {
               <BundleRadar bundles={bundles} />
             </div>
           </div>
+
+          {/* Inventory-missing banner — explains 'NO DATA' in Stock column */}
+          {inventoryEmpty && (
+            <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl p-3 text-xs text-amber-200 flex items-start gap-3">
+              <AlertTriangle size={14} className="text-amber-400 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <div className="font-semibold mb-0.5">Inventory not pulled for {selectedBrandObj?.name || 'this brand'}</div>
+                <div className="text-amber-200/70 leading-relaxed">
+                  Stock and active-product filtering both depend on Shopify inventory. Once pulled, every row gets its exact on-hand stock (summed across active locations) and archived-product SKUs get filtered out.
+                  {invErr && <span className="block mt-1 text-red-300">Error: {invErr}</span>}
+                </div>
+              </div>
+              <button
+                onClick={handlePullInventory}
+                disabled={pullingInv || !selectedBrandObj?.shopify?.shop}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-700/40 hover:bg-amber-700/60 border border-amber-600/50 text-amber-200 text-[11px] font-semibold transition-all disabled:opacity-40"
+              >
+                <RefreshCw size={11} className={pullingInv ? 'animate-spin' : ''} />
+                {pullingInv ? 'Pulling inventory…' : 'Pull Inventory'}
+              </button>
+            </div>
+          )}
 
           {/* Notes */}
           <div className="bg-gray-900/40 rounded-xl border border-gray-800/40 p-3 text-[11px] text-slate-500 flex items-start gap-2">
