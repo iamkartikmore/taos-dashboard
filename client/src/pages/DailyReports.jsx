@@ -9,7 +9,7 @@ import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
 } from 'recharts';
 import { useStore } from '../store';
-import { listDriveFiles, downloadDriveFile } from '../lib/api';
+import { listPublicDriveFolder, downloadPublicDriveFile } from '../lib/api';
 import {
   parseUtmReport, extractBrandFromName, analyzeReports,
 } from '../lib/utmReportAnalytics';
@@ -96,26 +96,27 @@ export default function DailyReports() {
   const fileInputRef = useRef(null);
 
   const handlePullDrive = useCallback(async () => {
-    if (!brand?.drive?.apiKey || !brand?.drive?.folderId) {
-      setError('Configure Drive API key + folder ID for this brand in Study Manual first.');
+    const folderUrl = brand?.drive?.folderUrl;
+    if (!folderUrl) {
+      setError('Paste this brand\'s Drive folder share link in Study Manual first.');
       return;
     }
     setPulling(true); setError(null); setLog([]);
     try {
       appendLog(`Listing files in folder…`);
-      const files = await listDriveFiles(brand.drive.apiKey, brand.drive.folderId);
-      appendLog(`Found ${files.length} CSV file(s)`);
+      const files = await listPublicDriveFolder(folderUrl);
+      const csvs = files.filter(f => /\.csv$/i.test(f.name));
+      appendLog(`Found ${csvs.length} CSV file(s) in the folder`);
       const known = new Set(snapshots.map(s => s.filename));
-      const newFiles = files.filter(f => !known.has(f.name));
+      const newFiles = csvs.filter(f => !known.has(f.name));
       appendLog(`${newFiles.length} new file(s) since last sync`);
       let importedCount = 0;
       for (const f of newFiles.slice(0, 20)) {
         try {
           appendLog(`  → ${f.name}`);
-          const csv = await downloadDriveFile(brand.drive.apiKey, f.id);
+          const csv = await downloadPublicDriveFile(f.id);
           const snap = parseUtmReport(csv, { filename: f.name });
           snap.driveFileId = f.id;
-          snap.driveModifiedTime = f.modifiedTime;
           upsertBrandUtmReport(brand.id, snap);
           importedCount++;
         } catch (e) {
@@ -200,9 +201,9 @@ export default function DailyReports() {
             className="px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 border border-gray-700 text-slate-300 text-xs flex items-center gap-1.5 disabled:opacity-40">
             <Upload size={12} /> Drop CSVs
           </button>
-          <button onClick={handlePullDrive} disabled={pulling || !brand?.drive?.apiKey || !brand?.drive?.folderId}
+          <button onClick={handlePullDrive} disabled={pulling || !brand?.drive?.folderUrl}
             className="px-3 py-1.5 rounded-lg bg-cyan-700/30 hover:bg-cyan-700/50 border border-cyan-800/40 text-cyan-300 text-xs flex items-center gap-1.5 disabled:opacity-40"
-            title={!brand?.drive?.apiKey ? 'Add Drive API key in Study Manual' : 'Pull newest reports from Drive folder'}>
+            title={!brand?.drive?.folderUrl ? 'Paste a Drive folder link in Study Manual' : 'Pull newest reports from Drive folder'}>
             {pulling ? <RefreshCw size={12} className="animate-spin" /> : <FolderDown size={12} />}
             {pulling ? 'Pulling…' : 'Pull from Drive'}
           </button>
@@ -228,7 +229,7 @@ export default function DailyReports() {
           <CalendarDays size={40} className="text-slate-600 mx-auto mb-3" />
           <p className="text-sm text-slate-400 mb-2">No reports imported yet.</p>
           <p className="text-[11px] text-slate-600 max-w-md mx-auto">
-            Either drop CSVs here directly, or configure Drive API key + folder ID in <span className="text-slate-400">Study Manual → brand</span> and click Pull from Drive.
+            Either drop CSVs here directly, or paste your Drive folder share link in <span className="text-slate-400">Study Manual → brand → Google Drive</span> and click Pull from Drive. Folder must be shared as "Anyone with the link — Viewer".
           </p>
         </div>
       )}

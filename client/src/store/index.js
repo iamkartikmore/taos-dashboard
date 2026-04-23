@@ -40,7 +40,7 @@ export function makeBrand(name = 'New Brand', idx = 0) {
     googleAds: { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '', merchantId: '' },
     listmonk: { url: '', username: '', password: '', defaultListId: '', fromEmail: '' },
     clarity: { apiToken: '', projectId: '' },
-    drive:   { apiKey: '', folderId: '' },
+    drive:   { folderUrl: '' },
   };
 }
 
@@ -64,7 +64,8 @@ function loadBrands() {
       else if (u.googleAds.merchantId === undefined) u.googleAds.merchantId = '';
       if (!u.listmonk)  u.listmonk  = { url: '', username: '', password: '', defaultListId: '', fromEmail: '' };
       if (!u.clarity)   u.clarity   = { apiToken: '', projectId: '' };
-      if (!u.drive)     u.drive     = { apiKey: '', folderId: '' };
+      if (!u.drive)     u.drive     = { folderUrl: '' };
+      else if (u.drive.folderUrl === undefined) u.drive = { ...u.drive, folderUrl: u.drive.folderId ? `https://drive.google.com/drive/folders/${u.drive.folderId}` : '' };
       return u;
     });
   }

@@ -381,7 +381,37 @@ export async function fetchPmaxSearchTerms(creds, campaignIds, datePreset = 'las
   return json.rows || [];
 }
 
-/* ─── GOOGLE DRIVE ────────────────────────────────────────────────── */
+/* ─── GOOGLE DRIVE — PUBLIC (paste-a-link, no API key) ───────────── */
+
+export async function listPublicDriveFolder(folderUrl) {
+  const res = await fetch('/api/drive/list-public', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folderUrl }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'Drive folder fetch failed');
+  return json.files || [];
+}
+
+export async function downloadPublicDriveFile(fileUrlOrId) {
+  const res = await fetch('/api/drive/download-public', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(
+      /^[a-zA-Z0-9_-]{10,}$/.test(fileUrlOrId)
+        ? { fileId: fileUrlOrId }
+        : { fileUrl: fileUrlOrId }
+    ),
+  });
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(json.error || 'Drive download failed');
+  }
+  return res.text();
+}
+
+/* ─── GOOGLE DRIVE (API-key based — kept for private folders) ────── */
 
 export async function listDriveFiles(apiKey, folderId) {
   const res = await fetch('/api/drive/list', {

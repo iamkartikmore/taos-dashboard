@@ -1081,6 +1081,113 @@ app.post('/api/google-merchant/pull', async (req, res) => {
   }
 });
 
+/* ─── GOOGLE DRIVE — ZERO-AUTH PASTE-A-LINK PULL ──────────────────
+   User pastes a folder share link (folder set to "Anyone with link").
+   We scrape Drive's embeddedfolderview HTML — which publicly
+   enumerates every file in the folder with its fileId and name —
+   then hit each file's /uc?export=download URL to grab the CSV.
+   Zero API key, zero OAuth, zero setup beyond clicking "Share". */
+
+function extractFolderId(url = '') {
+  const patterns = [
+    /\/folders\/([a-zA-Z0-9_-]{10,})/,
+    /[?&]id=([a-zA-Z0-9_-]{10,})/,
+    /^([a-zA-Z0-9_-]{10,})$/,
+  ];
+  for (const p of patterns) { const m = (url || '').match(p); if (m) return m[1]; }
+  return null;
+}
+function extractFileId(url = '') {
+  const patterns = [
+    /\/file\/d\/([a-zA-Z0-9_-]{10,})/,
+    /[?&]id=([a-zA-Z0-9_-]{10,})/,
+    /^([a-zA-Z0-9_-]{10,})$/,
+  ];
+  for (const p of patterns) { const m = (url || '').match(p); if (m) return m[1]; }
+  return null;
+}
+
+// POST /api/drive/list-public — paste a folder link, get file metadata
+app.post('/api/drive/list-public', async (req, res) => {
+  const { folderUrl } = req.body;
+  const folderId = extractFolderId(folderUrl);
+  if (!folderId) return res.status(400).json({ error: 'Could not extract a folder id from that link.' });
+  try {
+    // embeddedfolderview returns an iframe-oriented HTML page that lists
+    // every file in a publicly-shared folder. We parse the anchor tags
+    // + data attributes to recover fileId + filename.
+    const url = `https://drive.google.com/embeddedfolderview?id=${folderId}#list`;
+    const r = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const html = r.data || '';
+    const files = [];
+    const seen = new Set();
+    const anchorRegex = /<a[^>]+href="https:\/\/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]{10,})[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
+    let match;
+    while ((match = anchorRegex.exec(html)) !== null) {
+      const id = match[1];
+      if (seen.has(id)) continue;
+      // Strip HTML tags inside the anchor for the visible name
+      const name = match[2].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').trim();
+      if (!name) continue;
+      files.push({ id, name });
+      seen.add(id);
+    }
+    // Fallback for shared-drive layout which uses /open?id=
+    if (!files.length) {
+      const alt = /href="https:\/\/drive\.google\.com\/open\?id=([a-zA-Z0-9_-]+)"[^>]*title="([^"]+)"/g;
+      while ((match = alt.exec(html)) !== null) {
+        files.push({ id: match[1], name: match[2] });
+      }
+    }
+    if (!files.length) {
+      return res.status(404).json({
+        error: 'No files found. Make sure the folder is shared as "Anyone with link — Viewer". Shared Drives may block public listing.',
+        folderId,
+      });
+    }
+    res.json({ folderId, files });
+  } catch (err) {
+    const status = err.response?.status || 500;
+    const msg = err.response?.statusText || err.message;
+    res.status(status).json({ error: msg });
+  }
+});
+
+// POST /api/drive/download-public — paste any file link, get its contents
+app.post('/api/drive/download-public', async (req, res) => {
+  const { fileUrl, fileId: idDirect } = req.body;
+  const fileId = idDirect || extractFileId(fileUrl);
+  if (!fileId) return res.status(400).json({ error: 'Could not extract a file id from that link.' });
+  try {
+    // Drive's /uc endpoint streams the file content for any publicly-
+    // viewable file. For files above ~100MB it interposes a confirm
+    // page, but CSVs are always well under that threshold.
+    const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
+    const r = await axios.get(url, {
+      timeout: 60000,
+      responseType: 'text',
+      transformResponse: [v => v],
+      maxRedirects: 5,
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+    });
+    // Detect the "virus scan" interstitial and follow once if hit
+    const body = r.data || '';
+    if (body.startsWith('<!DOCTYPE') && /confirm=/.test(body)) {
+      const confirmMatch = body.match(/confirm=([a-zA-Z0-9_-]+)/);
+      if (confirmMatch) {
+        const r2 = await axios.get(`${url}&confirm=${confirmMatch[1]}`, {
+          timeout: 60000, responseType: 'text', transformResponse: [v => v], maxRedirects: 5,
+        });
+        return res.type('text/plain').send(r2.data);
+      }
+    }
+    res.type('text/plain').send(body);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: err.response?.statusText || err.message });
+  }
+});
+
 /* ─── GOOGLE DRIVE PULL (public folder + API key) ──────────────────
    Pull daily UTM / marketing reports from a Drive folder shared
    publicly via link. User provides:
