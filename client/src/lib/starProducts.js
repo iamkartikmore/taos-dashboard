@@ -56,7 +56,16 @@ const DEFAULT_SAFETY_DAYS    = 7;
 const OVERSTOCK_DAYS         = 180;
 
 /* ─── BUILD ─────────────────────────────────────────────────────── */
-export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, procurement = {}, merchantBySku = null, preset = 'balanced', windowDays = 90 } = {}) {
+/* `activeOnly` (default true): filter SKUs to those currently in
+   Shopify's active inventory (inventoryMap). SKUs from old orders
+   whose products have since been archived / deleted are dropped.
+   When inventoryMap is empty (not yet pulled), the filter is a
+   no-op so we don't silently show an empty page. */
+export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, procurement = {}, merchantBySku = null, preset = 'balanced', windowDays = 90, activeOnly = true } = {}) {
+  const hasInventory = Object.keys(inventoryMap).length > 0;
+  const activeSet = hasInventory && activeOnly
+    ? new Set(Object.keys(inventoryMap).map(k => k.trim().toUpperCase()))
+    : null;
   const now = new Date();
   const windowStart = new Date(now.getTime() - windowDays * 86400000);
   const cutoff30    = new Date(now.getTime() - 30 * 86400000);
@@ -77,6 +86,32 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
   let multiItemOrders = 0;
   let firstOrderDate = null;
 
+  /* Seed skuMap from active inventory so ACTIVE SKUs that had zero orders
+     in the window still appear (zero-sale SKUs are real signal — they're
+     either dead stock, new listings, or the feed is broken). */
+  if (hasInventory && activeOnly) {
+    for (const [rawSku, inv] of Object.entries(inventoryMap)) {
+      const sku = rawSku.trim().toUpperCase();
+      if (!sku) continue;
+      skuMap[sku] = {
+        sku,
+        name: inv.title || sku,
+        image: inv.image || '',
+        collection: inv.collectionLabel || inv.productType || '',
+        stock: inv.stock ?? null,
+        price: inv.price ?? 0,
+        shopifyProductId: inv.productId || null,
+        handle: inv.handle || null,
+        revenueWindow: 0, revenue30d: 0, revenue14d: 0,
+        unitsWindow: 0,   units30d: 0,   units14d: 0,
+        ordersWindow: 0,  orders30d: 0,
+        newOrders: 0,     repeatOrders: 0,
+        soloOrders: 0,    bundleOrders: 0,
+        firstSeen: null,  lastSeen: null,
+      };
+    }
+  }
+
   for (const o of orders) {
     const date = new Date(o.created_at || o.processed_at || 0);
     if (isNaN(date) || date < windowStart) continue;
@@ -95,6 +130,9 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
     const seenSkus = new Set();
     for (const item of items) {
       const sku = (item.sku || '').trim().toUpperCase() || `pid_${item.product_id || 'unk'}`;
+      // Drop archived/deleted-product SKUs when we have an active-inventory
+      // view. Avoids showing rows that can't be acted on.
+      if (activeSet && !activeSet.has(sku)) continue;
       const qty = item.quantity || 1;
       const gross = p(item.price) * qty;
       const iDisc = p(item.total_discount);
@@ -107,6 +145,8 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
           name: inv.title || item.title || sku,
           image: inv.image || '',
           collection: inv.collectionLabel || inv.productType || '',
+          // Exact stock from Shopify inventory_levels (summed across active
+          // locations server-side). Never fall back to order-derived stock.
           stock: inv.stock ?? null,
           price: inv.price ?? p(item.price),
           shopifyProductId: inv.productId || item.product_id || null,
@@ -124,8 +164,8 @@ export function buildStarProducts({ orders = [], inventoryMap = {}, plan = {}, p
       s.unitsWindow   += qty;
       if (within30) { s.revenue30d += net; s.units30d += qty; }
       if (within14) { s.revenue14d += net; s.units14d += qty; }
-      if (date < s.firstSeen) s.firstSeen = date;
-      if (date > s.lastSeen)  s.lastSeen  = date;
+      if (s.firstSeen == null || date < s.firstSeen) s.firstSeen = date;
+      if (s.lastSeen  == null || date > s.lastSeen)  s.lastSeen  = date;
       if (!seenSkus.has(sku)) { uSkus.push(sku); seenSkus.add(sku); }
     }
 
