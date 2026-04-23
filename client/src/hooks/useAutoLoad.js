@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '../store';
-import { pullAccount, fetchShopifyInventory, fetchShopifyOrders, fetchGoogleAds } from '../lib/api';
+import { pullAccount, fetchShopifyInventory, fetchGoogleAds } from '../lib/api';
 import { normalizeGoogleAdsResponse } from '../lib/googleAdsAnalytics';
 
 /* Every time the app opens, pull Meta (and Shopify + Google Ads) for
@@ -27,7 +27,6 @@ export function useAutoLoad() {
     setBrandMetaData,
     setBrandMetaStatus,
     setBrandInventory,
-    setBrandOrders,
     setBrandGoogleAdsData,
     setBrandGoogleAdsStatus,
   } = useStore();
@@ -74,7 +73,10 @@ export function useAutoLoad() {
       insights30d:       valid.flatMap(r => r.insights30d),
     });
 
-    // Shopify (inventory + 60d orders) — don't block Meta success on this
+    // Shopify INVENTORY only — orders are pulled by runDailyAutoPull
+    // (90-day window, IST-7am gated, retried). Pulling orders here too
+    // produced two parallel SSE streams for the same brand on every
+    // page open.
     const { shop, clientId, clientSecret } = brand.shopify || {};
     if (shop && clientId && clientSecret) {
       try {
@@ -83,16 +85,6 @@ export function useAutoLoad() {
         setBrandInventory(brand.id, inventoryMap, locations, null, skuToItemId, collections);
       } catch (e) {
         console.warn('[AutoLoad] Shopify inventory failed:', brand.name, e.message);
-      }
-
-      try {
-        const now   = new Date();
-        const since = new Date(now - 60 * 86400000).toISOString();
-        const until = now.toISOString();
-        const result = await fetchShopifyOrders(shop, clientId, clientSecret, since, until);
-        setBrandOrders(brand.id, result.orders, '60d');
-      } catch (e) {
-        console.warn('[AutoLoad] Shopify orders failed:', brand.name, e.message);
       }
     }
 
@@ -111,7 +103,7 @@ export function useAutoLoad() {
     }
 
     return true;
-  }, [setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandOrders, setBrandGoogleAdsData, setBrandGoogleAdsStatus]);
+  }, [setBrandMetaData, setBrandMetaStatus, setBrandInventory, setBrandGoogleAdsData, setBrandGoogleAdsStatus]);
 
   /* ── Pull many brands serially, tracking inflight + success state.
      Failed brands stay OUT of successfulBrandIds so they get retried

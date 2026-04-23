@@ -99,15 +99,27 @@ export async function pullBrandOrders90d(brand, setBrandOrders, setBrandOrdersSt
 }
 
 /* ─── run auto-pull for all configured brands ─────────────────────── */
+// Module-level inflight guard so reload mid-pull (or hourly check
+// firing while last pull is still running) can't double-trigger.
+let _autoPullInflight = false;
+
 export async function runDailyAutoPull(brands, setBrandOrders, setBrandOrdersStatus) {
+  if (_autoPullInflight) return;                       // already running
   const configured = (brands || []).filter(b =>
     b.shopify?.shop && b.shopify?.clientId && b.shopify?.clientSecret
   );
   if (!configured.length) return;
 
-  // Fire sequentially to avoid overwhelming the API
-  for (const b of configured) {
-    await pullBrandOrders90d(b, setBrandOrders, setBrandOrdersStatus);
-  }
+  _autoPullInflight = true;
+  // Mark done at the START — if user reloads mid-pull, shouldAutoPull()
+  // returns false so the next mount won't restart from scratch.
   markAutoPullDone();
+
+  try {
+    for (const b of configured) {
+      await pullBrandOrders90d(b, setBrandOrders, setBrandOrdersStatus);
+    }
+  } finally {
+    _autoPullInflight = false;
+  }
 }
