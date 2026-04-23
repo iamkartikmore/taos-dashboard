@@ -104,9 +104,12 @@ export function extractBrandFromName(filename = '', brands = []) {
    Returns a normalized snapshot:
      { reportDate, columns, rows: [{date?, utmSource?, ..., sessions, orders, revenue, ...}] } */
 export function parseUtmReport(text, { filename = '', fallbackDate = null } = {}) {
-  const parsed = parseCsv(text);
-  if (!parsed?.rows?.length) return { rows: [], columns: {}, reportDate: fallbackDate || extractReportDate(filename) };
-  const cols = detectColumns(parsed.headers);
+  // parseCsv returns an array of row-objects keyed by header string.
+  // Headers are therefore the keys of the first row.
+  const parsedRows = parseCsv(text);
+  if (!parsedRows?.length) return { rows: [], columns: {}, reportDate: fallbackDate || extractReportDate(filename), headers: [], rawRowCount: 0, warnings: ['CSV parsed but contained zero data rows.'] };
+  const headers = Object.keys(parsedRows[0] || {});
+  const cols = detectColumns(headers);
 
   const num = v => {
     if (v == null) return 0;
@@ -122,7 +125,7 @@ export function parseUtmReport(text, { filename = '', fallbackDate = null } = {}
   const medCol = cols.utmMedium   || cols.medium;
   const campCol = cols.utmCampaign || cols.campaign;
 
-  const rows = parsed.rows.map(row => {
+  const rows = parsedRows.map(row => {
     const out = {};
     if (cols.date)        out.date        = str(row[cols.date]);
     if (srcCol)           out.utmSource   = str(row[srcCol]);
@@ -165,15 +168,15 @@ export function parseUtmReport(text, { filename = '', fallbackDate = null } = {}
   const warnings = [];
   if (!hasAnyMetric) warnings.push('No metric columns detected (sessions/orders/revenue/clicks/impressions).');
   if (!hasAnyDim)    warnings.push('No dimension columns detected (channel/utm_source/utm_medium/utm_campaign).');
-  if (rows.length === 0 && parsed.rows.length > 0) warnings.push(`${parsed.rows.length} CSV rows parsed but all filtered out — check column mapping below.`);
+  if (rows.length === 0 && parsedRows.length > 0) warnings.push(`${parsedRows.length} CSV rows parsed but all filtered out — check column mapping below.`);
 
   return {
     reportDate: fallbackDate || extractReportDate(filename),
     filename,
     columns: cols,
-    headers: parsed.headers,
-    rawRowCount: parsed.rows.length,
-    sampleRow: parsed.rows[0] || null,
+    headers,
+    rawRowCount: parsedRows.length,
+    sampleRow: parsedRows[0] || null,
     warnings,
     rows,
   };
