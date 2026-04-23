@@ -999,6 +999,43 @@ function BrandCard({ brand, brandInfo }) {
                   )}
                 </div>
               </div>
+
+              {/* ── GOOGLE DRIVE (daily reports folder) ──────────────── */}
+              <div className="space-y-3 xl:col-span-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-widest">
+                  <Upload size={11} /> Google Drive · Daily UTM Reports
+                  {bd.utmSnapshots?.length > 0 && <span className="text-[10px] text-emerald-400 font-normal ml-1">· {bd.utmSnapshots.length} snapshot(s)</span>}
+                </div>
+
+                <div className="text-[11px] text-slate-500 leading-relaxed">
+                  Create a public Google Cloud API key with Drive API enabled, and share your folder as "Anyone with the link — Viewer". Paste both below. Each brand needs its own folder for scalability — reports auto-import on the Daily Reports page.
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="sm:col-span-2">
+                    <label className="text-[10px] text-slate-500 mb-1 block">API Key</label>
+                    <input type="password"
+                      value={brand.drive?.apiKey || ''}
+                      onChange={e => updateBrand(brand.id, { drive: { ...(brand.drive || {}), apiKey: e.target.value.trim() } })}
+                      placeholder="AIzaSy..."
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-cyan-500" />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="text-[10px] text-slate-500 mb-1 block">Folder ID <span className="text-slate-600">(from the share-link URL after /folders/)</span></label>
+                    <input type="text"
+                      value={brand.drive?.folderId || ''}
+                      onChange={e => updateBrand(brand.id, { drive: { ...(brand.drive || {}), folderId: e.target.value.trim() } })}
+                      placeholder="1Aq1-MLal9fuWwGvM6o5J-ix2hCWy38hW"
+                      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs text-gray-100 placeholder-gray-600 focus:outline-none focus:ring-1 focus:ring-cyan-500" />
+                  </div>
+                </div>
+
+                <div className="text-[10px] text-slate-600">
+                  Folder status: {brand.drive?.apiKey && brand.drive?.folderId
+                    ? <span className="text-emerald-400">✓ configured — visit <a href="/daily-reports" className="underline hover:text-emerald-300">Daily Reports</a> to pull</span>
+                    : <span>✗ not configured</span>}
+                </div>
+              </div>
             </div>
 
             {/* ── PULL ALL for this brand ─────────────────────────── */}

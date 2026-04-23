@@ -40,6 +40,7 @@ export function makeBrand(name = 'New Brand', idx = 0) {
     googleAds: { devToken: '', loginCustomerId: '', customerId: '', clientId: '', clientSecret: '', refreshToken: '', merchantId: '' },
     listmonk: { url: '', username: '', password: '', defaultListId: '', fromEmail: '' },
     clarity: { apiToken: '', projectId: '' },
+    drive:   { apiKey: '', folderId: '' },
   };
 }
 
@@ -63,6 +64,7 @@ function loadBrands() {
       else if (u.googleAds.merchantId === undefined) u.googleAds.merchantId = '';
       if (!u.listmonk)  u.listmonk  = { url: '', username: '', password: '', defaultListId: '', fromEmail: '' };
       if (!u.clarity)   u.clarity   = { apiToken: '', projectId: '' };
+      if (!u.drive)     u.drive     = { apiKey: '', folderId: '' };
       return u;
     });
   }
@@ -145,6 +147,7 @@ export const useStore = create((set, get) => {
   const storedInv = lsGet(LS_INV, {});
   const customerCache = lsGet(LS_CUST, {});
   const clarityHistoryAll = lsGet('taos_clarity_history_v1', {});
+  const utmSnapshotsAll   = lsGet('taos_utm_snapshots_v1', {});
   const initialBrandData = {};
   // Also migrate old single-store taos_inventory
   const oldInv = lsGet('taos_inventory', null);
@@ -152,10 +155,12 @@ export const useStore = create((set, get) => {
     const inv = storedInv[b.id] || (i === 0 && oldInv ? oldInv : null);
     const clarityHistory = clarityHistoryAll[b.id] || [];
     const latest = clarityHistory.length ? clarityHistory[clarityHistory.length - 1].snapshot : null;
-    if (inv || clarityHistory.length) {
+    const utmSnapshots = utmSnapshotsAll[b.id] || [];
+    if (inv || clarityHistory.length || utmSnapshots.length) {
       initialBrandData[b.id] = {
         ...(inv ? { inventoryMap: inv, inventoryStatus: 'success' } : {}),
         ...(clarityHistory.length ? { clarityData: latest, clarityHistory, clarityStatus: 'success' } : {}),
+        ...(utmSnapshots.length ? { utmSnapshots } : {}),
       };
     }
   });
@@ -506,6 +511,38 @@ export const useStore = create((set, get) => {
     setBrandMerchantStatus: (brandId, status, error = null) => {
       const brandData = { ...get().brandData, [brandId]: { ...(get().brandData[brandId] || {}), merchantStatus: status, merchantError: error } };
       set({ brandData });
+    },
+
+    /* UTM / daily reports — per-brand snapshot array keyed by date.
+       Stored in localStorage so WoW / MoM comparisons survive reloads.
+       Latest snapshot overwrites if the same reportDate is re-imported. */
+    upsertBrandUtmReport: (brandId, snapshot) => {
+      if (!brandId || !snapshot?.reportDate) return;
+      const cur = get().brandData[brandId] || {};
+      const existing = cur.utmSnapshots || [];
+      const filtered = existing.filter(s => s.reportDate !== snapshot.reportDate);
+      const next = [...filtered, snapshot].sort((a, b) => a.reportDate.localeCompare(b.reportDate)).slice(-120);
+      const brandData = { ...get().brandData, [brandId]: { ...cur, utmSnapshots: next, utmLastImport: Date.now() } };
+      set({ brandData });
+      try {
+        const LS_KEY = 'taos_utm_snapshots_v1';
+        const all = lsGet(LS_KEY, {});
+        all[brandId] = next;
+        lsSet(LS_KEY, all);
+      } catch { /* quota */ }
+    },
+
+    removeBrandUtmSnapshot: (brandId, reportDate) => {
+      const cur = get().brandData[brandId] || {};
+      const next = (cur.utmSnapshots || []).filter(s => s.reportDate !== reportDate);
+      const brandData = { ...get().brandData, [brandId]: { ...cur, utmSnapshots: next } };
+      set({ brandData });
+      try {
+        const LS_KEY = 'taos_utm_snapshots_v1';
+        const all = lsGet(LS_KEY, {});
+        all[brandId] = next;
+        lsSet(LS_KEY, all);
+      } catch { /* quota */ }
     },
 
     /* Microsoft Clarity — stores current snapshot + rolling history of

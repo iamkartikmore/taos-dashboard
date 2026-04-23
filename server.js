@@ -1081,6 +1081,61 @@ app.post('/api/google-merchant/pull', async (req, res) => {
   }
 });
 
+/* ─── GOOGLE DRIVE PULL (public folder + API key) ──────────────────
+   Pull daily UTM / marketing reports from a Drive folder shared
+   publicly via link. User provides:
+     - apiKey   : Google Cloud API key with Drive API enabled
+     - folderId : the share-link folder ID
+
+   The folder must be accessible to "anyone with the link" — that's
+   what lets a plain API key read it (no OAuth needed). Each brand
+   gets its own sub-folder so reports stay cleanly separated. */
+
+const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
+
+// POST /api/drive/list — list CSV files in a folder
+app.post('/api/drive/list', async (req, res) => {
+  const { apiKey, folderId } = req.body;
+  if (!apiKey || !folderId) return res.status(400).json({ error: 'apiKey and folderId required' });
+  try {
+    const q = `'${folderId}' in parents and trashed = false`;
+    const params = new URLSearchParams({
+      q,
+      key: apiKey,
+      fields: 'files(id,name,mimeType,size,createdTime,modifiedTime)',
+      orderBy: 'modifiedTime desc',
+      pageSize: '100',
+      supportsAllDrives: 'true',
+      includeItemsFromAllDrives: 'true',
+    });
+    const r = await axios.get(`${DRIVE_BASE}/files?${params.toString()}`, { timeout: 20000 });
+    const files = (r.data.files || []).filter(f =>
+      (f.mimeType || '').includes('csv')
+      || (f.name || '').toLowerCase().endsWith('.csv')
+    );
+    res.json({ files });
+  } catch (err) {
+    const msg = err.response?.data?.error?.message || err.message;
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: msg });
+  }
+});
+
+// POST /api/drive/download — fetch a file's contents by id
+app.post('/api/drive/download', async (req, res) => {
+  const { apiKey, fileId } = req.body;
+  if (!apiKey || !fileId) return res.status(400).json({ error: 'apiKey and fileId required' });
+  try {
+    const url = `${DRIVE_BASE}/files/${fileId}?alt=media&key=${apiKey}`;
+    const r = await axios.get(url, { timeout: 60000, responseType: 'text', transformResponse: [v => v] });
+    res.type('text/plain').send(r.data);
+  } catch (err) {
+    const msg = err.response?.data?.error?.message || err.response?.statusText || err.message;
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: msg });
+  }
+});
+
 /* ─── MICROSOFT CLARITY (Data Export API) ──────────────────────────
    Clarity gives us behavioral "why" data (rage clicks, dead clicks,
    quick-backs, scroll depth) that pairs with our "what" data (Google

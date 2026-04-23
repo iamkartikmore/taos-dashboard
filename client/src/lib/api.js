@@ -381,6 +381,32 @@ export async function fetchPmaxSearchTerms(creds, campaignIds, datePreset = 'las
   return json.rows || [];
 }
 
+/* ─── GOOGLE DRIVE ────────────────────────────────────────────────── */
+
+export async function listDriveFiles(apiKey, folderId) {
+  const res = await fetch('/api/drive/list', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey, folderId }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'Drive list failed');
+  return json.files || [];
+}
+
+export async function downloadDriveFile(apiKey, fileId) {
+  const res = await fetch('/api/drive/download', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey, fileId }),
+  });
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(json.error || 'Drive download failed');
+  }
+  return res.text();
+}
+
 /* ─── MANUAL LABELS / NOTES SYNC ───────────────────────────────────── */
 
 export async function fetchManualMap() {
