@@ -17,45 +17,57 @@
 import { parseCsv } from './csvImport';
 
 /* ─── COLUMN DETECTION ─────────────────────────────────────────────
-   Map of canonical field name → array of header patterns to match.
-   Header is normalized (lowercase, no non-alnum) then substring-
-   checked. First match wins. */
+   Substring-match header names (normalized lowercase-alphanumeric)
+   against canonical field patterns. First match wins per canonical. */
 const COLUMN_PATTERNS = {
-  // Dimensions
-  date:         ['date', 'day', 'reportdate', 'reportday'],
-  utmSource:    ['utmsource', 'source'],
-  utmMedium:    ['utmmedium', 'medium'],
-  utmCampaign:  ['utmcampaign', 'campaign'],
+  // Dimensions — order matters: more specific first
+  date:         ['reportdate', 'reportday', 'day', 'date'],
+  utmSource:    ['utmsource', 'marketingsource'],
+  utmMedium:    ['utmmedium', 'marketingmedium'],
+  utmCampaign:  ['utmcampaign', 'marketingcampaign'],
   utmContent:   ['utmcontent'],
   utmTerm:      ['utmterm'],
-  channel:      ['marketingchannel', 'channelgroup', 'channel', 'defaultchannelgroup'],
-  landingPage:  ['landingpage', 'landingpath'],
-  referrer:     ['referrer', 'referringsite'],
+  channel:      ['marketingchannel', 'channelgroup', 'defaultchannelgroup', 'channelgrouping', 'channel'],
+  source:       ['source'],            // fallback when utm_source not explicit
+  medium:       ['medium'],            // fallback when utm_medium not explicit
+  campaign:     ['campaign'],          // fallback when utm_campaign not explicit
+  referrer:     ['referrer', 'referringsite', 'referringurl'],
+  landingPage:  ['landingpage', 'landingpath', 'entrancepage'],
   country:      ['country', 'countrycode'],
   device:       ['device', 'devicecategory'],
-  // Metrics
-  sessions:     ['sessions', 'visits', 'onlinestoresessions'],
-  users:        ['users', 'uniquesvisitors', 'uniquevisitors'],
-  orders:       ['orders', 'purchases', 'transactions'],
-  revenue:      ['totalsales', 'netsales', 'grosssales', 'sales', 'revenue', 'purchasevalue'],
-  conversions:  ['conversions', 'totalconversions'],
-  clicks:       ['clicks'],
-  impressions:  ['impressions'],
-  cost:         ['cost', 'spend', 'adspend'],
-  bounceRate:   ['bouncerate'],
-  avgSession:   ['avgsessionduration', 'averagesessionduration'],
+  // Metrics — also order-sensitive; prefer explicit column names
+  sessions:        ['onlinestoresessions', 'sessions', 'visits', 'sessioncount'],
+  users:           ['uniquevisitors', 'uniquesvisitors', 'users', 'uniqueusers'],
+  orders:          ['orderplaced', 'orderscompleted', 'orderstotal', 'totalorders', 'ordercount', 'purchases', 'transactions', 'orders'],
+  revenue:         ['totalsales', 'netsales', 'grosssales', 'purchasevalue', 'revenue', 'sales', 'totalrevenue'],
+  checkoutInitiated: ['checkoutinitiated', 'initiatecheckout', 'checkoutstarted', 'addtocart', 'atc', 'addedtocart'],
+  conversionRate:  ['conversionrate', 'cvr', 'conversion', 'conversions', 'totalconversions'],
+  clicks:          ['clicks', 'totalclicks'],
+  impressions:     ['impressions', 'totalimpressions'],
+  cost:            ['adspend', 'spend', 'cost'],
 };
 
-const normKey = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const normKey = s => String(s || '').toLowerCase().replace(/^﻿/, '').replace(/[^a-z0-9]/g, '');
 
 function detectColumns(headers = []) {
   const found = {};
+  const taken = new Set(); // each header maps to at most one canonical
   const normHeaders = headers.map(h => ({ raw: h, norm: normKey(h) }));
+  // Two-pass: first prefer exact matches (most confident), then substring
   for (const [canon, patterns] of Object.entries(COLUMN_PATTERNS)) {
     for (const h of normHeaders) {
-      if (patterns.some(p => h.norm === p || h.norm.includes(p))) {
-        found[canon] = h.raw;
-        break;
+      if (taken.has(h.raw)) continue;
+      if (patterns.some(p => h.norm === p)) {
+        found[canon] = h.raw; taken.add(h.raw); break;
+      }
+    }
+  }
+  for (const [canon, patterns] of Object.entries(COLUMN_PATTERNS)) {
+    if (found[canon]) continue;
+    for (const h of normHeaders) {
+      if (taken.has(h.raw)) continue;
+      if (patterns.some(p => h.norm.includes(p))) {
+        found[canon] = h.raw; taken.add(h.raw); break;
       }
     }
   }
@@ -104,42 +116,65 @@ export function parseUtmReport(text, { filename = '', fallbackDate = null } = {}
   };
   const str = v => (v == null ? '' : String(v).trim());
 
+  // Source/medium/campaign fallbacks: if no explicit utm_* column was
+  // found, use the plain source/medium/campaign columns.
+  const srcCol = cols.utmSource   || cols.source;
+  const medCol = cols.utmMedium   || cols.medium;
+  const campCol = cols.utmCampaign || cols.campaign;
+
   const rows = parsed.rows.map(row => {
     const out = {};
     if (cols.date)        out.date        = str(row[cols.date]);
-    if (cols.utmSource)   out.utmSource   = str(row[cols.utmSource]);
-    if (cols.utmMedium)   out.utmMedium   = str(row[cols.utmMedium]);
-    if (cols.utmCampaign) out.utmCampaign = str(row[cols.utmCampaign]);
+    if (srcCol)           out.utmSource   = str(row[srcCol]);
+    if (medCol)           out.utmMedium   = str(row[medCol]);
+    if (campCol)          out.utmCampaign = str(row[campCol]);
     if (cols.utmContent)  out.utmContent  = str(row[cols.utmContent]);
     if (cols.utmTerm)     out.utmTerm     = str(row[cols.utmTerm]);
     if (cols.channel)     out.channel     = str(row[cols.channel]);
     if (cols.landingPage) out.landingPage = str(row[cols.landingPage]);
     if (cols.device)      out.device      = str(row[cols.device]);
     if (cols.country)     out.country     = str(row[cols.country]);
+    if (cols.referrer)    out.referrer    = str(row[cols.referrer]);
 
-    // Build a synthetic "channel key" when no explicit channel exists —
-    // utm_source/utm_medium is the lingua franca. Fallback: "(direct)".
     const channelKey = out.channel
       || [out.utmSource, out.utmMedium].filter(Boolean).join(' / ')
+      || out.referrer
       || '(direct / none)';
     out.channelKey = channelKey;
 
-    if (cols.sessions)    out.sessions    = num(row[cols.sessions]);
-    if (cols.users)       out.users       = num(row[cols.users]);
-    if (cols.orders)      out.orders      = num(row[cols.orders]);
-    if (cols.revenue)     out.revenue     = num(row[cols.revenue]);
-    if (cols.conversions) out.conversions = num(row[cols.conversions]);
-    if (cols.clicks)      out.clicks      = num(row[cols.clicks]);
-    if (cols.impressions) out.impressions = num(row[cols.impressions]);
-    if (cols.cost)        out.cost        = num(row[cols.cost]);
+    if (cols.sessions)          out.sessions          = num(row[cols.sessions]);
+    if (cols.users)             out.users             = num(row[cols.users]);
+    if (cols.orders)            out.orders            = num(row[cols.orders]);
+    if (cols.revenue)           out.revenue           = num(row[cols.revenue]);
+    if (cols.checkoutInitiated) out.checkoutInitiated = num(row[cols.checkoutInitiated]);
+    if (cols.conversionRate)    out.conversionRate    = num(row[cols.conversionRate]);
+    if (cols.clicks)            out.clicks            = num(row[cols.clicks]);
+    if (cols.impressions)       out.impressions       = num(row[cols.impressions]);
+    if (cols.cost)              out.cost              = num(row[cols.cost]);
     return out;
-  }).filter(r => r.channelKey && (r.sessions > 0 || r.orders > 0 || r.revenue > 0 || r.impressions > 0));
+  }).filter(r => {
+    // Keep rows with ANY signal — dimension OR metric.
+    if (r.sessions > 0 || r.orders > 0 || r.revenue > 0 || r.clicks > 0 || r.impressions > 0 || r.checkoutInitiated > 0) return true;
+    if (r.channelKey && r.channelKey !== '(direct / none)') return true;
+    return false;
+  });
+
+  // Detect parse problems so the UI can flag them
+  const hasAnyMetric = !!(cols.sessions || cols.orders || cols.revenue || cols.clicks || cols.impressions || cols.checkoutInitiated);
+  const hasAnyDim    = !!(cols.channel || srcCol || medCol || campCol || cols.referrer);
+  const warnings = [];
+  if (!hasAnyMetric) warnings.push('No metric columns detected (sessions/orders/revenue/clicks/impressions).');
+  if (!hasAnyDim)    warnings.push('No dimension columns detected (channel/utm_source/utm_medium/utm_campaign).');
+  if (rows.length === 0 && parsed.rows.length > 0) warnings.push(`${parsed.rows.length} CSV rows parsed but all filtered out — check column mapping below.`);
 
   return {
     reportDate: fallbackDate || extractReportDate(filename),
     filename,
     columns: cols,
     headers: parsed.headers,
+    rawRowCount: parsed.rows.length,
+    sampleRow: parsed.rows[0] || null,
+    warnings,
     rows,
   };
 }
@@ -155,14 +190,22 @@ export function aggregateByChannel(snapshot) {
       utmSource: r.utmSource || '',
       utmMedium: r.utmMedium || '',
       sessions: 0, orders: 0, revenue: 0, cost: 0, clicks: 0, impressions: 0,
+      checkoutInitiated: 0,
     };
-    cur.sessions    += r.sessions || 0;
-    cur.orders      += r.orders || 0;
-    cur.revenue     += r.revenue || 0;
-    cur.cost        += r.cost || 0;
-    cur.clicks      += r.clicks || 0;
-    cur.impressions += r.impressions || 0;
+    cur.sessions          += r.sessions || 0;
+    cur.orders            += r.orders || 0;
+    cur.revenue           += r.revenue || 0;
+    cur.cost              += r.cost || 0;
+    cur.clicks            += r.clicks || 0;
+    cur.impressions       += r.impressions || 0;
+    cur.checkoutInitiated += r.checkoutInitiated || 0;
     map.set(key, cur);
+  }
+  // Derive per-channel CVR now (after all rows aggregated)
+  for (const v of map.values()) {
+    v.cvr = v.checkoutInitiated > 0 ? v.orders / v.checkoutInitiated
+          : v.sessions > 0          ? v.orders / v.sessions
+          : 0;
   }
   return map;
 }
@@ -183,6 +226,8 @@ export function compareSnapshots(current, prior) {
     const pSess = p?.sessions || 0;
     const cOrd = c?.orders || 0;
     const pOrd = p?.orders || 0;
+    const cCi  = c?.checkoutInitiated || 0;
+    const pCi  = p?.checkoutInitiated || 0;
     rows.push({
       channel: key,
       utmSource: (c || p)?.utmSource || '',
@@ -190,15 +235,20 @@ export function compareSnapshots(current, prior) {
       sessions: cSess, sessionsPrior: pSess, sessionsDelta: cSess - pSess, sessionsDeltaPct: pSess ? (cSess - pSess) / pSess : null,
       orders:   cOrd,  ordersPrior:   pOrd,  ordersDelta:   cOrd - pOrd,  ordersDeltaPct:   pOrd ? (cOrd - pOrd) / pOrd : null,
       revenue:  cRev,  revenuePrior:  pRev,  revenueDelta:  cRev - pRev,  revenueDeltaPct:  pRev ? (cRev - pRev) / pRev : null,
+      checkoutInitiated:      cCi,
+      checkoutInitiatedPrior: pCi,
+      checkoutInitiatedDelta: cCi - pCi,
+      checkoutInitiatedDeltaPct: pCi ? (cCi - pCi) / pCi : null,
       isNew:      !!(c && !p),
       isGone:     !!(p && !c),
-      cvr:        cSess > 0 ? cOrd / cSess : 0,
-      cvrPrior:   pSess > 0 ? pOrd / pSess : 0,
+      cvr:        cCi > 0 ? cOrd / cCi : cSess > 0 ? cOrd / cSess : 0,
+      cvrPrior:   pCi > 0 ? pOrd / pCi : pSess > 0 ? pOrd / pSess : 0,
       aov:        cOrd > 0 ? cRev / cOrd : 0,
       aovPrior:   pOrd > 0 ? pRev / pOrd : 0,
     });
   }
-  return rows.sort((a, b) => b.revenue - a.revenue);
+  // Rank by best-available volume metric (revenue when present, else orders, else checkouts)
+  return rows.sort((a, b) => (b.revenue - a.revenue) || (b.orders - a.orders) || (b.checkoutInitiated - a.checkoutInitiated));
 }
 
 /* ─── CLASSIFY CHANNELS ────────────────────────────────────────
@@ -210,7 +260,7 @@ export function compareSnapshots(current, prior) {
      fading:      channels disappearing,
      stable:      flat within ±10%,
    } */
-export function classifyChannels(compared = [], { minSessions = 50 } = {}) {
+export function classifyChannels(compared = [], { minSessions = 50, minOrders = 1, minCheckouts = 3 } = {}) {
   const distressed = [];
   const opportunity = [];
   const emerging = [];
@@ -218,27 +268,32 @@ export function classifyChannels(compared = [], { minSessions = 50 } = {}) {
   const stable = [];
 
   for (const r of compared) {
-    const hasVolume = (r.sessions >= minSessions || r.sessionsPrior >= minSessions || r.revenue > 500 || r.revenuePrior > 500);
-    if (r.isNew && r.sessions >= 10) { emerging.push(r); continue; }
-    if (r.isGone && r.sessionsPrior >= 20) { fading.push(r); continue; }
+    const maxVol      = Math.max(r.sessions, r.sessionsPrior, r.checkoutInitiated, r.checkoutInitiatedPrior, r.orders * 10, r.ordersPrior * 10);
+    const hasVolume =
+      r.sessions >= minSessions || r.sessionsPrior >= minSessions ||
+      r.revenue > 500            || r.revenuePrior > 500 ||
+      r.checkoutInitiated >= minCheckouts || r.checkoutInitiatedPrior >= minCheckouts ||
+      r.orders >= minOrders      || r.ordersPrior >= minOrders;
+    if (r.isNew && (r.sessions >= 10 || r.checkoutInitiated >= 1 || r.orders >= 1)) { emerging.push(r); continue; }
+    if (r.isGone && (r.sessionsPrior >= 20 || r.checkoutInitiatedPrior >= 2 || r.ordersPrior >= 1)) { fading.push(r); continue; }
     if (!hasVolume) continue;
 
-    // Distressed: revenue or sessions down >25% with prior volume
-    const revDropPct = r.revenueDeltaPct;
-    const sessDropPct = r.sessionsDeltaPct;
-    if ((revDropPct != null && revDropPct <= -0.25) || (sessDropPct != null && sessDropPct <= -0.30)) {
-      r.severity = revDropPct <= -0.5 ? 'critical' : revDropPct <= -0.35 ? 'high' : 'medium';
-      r.reason = revDropPct != null && revDropPct <= -0.25
-        ? `Revenue ${(revDropPct * 100).toFixed(0)}% DoD`
-        : `Sessions ${(sessDropPct * 100).toFixed(0)}% DoD`;
+    // Pick the best-available delta to evaluate: revenue > orders > checkouts > sessions
+    const revPct = r.revenueDeltaPct;
+    const ordPct = r.ordersDeltaPct;
+    const ciPct  = r.checkoutInitiatedDeltaPct;
+    const sessPct = r.sessionsDeltaPct;
+    const primary = revPct ?? ordPct ?? ciPct ?? sessPct;
+    const primaryMetric = revPct != null ? 'Revenue' : ordPct != null ? 'Orders' : ciPct != null ? 'Checkouts' : 'Sessions';
+
+    if (primary != null && primary <= -0.25) {
+      r.severity = primary <= -0.5 ? 'critical' : primary <= -0.35 ? 'high' : 'medium';
+      r.reason = `${primaryMetric} ${(primary * 100).toFixed(0)}% DoD`;
       distressed.push(r);
       continue;
     }
-    // Opportunity: revenue up >25% or sessions up >50% with scale
-    if ((revDropPct != null && revDropPct >= 0.25) || (sessDropPct != null && sessDropPct >= 0.50)) {
-      r.reason = revDropPct != null && revDropPct >= 0.25
-        ? `Revenue +${(revDropPct * 100).toFixed(0)}% DoD`
-        : `Sessions +${(sessDropPct * 100).toFixed(0)}% DoD`;
+    if (primary != null && primary >= 0.25) {
+      r.reason = `${primaryMetric} +${(primary * 100).toFixed(0)}% DoD`;
       opportunity.push(r);
       continue;
     }
@@ -304,19 +359,38 @@ export function analyzeReports(snapshots = []) {
   const latestAgg = aggregateByChannel(latest);
   const compared = prior ? compareSnapshots(latest, prior) : [...latestAgg.values()].map(r => ({ ...r, sessionsPrior: 0, ordersPrior: 0, revenuePrior: 0, isNew: false, isGone: false }));
   const classified = classifyChannels(compared);
-  const trends = channelTrends(sorted.slice(-14), { metric: 'revenue' });
+  // Pick whichever metric has real volume for trending
+  const totalsProbe = { revenue: 0, orders: 0, checkoutInitiated: 0 };
+  for (const snap of sorted) {
+    for (const r of (snap.rows || [])) {
+      totalsProbe.revenue           += r.revenue || 0;
+      totalsProbe.orders            += r.orders || 0;
+      totalsProbe.checkoutInitiated += r.checkoutInitiated || 0;
+    }
+  }
+  const trendMetric = totalsProbe.revenue > 0 ? 'revenue'
+                    : totalsProbe.orders  > 0 ? 'orders'
+                    : totalsProbe.checkoutInitiated > 0 ? 'checkoutInitiated'
+                    : 'sessions';
+  const trends = channelTrends(sorted.slice(-14), { metric: trendMetric });
 
   // Dataset totals
-  const totals = { sessions: 0, orders: 0, revenue: 0 };
+  const totals = { sessions: 0, orders: 0, revenue: 0, checkoutInitiated: 0 };
   for (const r of latestAgg.values()) {
-    totals.sessions += r.sessions || 0;
-    totals.orders   += r.orders || 0;
-    totals.revenue  += r.revenue || 0;
+    totals.sessions          += r.sessions || 0;
+    totals.orders            += r.orders || 0;
+    totals.revenue           += r.revenue || 0;
+    totals.checkoutInitiated += r.checkoutInitiated || 0;
   }
   const priorTotals = prior ? (() => {
     const p = aggregateByChannel(prior);
-    const t = { sessions: 0, orders: 0, revenue: 0 };
-    for (const r of p.values()) { t.sessions += r.sessions; t.orders += r.orders; t.revenue += r.revenue; }
+    const t = { sessions: 0, orders: 0, revenue: 0, checkoutInitiated: 0 };
+    for (const r of p.values()) {
+      t.sessions += r.sessions;
+      t.orders += r.orders;
+      t.revenue += r.revenue;
+      t.checkoutInitiated += r.checkoutInitiated || 0;
+    }
     return t;
   })() : null;
 
@@ -327,15 +401,18 @@ export function analyzeReports(snapshots = []) {
     compared,
     classified,
     trends,
+    trendMetric,
     totals,
     priorTotals,
     totalsDelta: priorTotals ? {
       sessions: totals.sessions - priorTotals.sessions,
       orders:   totals.orders   - priorTotals.orders,
       revenue:  totals.revenue  - priorTotals.revenue,
-      sessionsPct: priorTotals.sessions ? (totals.sessions - priorTotals.sessions) / priorTotals.sessions : null,
-      ordersPct:   priorTotals.orders   ? (totals.orders   - priorTotals.orders)   / priorTotals.orders   : null,
-      revenuePct:  priorTotals.revenue  ? (totals.revenue  - priorTotals.revenue)  / priorTotals.revenue  : null,
+      checkoutInitiated: totals.checkoutInitiated - priorTotals.checkoutInitiated,
+      sessionsPct:          priorTotals.sessions          ? (totals.sessions - priorTotals.sessions) / priorTotals.sessions : null,
+      ordersPct:            priorTotals.orders            ? (totals.orders   - priorTotals.orders)   / priorTotals.orders   : null,
+      revenuePct:           priorTotals.revenue           ? (totals.revenue  - priorTotals.revenue)  / priorTotals.revenue  : null,
+      checkoutInitiatedPct: priorTotals.checkoutInitiated ? (totals.checkoutInitiated - priorTotals.checkoutInitiated) / priorTotals.checkoutInitiated : null,
     } : null,
   };
 }

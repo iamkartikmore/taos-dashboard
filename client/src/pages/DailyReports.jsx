@@ -57,6 +57,15 @@ function ChannelRow({ row, mode }) {
                     : row.severity === 'critical' ? 'bg-red-900/40 text-red-300'
                     : row.severity === 'high' ? 'bg-orange-900/40 text-orange-300'
                     : 'bg-amber-900/40 text-amber-300';
+  // Primary metric: revenue if present, else checkouts, else orders
+  const primary = row.revenue > 0 ? `${cur(row.revenue)} · ${row.orders} orders`
+                 : row.checkoutInitiated > 0 ? `${row.checkoutInitiated} checkouts · ${row.orders} orders`
+                 : `${row.orders} orders`;
+  const priorDisplay = mode === 'emerging' || mode === 'fading' ? null
+                     : row.revenuePrior > 0 ? `was ${cur(row.revenuePrior)}`
+                     : row.checkoutInitiatedPrior > 0 ? `was ${row.checkoutInitiatedPrior} checkouts`
+                     : row.ordersPrior > 0 ? `was ${row.ordersPrior} orders`
+                     : null;
   return (
     <div className="flex items-center gap-3 py-2 px-3 rounded-lg bg-gray-950/40 border border-gray-800/30">
       <div className="flex-1 min-w-0">
@@ -64,10 +73,8 @@ function ChannelRow({ row, mode }) {
         {row.reason && <div className="text-[11px] text-slate-500 mt-0.5">{row.reason}</div>}
       </div>
       <div className="text-right text-[11px] text-slate-400">
-        <div>{cur(row.revenue)} <span className="text-slate-600">/ {row.orders} orders</span></div>
-        {mode !== 'emerging' && mode !== 'fading' && row.revenuePrior != null && (
-          <div className="text-[10px] text-slate-600">was {cur(row.revenuePrior)}</div>
-        )}
+        <div>{primary}</div>
+        {priorDisplay && <div className="text-[10px] text-slate-600">{priorDisplay}</div>}
       </div>
       {badge && (
         <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase tracking-wider font-semibold ${badgeClass}`}>{badge}</span>
@@ -154,19 +161,23 @@ export default function DailyReports() {
 
   const analysis = useMemo(() => analyzeReports(snapshots), [snapshots]);
 
-  /* Trend chart data: newest 14 days, total revenue per day */
+  /* Trend chart data: newest 14 days, sums per day across all channels */
   const trendData = useMemo(() => {
     if (!snapshots.length) return [];
     return snapshots.slice(-14).map(s => {
       const totals = (s.rows || []).reduce((a, r) => {
-        a.revenue  += r.revenue || 0;
-        a.sessions += r.sessions || 0;
-        a.orders   += r.orders || 0;
+        a.revenue            += r.revenue || 0;
+        a.sessions           += r.sessions || 0;
+        a.orders             += r.orders || 0;
+        a.checkoutInitiated  += r.checkoutInitiated || 0;
         return a;
-      }, { revenue: 0, sessions: 0, orders: 0 });
+      }, { revenue: 0, sessions: 0, orders: 0, checkoutInitiated: 0 });
       return { date: s.reportDate.slice(5), ...totals };
     });
   }, [snapshots]);
+  const trendHasRevenue  = trendData.some(d => d.revenue > 0);
+  const trendHasSessions = trendData.some(d => d.sessions > 0);
+  const trendHasCheckouts = trendData.some(d => d.checkoutInitiated > 0);
 
   if (!bBrands.length) {
     return (
@@ -237,25 +248,82 @@ export default function DailyReports() {
       {/* Analysis */}
       {analysis && (
         <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="space-y-5">
-          {/* Totals KPIs */}
+          {/* Parser diagnostics — only when the latest snapshot has warnings */}
+          {analysis.latest?.warnings?.length > 0 && (
+            <div className="px-4 py-4 rounded-xl border border-amber-800/40 bg-amber-900/20 text-xs text-amber-200 space-y-3">
+              <div className="flex items-center gap-2 font-semibold">
+                <AlertTriangle size={14} /> Parser couldn't fully recognize your CSV columns
+              </div>
+              <ul className="list-disc ml-5 space-y-0.5 text-amber-200/80">
+                {analysis.latest.warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                <div>
+                  <div className="text-[10px] text-amber-400 uppercase tracking-wider mb-1">Raw headers in the CSV</div>
+                  <div className="flex flex-wrap gap-1">
+                    {(analysis.latest.headers || []).map((h, i) => (
+                      <code key={i} className="text-[10px] px-1.5 py-0.5 rounded bg-gray-900/80 text-slate-300 font-mono">{h}</code>
+                    ))}
+                    {!analysis.latest.headers?.length && <span className="italic text-amber-200/60">(none)</span>}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-amber-400 uppercase tracking-wider mb-1">Detected column mapping</div>
+                  <div className="space-y-0.5 text-[11px]">
+                    {Object.entries(analysis.latest.columns || {}).length === 0 && <span className="italic text-amber-200/60">(no patterns matched — parser needs tuning)</span>}
+                    {Object.entries(analysis.latest.columns || {}).map(([k, v]) => (
+                      <div key={k} className="font-mono"><span className="text-amber-300">{k}</span> <span className="text-slate-500">←</span> <span className="text-slate-300">{v}</span></div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              {analysis.latest.sampleRow && (
+                <details className="text-[11px]">
+                  <summary className="cursor-pointer text-amber-300 hover:text-amber-100">Show first data row (for tuning)</summary>
+                  <pre className="mt-2 p-2 rounded bg-gray-900 text-slate-300 overflow-auto max-h-48 text-[10px]">
+                    {JSON.stringify(analysis.latest.sampleRow, null, 2)}
+                  </pre>
+                </details>
+              )}
+              <div className="text-[11px] text-amber-200/70">
+                Paste the headers above into chat and I'll tune the column patterns so your exact CSV format parses correctly.
+              </div>
+            </div>
+          )}
+
+          {/* Totals KPIs — adapt to which metrics the CSV actually has */}
           <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
-            <KPI label={`Revenue · ${analysis.latest.reportDate}`} value={cur(analysis.totals.revenue)}
-              sub={analysis.prior ? `was ${cur(analysis.priorTotals.revenue)}` : '(first snapshot)'}
-              delta={analysis.totalsDelta?.revenuePct} color="#22c55e" />
+            {analysis.totals.revenue > 0 ? (
+              <KPI label={`Revenue · ${analysis.latest.reportDate}`} value={cur(analysis.totals.revenue)}
+                sub={analysis.prior ? `was ${cur(analysis.priorTotals.revenue)}` : '(first snapshot)'}
+                delta={analysis.totalsDelta?.revenuePct} color="#22c55e" />
+            ) : (
+              <KPI label={`Checkouts · ${analysis.latest.reportDate}`} value={num(analysis.totals.checkoutInitiated)}
+                sub={analysis.prior ? `was ${num(analysis.priorTotals.checkoutInitiated)}` : '(first snapshot)'}
+                delta={analysis.totalsDelta?.checkoutInitiatedPct} color="#22c55e" />
+            )}
             <KPI label="Orders" value={num(analysis.totals.orders)}
               sub={analysis.prior ? `was ${num(analysis.priorTotals.orders)}` : ''}
               delta={analysis.totalsDelta?.ordersPct} color="#f59e0b" />
-            <KPI label="Sessions" value={num(analysis.totals.sessions)}
-              sub={analysis.prior ? `was ${num(analysis.priorTotals.sessions)}` : ''}
-              delta={analysis.totalsDelta?.sessionsPct} color="#06b6d4" />
+            {analysis.totals.sessions > 0 ? (
+              <KPI label="Sessions" value={num(analysis.totals.sessions)}
+                sub={analysis.prior ? `was ${num(analysis.priorTotals.sessions)}` : ''}
+                delta={analysis.totalsDelta?.sessionsPct} color="#06b6d4" />
+            ) : (
+              <KPI label="CVR (orders / checkouts)"
+                value={analysis.totals.checkoutInitiated > 0 ? `${((analysis.totals.orders / analysis.totals.checkoutInitiated) * 100).toFixed(1)}%` : '—'}
+                sub={analysis.prior && analysis.priorTotals.checkoutInitiated > 0
+                  ? `was ${((analysis.priorTotals.orders / analysis.priorTotals.checkoutInitiated) * 100).toFixed(1)}%`
+                  : ''} color="#06b6d4" />
+            )}
             <KPI label="Channels active"
               value={num(analysis.classified.distressed.length + analysis.classified.opportunity.length + analysis.classified.stable.length + analysis.classified.emerging.length)}
               sub={`${analysis.classified.distressed.length} distressed · ${analysis.classified.opportunity.length} surging`} color="#a78bfa" />
           </div>
 
-          {/* Trend line */}
+          {/* Trend line — adapts to what metrics the data has */}
           {trendData.length >= 2 && (
-            <Card title="14-day revenue + sessions trend">
+            <Card title={`14-day trend · ${[trendHasRevenue && 'revenue', trendHasSessions && 'sessions', trendHasCheckouts && 'checkouts', 'orders'].filter(Boolean).join(' · ')}`}>
               <ResponsiveContainer width="100%" height={220}>
                 <LineChart data={trendData}>
                   <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
@@ -264,9 +332,10 @@ export default function DailyReports() {
                   <YAxis yAxisId="right" orientation="right" tick={{ fill: '#64748b', fontSize: 10 }} />
                   <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #1e293b', fontSize: 11 }} />
                   <Legend wrapperStyle={{ fontSize: 11 }} />
-                  <Line yAxisId="left"  dataKey="revenue"  stroke="#22c55e" strokeWidth={2} dot={{ r: 3 }} />
-                  <Line yAxisId="right" dataKey="sessions" stroke="#06b6d4" strokeWidth={2} dot={{ r: 3 }} />
-                  <Line yAxisId="right" dataKey="orders"   stroke="#f59e0b" strokeWidth={2} dot={{ r: 3 }} />
+                  {trendHasRevenue  && <Line yAxisId="left"  dataKey="revenue"           stroke="#22c55e" strokeWidth={2} dot={{ r: 3 }} />}
+                  {trendHasSessions && <Line yAxisId="right" dataKey="sessions"          stroke="#06b6d4" strokeWidth={2} dot={{ r: 3 }} />}
+                  {trendHasCheckouts && <Line yAxisId="right" dataKey="checkoutInitiated" name="checkouts" stroke="#a78bfa" strokeWidth={2} dot={{ r: 3 }} />}
+                  <Line yAxisId={trendHasRevenue ? 'right' : 'left'} dataKey="orders" stroke="#f59e0b" strokeWidth={2} dot={{ r: 3 }} />
                 </LineChart>
               </ResponsiveContainer>
             </Card>
@@ -332,46 +401,57 @@ export default function DailyReports() {
             </Card>
           )}
 
-          {/* Full comparison table */}
-          <Card title={`Full channel comparison · ${analysis.latest.reportDate} vs ${analysis.prior?.reportDate || 'nothing'}`}>
-            <div className="overflow-auto" style={{ maxHeight: '500px' }}>
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
-                  <tr>
-                    <th className="px-3 py-2 text-left text-slate-400 font-semibold">Channel</th>
-                    <th className="px-3 py-2 text-right text-slate-400 font-semibold">Sessions</th>
-                    <th className="px-3 py-2 text-right text-slate-400 font-semibold">Orders</th>
-                    <th className="px-3 py-2 text-right text-slate-400 font-semibold">Revenue</th>
-                    <th className="px-3 py-2 text-right text-slate-400 font-semibold">CVR</th>
-                    <th className="px-3 py-2 text-right text-slate-400 font-semibold">AOV</th>
-                    <th className="px-3 py-2 text-right text-slate-400 font-semibold">Δ Rev</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {analysis.compared.slice(0, 200).map((r, i) => (
-                    <tr key={i} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
-                      <td className="px-3 py-2 text-slate-200 truncate max-w-[260px]">{r.channel}</td>
-                      <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.sessions)}</td>
-                      <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.orders)}</td>
-                      <td className="px-3 py-2 text-right font-mono text-slate-300">{cur(r.revenue)}</td>
-                      <td className="px-3 py-2 text-right font-mono text-slate-500">{(r.cvr * 100).toFixed(2)}%</td>
-                      <td className="px-3 py-2 text-right font-mono text-slate-500">{cur(r.aov)}</td>
-                      <td className={`px-3 py-2 text-right font-mono ${deltaColor(r.revenueDeltaPct)}`}>{pct(r.revenueDeltaPct, 0)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Card>
+          {/* Full comparison table — shows only columns with real data */}
+          {(() => {
+            const hasRev  = analysis.compared.some(r => r.revenue > 0 || r.revenuePrior > 0);
+            const hasSess = analysis.compared.some(r => r.sessions > 0 || r.sessionsPrior > 0);
+            const hasCI   = analysis.compared.some(r => r.checkoutInitiated > 0 || r.checkoutInitiatedPrior > 0);
+            const primaryDeltaKey = hasRev ? 'revenueDeltaPct' : hasCI ? 'checkoutInitiatedDeltaPct' : 'ordersDeltaPct';
+            const primaryLabel    = hasRev ? 'Δ Rev' : hasCI ? 'Δ Checkouts' : 'Δ Orders';
+            return (
+              <Card title={`Full channel comparison · ${analysis.latest.reportDate} vs ${analysis.prior?.reportDate || 'nothing'}`}>
+                <div className="overflow-auto" style={{ maxHeight: '500px' }}>
+                  <table className="w-full text-xs">
+                    <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                      <tr>
+                        <th className="px-3 py-2 text-left text-slate-400 font-semibold">Channel</th>
+                        {hasSess && <th className="px-3 py-2 text-right text-slate-400 font-semibold">Sessions</th>}
+                        {hasCI   && <th className="px-3 py-2 text-right text-slate-400 font-semibold">Checkouts</th>}
+                        <th className="px-3 py-2 text-right text-slate-400 font-semibold">Orders</th>
+                        {hasRev  && <th className="px-3 py-2 text-right text-slate-400 font-semibold">Revenue</th>}
+                        <th className="px-3 py-2 text-right text-slate-400 font-semibold">CVR</th>
+                        {hasRev  && <th className="px-3 py-2 text-right text-slate-400 font-semibold">AOV</th>}
+                        <th className="px-3 py-2 text-right text-slate-400 font-semibold">{primaryLabel}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {analysis.compared.slice(0, 200).map((r, i) => (
+                        <tr key={i} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                          <td className="px-3 py-2 text-slate-200 truncate max-w-[260px]">{r.channel}</td>
+                          {hasSess && <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.sessions)}</td>}
+                          {hasCI   && <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.checkoutInitiated)}</td>}
+                          <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.orders)}</td>
+                          {hasRev  && <td className="px-3 py-2 text-right font-mono text-slate-300">{cur(r.revenue)}</td>}
+                          <td className="px-3 py-2 text-right font-mono text-slate-500">{(r.cvr * 100).toFixed(2)}%</td>
+                          {hasRev  && <td className="px-3 py-2 text-right font-mono text-slate-500">{cur(r.aov)}</td>}
+                          <td className={`px-3 py-2 text-right font-mono ${deltaColor(r[primaryDeltaKey])}`}>{pct(r[primaryDeltaKey], 0)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            );
+          })()}
 
           {/* Snapshot history */}
           <Card title={`Snapshots in history (${snapshots.length})`}>
             <div className="flex flex-wrap gap-2">
               {snapshots.slice().reverse().map(s => (
                 <div key={s.reportDate} className="px-3 py-1.5 rounded-lg bg-gray-950 border border-gray-800 text-[11px] text-slate-300 flex items-center gap-2">
-                  <CheckCircle2 size={11} className="text-emerald-400" />
+                  <CheckCircle2 size={11} className={s.rows?.length ? 'text-emerald-400' : 'text-amber-400'} />
                   {s.reportDate}
-                  <span className="text-slate-600">· {s.rows?.length || 0} rows</span>
+                  <span className={s.rows?.length ? 'text-slate-600' : 'text-amber-400'}>· {s.rows?.length || 0} rows</span>
                   <button onClick={() => removeBrandUtmSnapshot(brand.id, s.reportDate)}
                     className="text-slate-600 hover:text-red-400 ml-1"><X size={11} /></button>
                 </div>
