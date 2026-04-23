@@ -350,6 +350,122 @@ export function channelTrends(snapshots = [], { metric = 'revenue' } = {}) {
   return result.sort((a, b) => b.total - a.total);
 }
 
+/* ─── BREAKDOWNS — group by any dimension, rank + rollup "Other" ─
+   Used by the UI for pie/bar/matrix visualizations. Returns top N
+   plus a synthetic "Other" row aggregating the tail, plus totals
+   so the pie chart can show percentages. */
+export function breakdownBy(snapshot, dimension = 'utmSource', { topN = 8 } = {}) {
+  if (!snapshot?.rows?.length) return { items: [], other: null, totals: {} };
+  const map = new Map();
+  for (const r of snapshot.rows) {
+    const key = r[dimension] || '(unknown)';
+    const cur = map.get(key) || { name: key, orders: 0, revenue: 0, checkoutInitiated: 0, sessions: 0, rows: 0 };
+    cur.orders            += r.orders || 0;
+    cur.revenue           += r.revenue || 0;
+    cur.checkoutInitiated += r.checkoutInitiated || 0;
+    cur.sessions          += r.sessions || 0;
+    cur.rows++;
+    map.set(key, cur);
+  }
+  const all = [...map.values()].map(x => ({
+    ...x,
+    cvr: x.checkoutInitiated > 0 ? x.orders / x.checkoutInitiated : (x.sessions > 0 ? x.orders / x.sessions : 0),
+  }));
+  // Sort by whichever primary metric has volume
+  const hasRevenue = all.some(x => x.revenue > 0);
+  const primary = hasRevenue ? 'revenue' : 'orders';
+  all.sort((a, b) => b[primary] - a[primary]);
+
+  const head = all.slice(0, topN);
+  const tail = all.slice(topN);
+  let other = null;
+  if (tail.length) {
+    other = tail.reduce((acc, x) => ({
+      name: `Other (${tail.length})`,
+      orders:            acc.orders + x.orders,
+      revenue:           acc.revenue + x.revenue,
+      checkoutInitiated: acc.checkoutInitiated + x.checkoutInitiated,
+      sessions:          acc.sessions + x.sessions,
+      rows:              acc.rows + x.rows,
+    }), { name: '', orders: 0, revenue: 0, checkoutInitiated: 0, sessions: 0, rows: 0 });
+    other.cvr = other.checkoutInitiated > 0 ? other.orders / other.checkoutInitiated : 0;
+  }
+
+  const totals = all.reduce((t, x) => ({
+    orders:            t.orders + x.orders,
+    revenue:           t.revenue + x.revenue,
+    checkoutInitiated: t.checkoutInitiated + x.checkoutInitiated,
+    sessions:          t.sessions + x.sessions,
+  }), { orders: 0, revenue: 0, checkoutInitiated: 0, sessions: 0 });
+
+  // Attach % share of primary metric for the UI
+  const total = totals[primary] || 1;
+  head.forEach(x => { x.share = x[primary] / total; });
+  if (other) other.share = other[primary] / total;
+
+  return { items: head, other, totals, dimension, primary };
+}
+
+/* Source × Medium matrix — two-dim grid for heatmap visuals */
+export function crossBreakdown(snapshot, rowDim = 'utmSource', colDim = 'utmMedium') {
+  if (!snapshot?.rows?.length) return { rows: [], cols: [], matrix: {} };
+  const rowKeys = new Map();   // rowKey → total orders
+  const colKeys = new Map();
+  const matrix = {};           // `${rowKey}|${colKey}` → aggregates
+  for (const r of snapshot.rows) {
+    const rk = r[rowDim] || '(unknown)';
+    const ck = r[colDim] || '(unknown)';
+    rowKeys.set(rk, (rowKeys.get(rk) || 0) + (r.orders || 0) + (r.checkoutInitiated || 0));
+    colKeys.set(ck, (colKeys.get(ck) || 0) + (r.orders || 0) + (r.checkoutInitiated || 0));
+    const key = `${rk}|${ck}`;
+    const cur = matrix[key] || { orders: 0, revenue: 0, checkoutInitiated: 0 };
+    cur.orders            += r.orders || 0;
+    cur.revenue           += r.revenue || 0;
+    cur.checkoutInitiated += r.checkoutInitiated || 0;
+    matrix[key] = cur;
+  }
+  const rowList = [...rowKeys.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k).slice(0, 10);
+  const colList = [...colKeys.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k).slice(0, 10);
+  return { rows: rowList, cols: colList, matrix };
+}
+
+/* Per-source (or any dim) daily time series — one line per key */
+export function trendByDimension(snapshots = [], dimension = 'utmSource', { topN = 6, metric = null } = {}) {
+  if (!snapshots.length) return { data: [], keys: [] };
+  // Pick metric based on data
+  const probe = snapshots.reduce((t, s) => {
+    for (const r of (s.rows || [])) {
+      t.revenue           += r.revenue || 0;
+      t.orders            += r.orders || 0;
+      t.checkoutInitiated += r.checkoutInitiated || 0;
+    }
+    return t;
+  }, { revenue: 0, orders: 0, checkoutInitiated: 0 });
+  const m = metric || (probe.revenue > 0 ? 'revenue' : probe.orders > 0 ? 'orders' : 'checkoutInitiated');
+
+  // First: rank dimension values by total metric across history
+  const totals = new Map();
+  for (const s of snapshots) {
+    for (const r of (s.rows || [])) {
+      const k = r[dimension] || '(unknown)';
+      totals.set(k, (totals.get(k) || 0) + (r[m] || 0));
+    }
+  }
+  const topKeys = [...totals.entries()].sort((a, b) => b[1] - a[1]).slice(0, topN).map(([k]) => k);
+
+  // Build one data row per snapshot with each top-key as a field
+  const data = snapshots.map(s => {
+    const row = { date: s.reportDate.slice(5) };
+    for (const k of topKeys) row[k] = 0;
+    for (const r of (s.rows || [])) {
+      const k = r[dimension] || '(unknown)';
+      if (topKeys.includes(k)) row[k] += r[m] || 0;
+    }
+    return row;
+  });
+  return { data, keys: topKeys, metric: m };
+}
+
 /* ─── TOP-LEVEL ANALYZE ───────────────────────────────────────
    Runs classification vs the prior day and trend across the
    stored history. Returns the composite summary the UI renders. */

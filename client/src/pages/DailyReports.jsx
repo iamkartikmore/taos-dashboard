@@ -7,11 +7,13 @@ import {
 } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend,
+  PieChart, Pie, Cell, BarChart, Bar, LabelList,
 } from 'recharts';
 import { useStore } from '../store';
 import { listPublicDriveFolder, downloadPublicDriveFile } from '../lib/api';
 import {
   parseUtmReport, extractBrandFromName, analyzeReports,
+  breakdownBy, crossBreakdown, trendByDimension,
 } from '../lib/utmReportAnalytics';
 
 const cur = v => `₹${Math.round(Number(v) || 0).toLocaleString('en-IN')}`;
@@ -78,6 +80,172 @@ function ChannelRow({ row, mode }) {
       </div>
       {badge && (
         <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase tracking-wider font-semibold ${badgeClass}`}>{badge}</span>
+      )}
+    </div>
+  );
+}
+
+const PIE_COLORS = ['#22c55e', '#06b6d4', '#a78bfa', '#f59e0b', '#f472b6', '#34d399', '#60a5fa', '#fb923c', '#ef4444', '#eab308'];
+const TREND_COLORS = ['#22c55e', '#06b6d4', '#a78bfa', '#f59e0b', '#f472b6', '#fb923c'];
+
+function BreakdownVisuals({ breakBySource, breakByMedium, breakByCampaign, matrix, perSourceTrend, perMediumTrend }) {
+  if (!breakBySource || !breakByMedium) return null;
+
+  const makePieData = (b) => {
+    if (!b) return [];
+    const arr = [...b.items.map(x => ({ name: x.name || '(unknown)', value: x[b.primary] || 0, orders: x.orders, checkouts: x.checkoutInitiated, cvr: x.cvr }))];
+    if (b.other && b.other[b.primary] > 0) arr.push({ name: b.other.name, value: b.other[b.primary], orders: b.other.orders, checkouts: b.other.checkoutInitiated, cvr: b.other.cvr });
+    return arr.filter(x => x.value > 0);
+  };
+  const pieSrc = makePieData(breakBySource);
+  const pieMed = makePieData(breakByMedium);
+
+  const primaryLabel = breakBySource.primary === 'revenue' ? 'Revenue' : 'Orders';
+
+  return (
+    <div className="space-y-4">
+      {/* Row 1: Two pie charts */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <Card title={`${primaryLabel} by source · ${breakBySource.items.length + (breakBySource.other ? 1 : 0)} segments`}>
+          {pieSrc.length === 0 ? <div className="text-xs italic text-slate-500">No source data.</div> : (
+            <div className="flex items-center gap-4">
+              <ResponsiveContainer width="55%" height={240}>
+                <PieChart>
+                  <Pie data={pieSrc} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={40} outerRadius={90} paddingAngle={2}>
+                    {pieSrc.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                  </Pie>
+                  <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #1e293b', fontSize: 11 }}
+                    formatter={(v, _n, p) => [primaryLabel === 'Revenue' ? cur(v) : num(v), p.payload.name]} />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="flex-1 space-y-1 text-[11px]">
+                {pieSrc.map((s, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
+                    <span className="text-slate-300 truncate flex-1">{s.name}</span>
+                    <span className="text-slate-500 font-mono">{num(s.orders)} ord</span>
+                    <span className="text-slate-600 font-mono">{((s.value / pieSrc.reduce((a, x) => a + x.value, 0)) * 100).toFixed(1)}%</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
+        <Card title={`${primaryLabel} by medium · ${breakByMedium.items.length + (breakByMedium.other ? 1 : 0)} segments`}>
+          {pieMed.length === 0 ? <div className="text-xs italic text-slate-500">No medium data.</div> : (
+            <div className="flex items-center gap-4">
+              <ResponsiveContainer width="55%" height={240}>
+                <PieChart>
+                  <Pie data={pieMed} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={40} outerRadius={90} paddingAngle={2}>
+                    {pieMed.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
+                  </Pie>
+                  <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #1e293b', fontSize: 11 }}
+                    formatter={(v, _n, p) => [primaryLabel === 'Revenue' ? cur(v) : num(v), p.payload.name]} />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="flex-1 space-y-1 text-[11px]">
+                {pieMed.map((s, i) => (
+                  <div key={i} className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
+                    <span className="text-slate-300 truncate flex-1">{s.name}</span>
+                    <span className="text-slate-500 font-mono">{num(s.orders)} ord</span>
+                    <span className="text-slate-600 font-mono">{((s.value / pieMed.reduce((a, x) => a + x.value, 0)) * 100).toFixed(1)}%</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* Row 2: Top campaigns bar chart — horizontal, dual metric */}
+      <Card title={`Top ${breakByCampaign?.items.length || 0} campaigns · orders (bars) + CVR (labels)`}>
+        {!breakByCampaign?.items.length ? <div className="text-xs italic text-slate-500">No campaign data.</div> : (
+          <ResponsiveContainer width="100%" height={Math.max(240, (breakByCampaign.items.length + (breakByCampaign.other ? 1 : 0)) * 28)}>
+            <BarChart data={[...breakByCampaign.items, ...(breakByCampaign.other ? [breakByCampaign.other] : [])].map(c => ({ ...c, cvrPct: c.cvr * 100 }))} layout="vertical" margin={{ left: 140, right: 80 }}>
+              <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
+              <XAxis type="number" tick={{ fill: '#64748b', fontSize: 10 }} />
+              <YAxis type="category" dataKey="name" tick={{ fill: '#94a3b8', fontSize: 10 }} width={130} />
+              <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #1e293b', fontSize: 11 }}
+                formatter={(v, n, p) => n === 'orders' ? [num(v), 'Orders']
+                  : n === 'checkoutInitiated' ? [num(v), 'Checkouts']
+                  : [`${v.toFixed(1)}%`, 'CVR']} />
+              <Bar dataKey="orders" fill="#22c55e" radius={[0, 4, 4, 0]}>
+                <LabelList dataKey="cvrPct" position="right" formatter={v => v > 0 ? `${v.toFixed(0)}%` : ''} fill="#64748b" fontSize={10} />
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </Card>
+
+      {/* Row 3: Source × Medium matrix heatmap */}
+      {matrix?.rows.length > 0 && matrix?.cols.length > 0 && (
+        <Card title={`Source × Medium matrix · orders (${matrix.rows.length} × ${matrix.cols.length})`}>
+          <div className="overflow-auto">
+            <table className="text-xs border-collapse">
+              <thead>
+                <tr>
+                  <th className="px-2 py-1 text-left text-slate-500 font-semibold sticky left-0 bg-gray-900 min-w-[120px]">source ↓ / medium →</th>
+                  {matrix.cols.map(c => <th key={c} className="px-2 py-1 text-left text-slate-500 font-semibold min-w-[80px]">{c}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {matrix.rows.map(r => {
+                  const maxCell = Math.max(...matrix.cols.map(c => (matrix.matrix[`${r}|${c}`]?.orders) || 0), 1);
+                  return (
+                    <tr key={r}>
+                      <td className="px-2 py-1 font-medium text-slate-300 sticky left-0 bg-gray-900">{r}</td>
+                      {matrix.cols.map(c => {
+                        const cell = matrix.matrix[`${r}|${c}`];
+                        const orders = cell?.orders || 0;
+                        const intensity = maxCell > 0 ? orders / maxCell : 0;
+                        return (
+                          <td key={c} className="px-2 py-1 font-mono text-right" style={{ background: `rgba(34,197,94,${(intensity * 0.6).toFixed(2)})`, color: intensity > 0.4 ? '#fff' : '#94a3b8' }}
+                              title={`${r} / ${c}: ${orders} orders · ${cell?.checkoutInitiated || 0} checkouts`}>
+                            {orders > 0 ? orders : '·'}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="text-[10px] text-slate-500 mt-2">Green intensity = orders relative to the row's max cell. Hover a cell for checkout + order counts.</div>
+        </Card>
+      )}
+
+      {/* Row 4: Per-source trend lines (needs 2+ snapshots) */}
+      {perSourceTrend?.data.length > 1 && perSourceTrend.keys.length > 0 && (
+        <Card title={`Top sources · ${perSourceTrend.metric} over last ${perSourceTrend.data.length} days`}>
+          <ResponsiveContainer width="100%" height={240}>
+            <LineChart data={perSourceTrend.data}>
+              <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
+              <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} />
+              <YAxis tick={{ fill: '#64748b', fontSize: 10 }} />
+              <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #1e293b', fontSize: 11 }} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              {perSourceTrend.keys.map((k, i) => <Line key={k} dataKey={k} stroke={TREND_COLORS[i % TREND_COLORS.length]} strokeWidth={2} dot={{ r: 2 }} />)}
+            </LineChart>
+          </ResponsiveContainer>
+        </Card>
+      )}
+
+      {/* Row 5: Per-medium trend lines */}
+      {perMediumTrend?.data.length > 1 && perMediumTrend.keys.length > 0 && (
+        <Card title={`Top mediums · ${perMediumTrend.metric} over last ${perMediumTrend.data.length} days`}>
+          <ResponsiveContainer width="100%" height={240}>
+            <LineChart data={perMediumTrend.data}>
+              <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
+              <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 10 }} />
+              <YAxis tick={{ fill: '#64748b', fontSize: 10 }} />
+              <Tooltip contentStyle={{ background: '#0f172a', border: '1px solid #1e293b', fontSize: 11 }} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              {perMediumTrend.keys.map((k, i) => <Line key={k} dataKey={k} stroke={TREND_COLORS[i % TREND_COLORS.length]} strokeWidth={2} dot={{ r: 2 }} />)}
+            </LineChart>
+          </ResponsiveContainer>
+        </Card>
       )}
     </div>
   );
@@ -178,6 +346,14 @@ export default function DailyReports() {
   const trendHasRevenue  = trendData.some(d => d.revenue > 0);
   const trendHasSessions = trendData.some(d => d.sessions > 0);
   const trendHasCheckouts = trendData.some(d => d.checkoutInitiated > 0);
+
+  /* Breakdowns for visualization */
+  const breakBySource   = useMemo(() => analysis?.latest ? breakdownBy(analysis.latest, 'utmSource',   { topN: 8 }) : null, [analysis]);
+  const breakByMedium   = useMemo(() => analysis?.latest ? breakdownBy(analysis.latest, 'utmMedium',   { topN: 8 }) : null, [analysis]);
+  const breakByCampaign = useMemo(() => analysis?.latest ? breakdownBy(analysis.latest, 'utmCampaign', { topN: 12 }) : null, [analysis]);
+  const matrix          = useMemo(() => analysis?.latest ? crossBreakdown(analysis.latest, 'utmSource', 'utmMedium') : null, [analysis]);
+  const perSourceTrend  = useMemo(() => snapshots.length >= 2 ? trendByDimension(snapshots.slice(-14), 'utmSource', { topN: 5 }) : null, [snapshots]);
+  const perMediumTrend  = useMemo(() => snapshots.length >= 2 ? trendByDimension(snapshots.slice(-14), 'utmMedium', { topN: 5 }) : null, [snapshots]);
 
   if (!bBrands.length) {
     return (
@@ -340,6 +516,16 @@ export default function DailyReports() {
               </ResponsiveContainer>
             </Card>
           )}
+
+          {/* Deep-dive: breakdowns + visuals */}
+          <BreakdownVisuals
+            breakBySource={breakBySource}
+            breakByMedium={breakByMedium}
+            breakByCampaign={breakByCampaign}
+            matrix={matrix}
+            perSourceTrend={perSourceTrend}
+            perMediumTrend={perMediumTrend}
+          />
 
           {/* Classified panels */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
