@@ -674,14 +674,45 @@ function BrandCard({ brand, brandInfo }) {
                     )}
                   </div>
                   {socialDiscovery?.error && (
-                    <div className="flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-lg bg-red-900/30 text-red-300">
-                      <AlertCircle size={11} /> {socialDiscovery.error}
+                    <div className="flex items-start gap-1.5 text-xs px-2 py-1.5 rounded-lg bg-red-900/30 text-red-300">
+                      <AlertCircle size={11} className="mt-0.5 flex-shrink-0" /> <span>{socialDiscovery.error}</span>
+                    </div>
+                  )}
+                  {socialDiscovery && !socialDiscovery.error && (
+                    <div className="flex items-start gap-1.5 text-[11px] px-2 py-1.5 rounded-lg bg-gray-800/60 text-slate-300 border border-gray-700/60">
+                      <CheckCircle size={11} className="mt-0.5 flex-shrink-0 text-emerald-400" />
+                      <span>
+                        Discovered <strong className="text-white">{socialDiscovery.pages?.length || 0}</strong> page(s)
+                        {socialDiscovery.permissions?.length > 0 && (
+                          <>, token has <strong className="text-white">{socialDiscovery.permissions.length}</strong> granted scope(s)</>
+                        )}.
+                        {socialDiscovery.pages?.length === 0 && (
+                          <span className="block mt-1 text-amber-300">
+                            Token is valid but returns <strong>zero Pages</strong>. Common causes:
+                            <ul className="list-disc ml-4 mt-0.5 space-y-0.5">
+                              <li>This is a <strong>System User</strong> token and no Pages are assigned as assets to it — fix in Business Settings → System Users → your user → <strong>Assign Assets</strong> → Pages → pick page → grant <em>Manage Page</em>.</li>
+                              <li>The pending token-generation request is still "Needs review" from another admin — approve it, then regenerate, then paste.</li>
+                              <li>The token belongs to a user who isn't a Page admin/editor.</li>
+                            </ul>
+                          </span>
+                        )}
+                        {socialDiscovery.pages?.length > 0 && socialDiscovery.pages.every(p => !p.ig?.id) && (
+                          <span className="block mt-1 text-amber-300">
+                            Page found but <strong>no IG account linked</strong>. Fix in Business Settings → Instagram accounts → connect your IG to the Page, and make sure the IG account is <strong>Business or Creator</strong> type (not Personal).
+                          </span>
+                        )}
+                      </span>
                     </div>
                   )}
                   {socialDiscovery?.missingScopes?.length > 0 && (
                     <div className="flex items-start gap-1.5 text-[10px] px-2 py-1.5 rounded-lg bg-amber-900/20 text-amber-300 border border-amber-800/40">
                       <AlertCircle size={11} className="mt-0.5 flex-shrink-0" />
                       <span>Missing scopes: <code className="font-mono">{socialDiscovery.missingScopes.join(', ')}</code> — regenerate the token with these included.</span>
+                    </div>
+                  )}
+                  {socialDiscovery?.permissions?.length > 0 && (
+                    <div className="text-[10px] text-slate-600">
+                      Granted: <span className="font-mono text-slate-500">{socialDiscovery.permissions.sort().join(', ')}</span>
                     </div>
                   )}
                   {socialDiscovery?.pages && socialDiscovery.pages.length > 1 && (
