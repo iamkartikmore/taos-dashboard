@@ -8,6 +8,7 @@ import { Layers } from 'lucide-react';
 import { useStore } from '../store';
 import { buildPatternSummary, fmt, safeNum } from '../lib/analytics';
 import { FullPageSpinner } from '../components/ui/Spinner';
+import CrossPatterns from '../components/CrossPatterns';
 
 const COLORS = ['#2d7cf6','#22c55e','#f59e0b','#a78bfa','#f472b6','#34d399','#fb923c','#60a5fa','#e879f9','#4ade80'];
 
@@ -161,6 +162,7 @@ export default function Patterns() {
     { id: 'creative',  label: 'Creative Patterns' },
     { id: 'audience',  label: 'Audience Patterns' },
     { id: 'offer',     label: 'Offer Patterns' },
+    { id: 'cross',     label: 'Cross Patterns' },
     { id: 'scatter',   label: 'Spend vs ROAS' },
   ];
 
@@ -218,6 +220,8 @@ export default function Patterns() {
           <PatternChart title="Spend by Offer Type"        groupKey="offerType"    metric="spend" metricLabel="Spend" color="#60a5fa" />
         </div>
       )}
+
+      {tab === 'cross' && <CrossPatterns />}
 
       {tab === 'scatter' && <ScatterViz />}
     </div>
