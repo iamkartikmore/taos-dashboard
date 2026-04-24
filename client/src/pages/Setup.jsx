@@ -116,7 +116,24 @@ function BrandCard({ brand, brandInfo }) {
   const [verifyClarityOk, setVerifyClarityOk]   = useState(null);
   const [pullingAll, setPullingAll]         = useState(false);
   const [verifyingSocial, setVerifyingSocial] = useState(false);
-  const [socialDiscovery, setSocialDiscovery] = useState(null); // { pages:[{pageId,pageName,pageAccessToken,ig}], missingScopes }
+  // Persist Discover result per-brand in localStorage so it survives
+  // navigation + page reload. Keyed by brand id. Without this the user
+  // loses their "Discovered N pages" banner + page dropdown every time
+  // they leave Study Manual.
+  const LS_DISCOVERY_KEY = `taos_social_discovery_${brand.id}`;
+  const [socialDiscovery, setSocialDiscoveryState] = useState(() => {
+    try {
+      const stored = localStorage.getItem(LS_DISCOVERY_KEY);
+      return stored ? JSON.parse(stored) : null;
+    } catch { return null; }
+  });
+  const setSocialDiscovery = (val) => {
+    setSocialDiscoveryState(val);
+    try {
+      if (val) localStorage.setItem(LS_DISCOVERY_KEY, JSON.stringify(val));
+      else     localStorage.removeItem(LS_DISCOVERY_KEY);
+    } catch (_) { /* quota, ignore */ }
+  };
 
   // Per-brand time windows
   const [ordersDays, setOrdersDays] = useState(7);

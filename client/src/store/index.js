@@ -251,6 +251,12 @@ export const useStore = create((set, get) => {
       set({ brands, activeBrandIds });
     },
 
+    // Deep-merge EVERY nested config object so callers can safely pass
+    // partial patches without risking clobber. Previously social/clarity/
+    // drive were shallow-replaced, so a patch like { social: { igBusinessId: 'x' } }
+    // would wipe fbPageId / pageAccessToken / igUsername — causing
+    // "my keys keep resetting" when Discover's async resolve raced with
+    // typing keystrokes.
     updateBrand: (id, patch) => {
       const brands = _saveBrands(get().brands.map(b => {
         if (b.id !== id) return b;
@@ -260,6 +266,9 @@ export const useStore = create((set, get) => {
         if (patch.ga)        u.ga        = { ...b.ga,        ...patch.ga };
         if (patch.googleAds) u.googleAds = { ...b.googleAds, ...patch.googleAds };
         if (patch.listmonk)  u.listmonk  = { ...(b.listmonk || {}), ...patch.listmonk };
+        if (patch.clarity)   u.clarity   = { ...(b.clarity  || {}), ...patch.clarity };
+        if (patch.drive)     u.drive     = { ...(b.drive    || {}), ...patch.drive };
+        if (patch.social)    u.social    = { ...(b.social   || {}), ...patch.social };
         return u;
       }));
       set({ brands });
