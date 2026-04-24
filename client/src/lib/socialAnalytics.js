@@ -50,17 +50,21 @@ function parseMentions(caption = '') {
 }
 
 function normalizeInstagram(raw, ctx) {
-  const isReel = raw._isReel || String(raw.media_product_type || '').toUpperCase() === 'REELS';
+  const rawType = String(raw.media_product_type || raw.media_type || '').toUpperCase();
+  const isReel = raw._isReel || rawType.includes('REEL');
   const mediaType = isReel ? 'REEL' : String(raw.media_type || 'IMAGE').toUpperCase();
   const i = raw._insights || [];
+  // v20+: Meta deprecated `impressions` and `plays` on IG media and
+  // replaced both with `views`. Read whichever Meta returned.
   const reach       = extractIgInsight(i, 'reach');
-  const impressions = extractIgInsight(i, 'impressions') || reach;
+  const views       = extractIgInsight(i, 'views');
+  const impressions = extractIgInsight(i, 'impressions') || views || reach;
   const saves       = extractIgInsight(i, 'saved');
   const likes       = extractIgInsight(i, 'likes') || num(raw.like_count);
   const comments    = extractIgInsight(i, 'comments') || num(raw.comments_count);
   const shares      = extractIgInsight(i, 'shares');
-  const plays       = extractIgInsight(i, 'plays');
-  const videoViews  = extractIgInsight(i, 'video_views') || plays;
+  const plays       = extractIgInsight(i, 'plays') || views;
+  const videoViews  = extractIgInsight(i, 'video_views') || views || plays;
   const profileVisits = extractIgInsight(i, 'profile_visits');
   const follows       = extractIgInsight(i, 'follows');
   const avgWatchSec   = extractIgInsight(i, 'ig_reels_avg_watch_time') / 1000 || 0; // ms → s

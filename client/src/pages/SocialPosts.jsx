@@ -406,17 +406,25 @@ export default function SocialPosts() {
         appendLog(`[${b.name}] Social pull starting…`);
         try {
           const chunks = [];
+          const summarise = (platform, arr) => {
+            const s = arr._stats;
+            if (!s) { appendLog(`[${b.name}] ${platform}: ${arr.length} posts`); return; }
+            appendLog(`[${b.name}] ${platform}: ${arr.length} posts · insights ok ${s.insightsOk}, fallback ${s.insightsFallback}, failed ${s.insightsFailed}`);
+            for (const err of (s.sampleErrors || []).slice(0, 3)) {
+              appendLog(`[${b.name}] ${platform} err: ${err.firstError || err.fallbackError}`);
+            }
+          };
           if (cfg.igBusinessId) {
             appendLog(`[${b.name}] IG: fetching media + insights…`);
             const ig = await pullInstagram({ token, apiVersion, igUserId: cfg.igBusinessId, brandId: b.id, sinceDays, limit: 200 });
             chunks.push(...ig);
-            appendLog(`[${b.name}] IG: ${ig.length} posts`);
+            summarise('IG', ig);
           }
           if (cfg.fbPageId && cfg.pageAccessToken) {
             appendLog(`[${b.name}] FB: fetching posts + insights…`);
             const fb = await pullFacebook({ pageAccessToken: cfg.pageAccessToken, apiVersion, pageId: cfg.fbPageId, brandId: b.id, sinceDays, limit: 200 });
             chunks.push(...fb);
-            appendLog(`[${b.name}] FB: ${fb.length} posts`);
+            summarise('FB', fb);
           } else if (cfg.fbPageId) {
             appendLog(`[${b.name}] FB: skipped (no page access token — run Discover)`);
           }

@@ -29,11 +29,15 @@ export async function verifySocialToken(token, apiVersion = 'v21.0') {
 }
 
 export async function pullInstagram({ token, apiVersion = 'v21.0', igUserId, brandId, limit = 200, sinceDays = 90, includeComments = true }) {
-  const { posts = [] } = await post('/api/social/pull-ig', { token, apiVersion, igUserId, limit, sinceDays, includeComments });
-  return posts.map(raw => normalizePost('instagram', raw, { brandId }));
+  const { posts = [], stats = null } = await post('/api/social/pull-ig', { token, apiVersion, igUserId, limit, sinceDays, includeComments });
+  const normalized = posts.map(raw => normalizePost('instagram', raw, { brandId }));
+  normalized._stats = stats;
+  return normalized;
 }
 
 export async function pullFacebook({ pageAccessToken, apiVersion = 'v21.0', pageId, brandId, limit = 200, sinceDays = 90, includeComments = true }) {
-  const { posts = [] } = await post('/api/social/pull-fb', { pageAccessToken, apiVersion, pageId, limit, sinceDays, includeComments });
-  return posts.map(raw => normalizePost('facebook', raw, { brandId }));
+  const { posts = [], stats = null } = await post('/api/social/pull-fb', { pageAccessToken, apiVersion, pageId, limit, sinceDays, includeComments });
+  const normalized = posts.map(raw => normalizePost('facebook', raw, { brandId }));
+  normalized._stats = stats;
+  return normalized;
 }

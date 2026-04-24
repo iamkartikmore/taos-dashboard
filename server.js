@@ -1885,15 +1885,22 @@ const IG_MEDIA_FIELDS = [
   'children{id,media_type,media_url,thumbnail_url}',
 ].join(',');
 
-// Video/reel insights — Meta supports different metric sets per media_type
-const IG_INSIGHT_METRICS_REEL  = 'reach,saved,likes,comments,shares,plays,total_interactions,ig_reels_avg_watch_time,ig_reels_video_view_total_time';
-const IG_INSIGHT_METRICS_VIDEO = 'impressions,reach,saved,likes,comments,shares,plays,video_views,total_interactions';
-const IG_INSIGHT_METRICS_IMAGE = 'impressions,reach,saved,likes,comments,shares,total_interactions,profile_activity,profile_visits,follows';
-const IG_INSIGHT_METRICS_CAROUSEL = 'impressions,reach,saved,likes,comments,shares,total_interactions';
+/* IG insight metrics — Meta deprecated 'impressions' and 'plays' in
+   v20+, replacing both with 'views'. One invalid metric name in the
+   list makes the whole call fail — so per type we keep the set tight
+   and fall back to a universal "safe" set if Meta still rejects it.
+   Reference: developers.facebook.com/docs/instagram-platform/api-reference/instagram-media/insights */
+const IG_INSIGHT_METRICS_REEL     = 'reach,saved,likes,comments,shares,views,total_interactions,ig_reels_avg_watch_time,ig_reels_video_view_total_time';
+const IG_INSIGHT_METRICS_VIDEO    = 'reach,saved,likes,comments,shares,views,total_interactions';
+const IG_INSIGHT_METRICS_IMAGE    = 'reach,saved,likes,comments,shares,views,total_interactions,profile_visits,profile_activity,follows';
+const IG_INSIGHT_METRICS_CAROUSEL = 'reach,saved,likes,comments,shares,views,total_interactions';
+// Universal safe set: the metrics that work on every media_product_type
+// across v19–v22. Used as a fallback when the type-specific set errors.
+const IG_INSIGHT_METRICS_SAFE     = 'reach,saved,likes,comments,shares,total_interactions';
 
 function igMetricsForType(t) {
   const x = String(t || '').toUpperCase();
-  if (x === 'REELS' || x === 'REEL' || x === 'VIDEO_REEL') return IG_INSIGHT_METRICS_REEL;
+  if (x === 'REELS' || x === 'REEL' || x === 'VIDEO_REEL' || x === 'VIDEO_REELS') return IG_INSIGHT_METRICS_REEL;
   if (x === 'VIDEO')                                       return IG_INSIGHT_METRICS_VIDEO;
   if (x === 'CAROUSEL_ALBUM')                              return IG_INSIGHT_METRICS_CAROUSEL;
   return IG_INSIGHT_METRICS_IMAGE;
@@ -2018,27 +2025,48 @@ app.post('/api/social/pull-ig', async (req, res) => {
     const cutoffMs = sinceDays > 0 ? Date.now() - sinceDays * 86400000 : 0;
     const filtered = media.filter(m => !cutoffMs || new Date(m.timestamp).getTime() >= cutoffMs);
 
-    // Step 2 — insights + (optionally) top comments, in parallel batches of 4
+    // Step 2 — insights + (optionally) top comments, in parallel batches of 4.
+    // Track failures so we can report them back to the client instead of
+    // silently returning zeroed posts. If the type-specific metric set
+    // fails (e.g. a metric got deprecated), retry with the safe subset.
     const enriched = [];
+    const stats = { total: filtered.length, insightsOk: 0, insightsFallback: 0, insightsFailed: 0, sampleErrors: [] };
     const CONCURRENCY = 4;
     for (let i = 0; i < filtered.length; i += CONCURRENCY) {
       const batch = filtered.slice(i, i + CONCURRENCY);
       const results = await Promise.all(batch.map(async m => {
-        const isReel = String(m.media_product_type || '').toUpperCase() === 'REELS'
-                    || String(m.media_type || '').toUpperCase().includes('REEL');
+        const rawType = String(m.media_product_type || m.media_type || '').toUpperCase();
+        const isReel = rawType.includes('REEL');
         const metrics = isReel
           ? IG_INSIGHT_METRICS_REEL
           : igMetricsForType(m.media_type);
 
-        // Insights (best-effort — older media sometimes errors on certain metrics)
+        const fetchInsights = async metric => {
+          const ir = await axios.get(
+            `https://graph.facebook.com/${apiVersion}/${m.id}/insights`,
+            { params: { access_token: token, metric }, timeout: 25000 },
+          );
+          return ir.data?.data || [];
+        };
+
         let insights = [];
         try {
-          const ir = await withRetry(() => axios.get(
-            `https://graph.facebook.com/${apiVersion}/${m.id}/insights`,
-            { params: { access_token: token, metric: metrics }, timeout: 25000 },
-          ));
-          insights = ir.data?.data || [];
-        } catch (_) {}
+          insights = await withRetry(() => fetchInsights(metrics));
+          stats.insightsOk++;
+        } catch (err) {
+          // Log the first error verbatim so we can see exactly which
+          // metric Meta is unhappy about. Then try the safe subset.
+          const m1 = err.response?.data?.error?.message || err.message;
+          if (stats.sampleErrors.length < 5) stats.sampleErrors.push({ mediaId: m.id, firstError: m1 });
+          try {
+            insights = await withRetry(() => fetchInsights(IG_INSIGHT_METRICS_SAFE));
+            stats.insightsFallback++;
+          } catch (err2) {
+            stats.insightsFailed++;
+            const m2 = err2.response?.data?.error?.message || err2.message;
+            if (stats.sampleErrors.length < 10) stats.sampleErrors.push({ mediaId: m.id, fallbackError: m2 });
+          }
+        }
 
         let comments = [];
         if (includeComments) {
@@ -2062,7 +2090,10 @@ app.post('/api/social/pull-ig', async (req, res) => {
       }));
       enriched.push(...results);
     }
-    res.json({ ok: true, igUserId, posts: enriched });
+    if (stats.sampleErrors.length) {
+      console.log('[social/pull-ig] insights errors sample:', JSON.stringify(stats.sampleErrors, null, 2));
+    }
+    res.json({ ok: true, igUserId, posts: enriched, stats });
   } catch (err) {
     const status = err.response?.status || 500;
     res.status(status).json({ error: err.response?.data?.error?.message || err.message });
@@ -2097,21 +2128,42 @@ app.post('/api/social/pull-fb', async (req, res) => {
       { maxPages: Math.max(1, Math.ceil(limit / 50)) },
     );
 
-    const INSIGHT_METRICS = 'post_impressions,post_impressions_unique,post_clicks,post_engaged_users,post_reactions_by_type_total,post_video_views,post_video_avg_time_watched';
+    // Full set. If Meta rejects (metric name deprecated in this version),
+    // fall back to a minimal universal set. post_video_views /
+    // post_video_avg_time_watched are video-only and commonly error on
+    // photo posts — we keep them but the fallback saves us either way.
+    const FB_METRICS_FULL = 'post_impressions,post_impressions_unique,post_clicks,post_engaged_users,post_reactions_by_type_total,post_video_views,post_video_avg_time_watched';
+    const FB_METRICS_SAFE = 'post_impressions,post_impressions_unique,post_clicks,post_engaged_users';
 
     const enriched = [];
+    const stats = { total: posts.length, insightsOk: 0, insightsFallback: 0, insightsFailed: 0, sampleErrors: [] };
     const CONCURRENCY = 4;
     for (let i = 0; i < posts.length; i += CONCURRENCY) {
       const batch = posts.slice(i, i + CONCURRENCY);
       const results = await Promise.all(batch.map(async p => {
+        const fetchFb = async metric => {
+          const ir = await axios.get(
+            `https://graph.facebook.com/${apiVersion}/${p.id}/insights`,
+            { params: { access_token: pageAccessToken, metric }, timeout: 25000 },
+          );
+          return ir.data?.data || [];
+        };
         let insights = [];
         try {
-          const ir = await withRetry(() => axios.get(
-            `https://graph.facebook.com/${apiVersion}/${p.id}/insights`,
-            { params: { access_token: pageAccessToken, metric: INSIGHT_METRICS }, timeout: 25000 },
-          ));
-          insights = ir.data?.data || [];
-        } catch (_) {}
+          insights = await withRetry(() => fetchFb(FB_METRICS_FULL));
+          stats.insightsOk++;
+        } catch (err) {
+          const m1 = err.response?.data?.error?.message || err.message;
+          if (stats.sampleErrors.length < 5) stats.sampleErrors.push({ postId: p.id, firstError: m1 });
+          try {
+            insights = await withRetry(() => fetchFb(FB_METRICS_SAFE));
+            stats.insightsFallback++;
+          } catch (err2) {
+            stats.insightsFailed++;
+            const m2 = err2.response?.data?.error?.message || err2.message;
+            if (stats.sampleErrors.length < 10) stats.sampleErrors.push({ postId: p.id, fallbackError: m2 });
+          }
+        }
 
         let comments = [];
         if (includeComments) {
@@ -2127,7 +2179,10 @@ app.post('/api/social/pull-fb', async (req, res) => {
       }));
       enriched.push(...results);
     }
-    res.json({ ok: true, pageId, posts: enriched });
+    if (stats.sampleErrors.length) {
+      console.log('[social/pull-fb] insights errors sample:', JSON.stringify(stats.sampleErrors, null, 2));
+    }
+    res.json({ ok: true, pageId, posts: enriched, stats });
   } catch (err) {
     const status = err.response?.status || 500;
     res.status(status).json({ error: err.response?.data?.error?.message || err.message });
