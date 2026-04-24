@@ -725,30 +725,63 @@ function BrandCard({ brand, brandInfo }) {
                       Granted: <span className="font-mono text-slate-500">{socialDiscovery.permissions.sort().join(', ')}</span>
                     </div>
                   )}
-                  {socialDiscovery?.pages && socialDiscovery.pages.length > 1 && (
-                    <div>
-                      <label className="text-[10px] text-slate-500 mb-1 block">Page (multiple detected)</label>
-                      <select
-                        value={brand.social?.fbPageId || ''}
-                        onChange={e => {
-                          const p = socialDiscovery.pages.find(x => x.pageId === e.target.value);
-                          if (!p) return;
-                          updateBrand(brand.id, { social: {
-                            ...(brand.social || {}),
-                            fbPageId: p.pageId, fbPageName: p.pageName,
-                            pageAccessToken: p.pageAccessToken || '',
-                            igBusinessId: p.ig?.id || '', igUsername: p.ig?.username || '',
-                          }});
-                        }}
-                        className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100">
-                        {socialDiscovery.pages.map(p => (
-                          <option key={p.pageId} value={p.pageId}>
-                            {p.pageName}{p.ig?.username ? ` · @${p.ig.username}` : ''}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
+                  {socialDiscovery?.pages && socialDiscovery.pages.length > 1 && (() => {
+                    const selectedPage = socialDiscovery.pages.find(x => x.pageId === brand.social?.fbPageId);
+                    const pagesWithoutIg = socialDiscovery.pages.filter(p => !p.ig?.id);
+                    const igUsedByOther = selectedPage && !selectedPage.ig?.id
+                      ? socialDiscovery.pages.find(p => p.pageId !== selectedPage.pageId && p.ig?.id)
+                      : null;
+                    return (
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] text-slate-500 mb-1 block">Page (multiple detected)</label>
+                        <select
+                          value={brand.social?.fbPageId || ''}
+                          onChange={e => {
+                            const p = socialDiscovery.pages.find(x => x.pageId === e.target.value);
+                            if (!p) return;
+                            updateBrand(brand.id, { social: {
+                              ...(brand.social || {}),
+                              fbPageId: p.pageId, fbPageName: p.pageName,
+                              pageAccessToken: p.pageAccessToken || '',
+                              igBusinessId: p.ig?.id || '', igUsername: p.ig?.username || '',
+                            }});
+                          }}
+                          className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100">
+                          {socialDiscovery.pages.map(p => (
+                            <option key={p.pageId} value={p.pageId}>
+                              {p.pageName}{p.ig?.username ? ` · @${p.ig.username}` : ' · no IG linked'}
+                            </option>
+                          ))}
+                        </select>
+                        {selectedPage && !selectedPage.ig?.id && (
+                          <div className="px-2 py-2 rounded-lg bg-amber-900/20 border border-amber-800/40 text-[10px] text-amber-200 space-y-1.5">
+                            <div className="flex items-start gap-1.5">
+                              <AlertCircle size={11} className="mt-0.5 flex-shrink-0" />
+                              <div>
+                                <strong>{selectedPage.pageName}</strong> has no Instagram Business account linked.
+                                {igUsedByOther && (
+                                  <span className="block mt-1">
+                                    Your IG account <strong>@{igUsedByOther.ig.username}</strong> is already linked to <strong>{igUsedByOther.pageName}</strong>. Meta only allows one IG account per FB Page.
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="pl-4 space-y-0.5 text-amber-300/90">
+                              <div>Pick one of:</div>
+                              <div>• Share <strong>{igUsedByOther?.ig?.username ? `@${igUsedByOther.ig.username}` : 'the same IG'}</strong> between both brands — select the <strong>{igUsedByOther?.pageName || 'other'}</strong> page above for this brand too (analytics will still show)</div>
+                              <div>• Create a dedicated IG Business account for {selectedPage.pageName}, link it to this Page in <strong>business.facebook.com/settings → Instagram accounts → Connected Assets</strong>, then regenerate + re-Discover</div>
+                              <div>• If IG is truly only one account for both brands, leave IG empty here; the FB-side analytics will still pull</div>
+                            </div>
+                          </div>
+                        )}
+                        {pagesWithoutIg.length > 0 && !selectedPage?.ig?.id === false && (
+                          <div className="text-[10px] text-slate-600">
+                            {pagesWithoutIg.length} of {socialDiscovery.pages.length} pages have no IG linked.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                   <div className="grid grid-cols-2 gap-1.5">
                     <div>
                       <label className="text-[10px] text-slate-500 mb-1 block">IG Business ID</label>
