@@ -99,11 +99,9 @@ const QUADRANT_ORDER = ['DOUBLE DOWN', 'MILK', 'BET', 'BUNDLE', 'EXIT', 'INVESTI
 export default function CrossPatterns() {
   const { enrichedRows, activeBrandIds, brandData } = useStore();
 
-  /* Filter enriched rows to active brands for clean cross-brand isolation */
-  const rows = useMemo(
-    () => (enrichedRows || []).filter(r => !activeBrandIds?.length || activeBrandIds.includes(r._brandId || r.brandId)),
-    [enrichedRows, activeBrandIds]
-  );
+  /* enrichedRows is already scoped to active brands by the store's
+     _rebuild. No extra filtering needed here. */
+  const rows = enrichedRows || [];
 
   /* Star quadrant map — pooled across active brands' orders/inventory */
   const quadrantMap = useMemo(() => {
