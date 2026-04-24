@@ -15,6 +15,7 @@ const LS_LISTS   = 'taos_lists';
 const LS_INV     = 'taos_inventory_v2';      // { [brandId]: inventoryMap }
 const LS_CUST    = 'taos_customers';          // { [brandId]: { [email]: CustomerRecord } }
 const LS_PROCURE = 'taos_procurement';        // { suppliers: {[sku]:...}, purchaseOrders: [...] }
+const LS_SOCIAL  = 'taos_social_posts_v1';    // { [brandId]: { posts, baseline, lastPullAt } }
 
 function lsGet(key, fallback) {
   try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; } catch { return fallback; }
@@ -153,6 +154,7 @@ export const useStore = create((set, get) => {
   const customerCache = lsGet(LS_CUST, {});
   const clarityHistoryAll = lsGet('taos_clarity_history_v1', {});
   const utmSnapshotsAll   = lsGet('taos_utm_snapshots_v1', {});
+  const storedSocial      = lsGet(LS_SOCIAL, {});
   const initialBrandData = {};
   // Also migrate old single-store taos_inventory
   const oldInv = lsGet('taos_inventory', null);
@@ -680,12 +682,32 @@ export const useStore = create((set, get) => {
 
     // Social posts (IG/FB organic) — pulled on demand from SocialPosts page.
     // Structure: { [brandId]: { posts: normalizedPost[], baseline, lastPullAt } }
-    socialPosts:       {},
+    // Persisted in localStorage so the feed survives page reloads; we
+    // strip the heavy `_rawComments` field before saving since it's
+    // redundant once comments_detail has been populated by the
+    // enrichment pipeline (and would blow past the 5MB LS quota fast).
+    socialPosts:       storedSocial,
     socialPullStatus:  {},  // { [brandId]: 'idle'|'loading'|'success'|'error' }
     socialPullError:   {},
     setSocialPosts: (brandId, payload) => {
-      const socialPosts = { ...get().socialPosts, [brandId]: { ...payload, lastPullAt: Date.now() } };
+      const slim = {
+        ...payload,
+        posts: (payload.posts || []).map(p => {
+          const { _rawComments, ...rest } = p;
+          return rest;
+        }),
+        lastPullAt: Date.now(),
+      };
+      const socialPosts = { ...get().socialPosts, [brandId]: slim };
       set({ socialPosts });
+      try { lsSet(LS_SOCIAL, socialPosts); }
+      catch (e) { console.warn('[socialPosts] failed to persist (probably LS quota)', e); }
+    },
+    clearSocialPosts: brandId => {
+      const next = { ...get().socialPosts };
+      if (brandId) delete next[brandId]; else Object.keys(next).forEach(k => delete next[k]);
+      set({ socialPosts: next });
+      lsSet(LS_SOCIAL, next);
     },
     setSocialPullStatus: (brandId, status, error = null) => {
       set(s => ({

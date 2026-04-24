@@ -470,6 +470,16 @@ export default function SocialPosts() {
           <Facebook size={16} className="text-blue-400" />
           <h1 className="text-lg font-bold text-white">Social Posts</h1>
           <span className="text-[10px] text-slate-600">organic intel · per brand</span>
+          {(() => {
+            const bundles = active.map(b => socialPosts[b.id]).filter(Boolean);
+            if (!bundles.length) return null;
+            const latest = bundles.reduce((a, b) => (a.lastPullAt || 0) > (b.lastPullAt || 0) ? a : b);
+            return (
+              <span className="text-[10px] text-slate-500 bg-gray-800/60 px-2 py-0.5 rounded" title={new Date(latest.lastPullAt).toLocaleString()}>
+                cached · updated {ageLabel(latest.lastPullAt)}
+              </span>
+            );
+          })()}
         </div>
         <div className="ml-auto flex items-center gap-2">
           <label className="text-[10px] text-slate-500">Window</label>
@@ -482,7 +492,7 @@ export default function SocialPosts() {
             disabled={pulling || !configured}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-brand-600/30 hover:bg-brand-600/50 disabled:opacity-30 text-brand-200 border border-brand-700/40"
           >
-            <RefreshCw size={11} className={pulling ? 'animate-spin' : ''} /> {pulling ? 'Pulling…' : 'Pull posts'}
+            <RefreshCw size={11} className={pulling ? 'animate-spin' : ''} /> {pulling ? 'Pulling…' : stream.length ? 'Refresh' : 'Pull posts'}
           </button>
         </div>
       </div>
