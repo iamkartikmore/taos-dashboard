@@ -44,6 +44,7 @@ const NAV = [
   { to: '/daily-reports',    icon: CalendarDays,      label: 'Daily Reports',    group: 'shopify' },
   { to: '/email-campaigns',  icon: Mail,        label: 'Email Campaigns',    group: 'shopify' },
   { to: '/email-engine',     icon: Sparkles,    label: 'Email Engine',       group: 'shopify' },
+  { to: '/email-ops',        icon: Target,      label: 'Email Ops',          group: 'shopify' },
   { to: '/segments',         icon: Users,       label: 'Customer Segments',  group: 'shopify' },
   { to: '/customer-brain',   icon: Brain,       label: 'Customer Brain',     group: 'retention' },
   { to: '/retention-sheets', icon: Table2,      label: 'Retention Sheets',   group: 'retention' },
