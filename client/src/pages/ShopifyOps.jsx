@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect, Fragment } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
@@ -966,12 +966,39 @@ function extractOrderMeta(order) {
   const hasRefund = (order?.refunds?.length || 0) > 0;
   const refundAmount = (order?.refunds || []).reduce((s, r) =>
     s + (r.transactions || []).reduce((ts, t) => ts + p(t.amount), 0), 0);
-  const zip = String(order?.shipping_address?.zip || order?.billing_address?.zip || '').trim();
-  const city = order?.shipping_address?.city || order?.billing_address?.city || '';
-  const state = order?.shipping_address?.province || order?.billing_address?.province || '';
-  return { tags, reshipped, warehouse, hasRefund, refundAmount, zip, city, state };
+
+  const ship = order?.shipping_address || {};
+  const bill = order?.billing_address  || {};
+  const zip   = String(ship.zip   || bill.zip   || '').trim();
+  const city  = ship.city     || bill.city     || '';
+  const state = ship.province || bill.province || '';
+
+  // Customer identity — prefer Shopify customer_id, fall back to email, then phone
+  const cust  = order?.customer || {};
+  const firstName = ship.first_name || cust.first_name || '';
+  const lastName  = ship.last_name  || cust.last_name  || '';
+  const customerName  = [firstName, lastName].filter(Boolean).join(' ').trim() || '—';
+  const customerEmail = String(cust.email || order?.email || '').trim().toLowerCase();
+  const customerPhone = String(ship.phone || bill.phone || cust.phone || order?.phone || '').replace(/\s+/g, '');
+  const customerKey   = String(cust.id || customerEmail || customerPhone || '').trim();
+
+  const orderId    = String(order?.id || order?.order_id || '').trim();
+  const orderName  = order?.name || (orderId ? `#${orderId}` : '');
+  const totalPrice = p(order?.total_price || order?.current_total_price || 0);
+  const createdAt  = order?.created_at || order?.processed_at || '';
+
+  return {
+    tags, reshipped, warehouse, hasRefund, refundAmount,
+    zip, city, state,
+    orderId, orderName, totalPrice, createdAt,
+    customerKey, customerName, customerEmail, customerPhone,
+  };
 }
 
+/* Aggregate orders by any key (pincode, warehouse, state…) and also
+   track per-key customer rollups + full order rows so the UI can
+   drill in to see who's driving the refunds. Without this the op team
+   can't tell "bad pincode" from "one serial-refund customer". */
 function aggregateBy(orders, keyFn, { minOrders = 5 } = {}) {
   const map = new Map();
   for (const o of orders) {
@@ -979,34 +1006,270 @@ function aggregateBy(orders, keyFn, { minOrders = 5 } = {}) {
     const meta = extractOrderMeta(o);
     const key = keyFn(o, meta);
     if (!key) continue;
-    const cur = map.get(key) || { key, orders: 0, refunds: 0, reshipped: 0, refundAmt: 0, cities: new Set(), states: new Set(), warehouses: new Set() };
+    let cur = map.get(key);
+    if (!cur) {
+      cur = {
+        key, orders: 0, refunds: 0, reshipped: 0, refundAmt: 0,
+        cities: new Set(), states: new Set(), warehouses: new Set(),
+        _orders: [], _customers: new Map(),
+      };
+      map.set(key, cur);
+    }
     cur.orders++;
-    if (meta.hasRefund)  { cur.refunds++;   cur.refundAmt += meta.refundAmount; }
-    if (meta.reshipped)    cur.reshipped++;
+    if (meta.hasRefund) { cur.refunds++; cur.refundAmt += meta.refundAmount; }
+    if (meta.reshipped)   cur.reshipped++;
     if (meta.city)  cur.cities.add(meta.city);
     if (meta.state) cur.states.add(meta.state);
     if (meta.warehouse) cur.warehouses.add(meta.warehouse);
-    map.set(key, cur);
+
+    cur._orders.push({
+      orderId: meta.orderId, orderName: meta.orderName,
+      createdAt: meta.createdAt, totalPrice: meta.totalPrice,
+      refundAmount: meta.refundAmount, refunded: meta.hasRefund,
+      reshipped: meta.reshipped, warehouse: meta.warehouse || '',
+      customerName: meta.customerName, customerEmail: meta.customerEmail,
+      customerPhone: meta.customerPhone, customerKey: meta.customerKey,
+      zip: meta.zip, city: meta.city, state: meta.state,
+    });
+
+    // Customer-level rollup within this key
+    const ckey = meta.customerKey || `order:${meta.orderId}`; // unknown customers stay distinct
+    let c = cur._customers.get(ckey);
+    if (!c) {
+      c = {
+        key: ckey, name: meta.customerName, email: meta.customerEmail, phone: meta.customerPhone,
+        orders: 0, refunds: 0, reshipped: 0, refundAmt: 0, totalSpend: 0,
+      };
+      cur._customers.set(ckey, c);
+    }
+    c.orders++;
+    c.totalSpend += meta.totalPrice;
+    if (meta.hasRefund) { c.refunds++; c.refundAmt += meta.refundAmount; }
+    if (meta.reshipped) c.reshipped++;
   }
-  return [...map.values()].map(v => ({
-    ...v,
-    cities: [...v.cities].slice(0, 3),
-    states: [...v.states].slice(0, 3),
-    warehouses: [...v.warehouses],
-    refundRate:    v.orders > 0 ? v.refunds / v.orders : 0,
-    reshippedRate: v.orders > 0 ? v.reshipped / v.orders : 0,
-  })).filter(v => v.orders >= minOrders);
+
+  return [...map.values()].map(v => {
+    const customers = [...v._customers.values()].sort((a, b) =>
+      (b.refunds - a.refunds) ||
+      (b.refundAmt - a.refundAmt) ||
+      (b.orders - a.orders)
+    );
+    const topCustomer = customers[0] || null;
+    const topRefundShare = v.refunds > 0 && topCustomer ? topCustomer.refunds / v.refunds : 0;
+    const repeatRefunders = customers.filter(c => c.refunds >= 2).length;
+    return {
+      key: v.key,
+      orders: v.orders, refunds: v.refunds, reshipped: v.reshipped, refundAmt: v.refundAmt,
+      cities: [...v.cities].slice(0, 3),
+      states: [...v.states].slice(0, 3),
+      warehouses: [...v.warehouses],
+      refundRate:    v.orders > 0 ? v.refunds / v.orders : 0,
+      reshippedRate: v.orders > 0 ? v.reshipped / v.orders : 0,
+      uniqueCustomers: v._customers.size,
+      topCustomer, topRefundShare, repeatRefunders,
+      _orders: v._orders, _customers: customers,
+    };
+  }).filter(v => v.orders >= minOrders);
+}
+
+/* ─── CSV helpers ────────────────────────────────────────────────── */
+function downloadCsv(filename, rows) {
+  const csv = '﻿' + rows.map(r =>
+    r.map(v => {
+      const s = v === null || v === undefined ? '' : String(v);
+      return `"${s.replace(/"/g, '""')}"`;
+    }).join(',')
+  ).join('\n');
+  const a = Object.assign(document.createElement('a'), {
+    href: URL.createObjectURL(new Blob([csv], { type: 'text/csv' })),
+    download: filename,
+  });
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}
+
+function flattenOrdersForCsv(pincodeRows) {
+  const rows = [[
+    'Pincode','Cities','State','Order ID','Order Name','Created At',
+    'Customer','Email','Phone','Warehouse',
+    'Order Total','Refund Amount','Refunded','Reshipped',
+  ]];
+  for (const p of pincodeRows) {
+    for (const o of p._orders) {
+      rows.push([
+        p.key, p.cities.join('|'), p.states.join('|'),
+        o.orderId, o.orderName, o.createdAt,
+        o.customerName, o.customerEmail, o.customerPhone, o.warehouse,
+        o.totalPrice.toFixed(2), o.refundAmount.toFixed(2),
+        o.refunded ? 'Y' : '', o.reshipped ? 'Y' : '',
+      ]);
+    }
+  }
+  return rows;
+}
+
+/* Per-pincode drill-in: customer rollup on the left, order list on the
+   right. Order list defaults to refunded/reshipped rows so the op team
+   lands on the actionable rows first; toggle to see all. */
+function PincodeDetail({ pincode, onExportOrders, onExportCustomers }) {
+  const [onlyIssues, setOnlyIssues] = useState(true);
+  const orders = useMemo(() => {
+    const list = pincode._orders;
+    const sorted = [...list].sort((a, b) =>
+      (Number(b.refunded) - Number(a.refunded)) ||
+      (Number(b.reshipped) - Number(a.reshipped)) ||
+      String(b.createdAt).localeCompare(String(a.createdAt))
+    );
+    return onlyIssues ? sorted.filter(o => o.refunded || o.reshipped) : sorted;
+  }, [pincode, onlyIssues]);
+
+  const topCustomers = pincode._customers.slice(0, 25);
+
+  return (
+    <div className="border-y border-gray-800/80 bg-gray-950 p-3">
+      <div className="grid grid-cols-1 2xl:grid-cols-5 gap-4">
+        {/* Customers panel */}
+        <div className="2xl:col-span-2">
+          <div className="flex items-center gap-2 mb-2 px-1">
+            <Users size={12} className="text-slate-400"/>
+            <div className="text-[11px] font-semibold text-slate-200">
+              Customers in {pincode.key} · {pincode.uniqueCustomers} unique
+            </div>
+            <button onClick={onExportCustomers} className="ml-auto flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-slate-300 border border-gray-700">
+              <Download size={10}/> CSV
+            </button>
+          </div>
+          {pincode.refunds > 0 && pincode.topRefundShare >= 0.5 && (
+            <div className="mb-2 px-2 py-1.5 rounded bg-amber-900/20 border border-amber-800/40 text-[10px] text-amber-200 flex items-start gap-1.5">
+              <AlertTriangle size={11} className="text-amber-400 mt-0.5 flex-shrink-0"/>
+              <span>
+                <strong>{pincode.topCustomer?.name || 'Top customer'}</strong> drives{' '}
+                <strong>{(pincode.topRefundShare * 100).toFixed(0)}%</strong> of this pincode's refunds —
+                likely a customer issue, not a pincode issue.
+              </span>
+            </div>
+          )}
+          <div className="overflow-auto rounded border border-gray-800" style={{ maxHeight: '320px' }}>
+            <table className="w-full text-[11px]">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                <tr>
+                  <th className="px-2 py-1.5 text-left text-slate-500 font-semibold">Customer</th>
+                  <th className="px-2 py-1.5 text-right text-slate-500 font-semibold">Orders</th>
+                  <th className="px-2 py-1.5 text-right text-slate-500 font-semibold">Refunds</th>
+                  <th className="px-2 py-1.5 text-right text-slate-500 font-semibold">Reship</th>
+                  <th className="px-2 py-1.5 text-right text-slate-500 font-semibold">Refund ₹</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topCustomers.map((c, i) => (
+                  <tr key={c.key} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                    <td className="px-2 py-1.5">
+                      <div className="text-slate-200 font-medium truncate max-w-[200px]">{c.name}</div>
+                      <div className="text-[9px] text-slate-500 truncate max-w-[200px]">
+                        {c.email || c.phone || <span className="italic">no contact</span>}
+                      </div>
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono text-slate-300">{num(c.orders)}</td>
+                    <td className="px-2 py-1.5 text-right font-mono font-semibold" style={{ color: c.refunds >= 2 ? '#ef4444' : c.refunds > 0 ? '#f59e0b' : '#64748b' }}>
+                      {c.refunds || '—'}
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono text-slate-400">{c.reshipped || '—'}</td>
+                    <td className="px-2 py-1.5 text-right font-mono text-red-400">{c.refundAmt > 0 ? cur(c.refundAmt) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {pincode._customers.length > topCustomers.length && (
+              <div className="px-2 py-1 text-[10px] text-slate-600 italic bg-gray-950 border-t border-gray-800">
+                …{pincode._customers.length - topCustomers.length} more customers in CSV
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Orders panel */}
+        <div className="2xl:col-span-3">
+          <div className="flex items-center gap-2 mb-2 px-1">
+            <Hash size={12} className="text-slate-400"/>
+            <div className="text-[11px] font-semibold text-slate-200">
+              Orders in {pincode.key} · {pincode.orders} total · {pincode.refunds} refunded · {pincode.reshipped} reshipped
+            </div>
+            <label className="ml-auto flex items-center gap-1 text-[10px] text-slate-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={onlyIssues}
+                onChange={e => setOnlyIssues(e.target.checked)}
+                className="w-3 h-3 accent-amber-500"
+              />
+              Refunded/reshipped only
+            </label>
+            <button onClick={onExportOrders} className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-slate-300 border border-gray-700">
+              <Download size={10}/> CSV
+            </button>
+          </div>
+          <div className="overflow-auto rounded border border-gray-800" style={{ maxHeight: '320px' }}>
+            <table className="w-full text-[11px]">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+                <tr>
+                  <th className="px-2 py-1.5 text-left text-slate-500 font-semibold">Order</th>
+                  <th className="px-2 py-1.5 text-left text-slate-500 font-semibold">Date</th>
+                  <th className="px-2 py-1.5 text-left text-slate-500 font-semibold">Customer</th>
+                  <th className="px-2 py-1.5 text-left text-slate-500 font-semibold">Warehouse</th>
+                  <th className="px-2 py-1.5 text-right text-slate-500 font-semibold">Total ₹</th>
+                  <th className="px-2 py-1.5 text-right text-slate-500 font-semibold">Refund ₹</th>
+                  <th className="px-2 py-1.5 text-center text-slate-500 font-semibold">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {orders.length === 0 && (
+                  <tr><td colSpan={7} className="py-6 text-center text-slate-600 italic">
+                    {onlyIssues ? 'No refunded or reshipped orders in this pincode.' : 'No orders.'}
+                  </td></tr>
+                )}
+                {orders.slice(0, 200).map((o, i) => (
+                  <tr key={`${o.orderId}-${i}`} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                    <td className="px-2 py-1.5 font-mono text-slate-200">{o.orderName || o.orderId}</td>
+                    <td className="px-2 py-1.5 text-slate-400 font-mono text-[10px]">{o.createdAt ? o.createdAt.slice(0, 10) : '—'}</td>
+                    <td className="px-2 py-1.5">
+                      <div className="text-slate-300 truncate max-w-[160px]">{o.customerName}</div>
+                      <div className="text-[9px] text-slate-500 truncate max-w-[160px]">{o.customerEmail || o.customerPhone}</div>
+                    </td>
+                    <td className="px-2 py-1.5 text-slate-400">{o.warehouse || '—'}</td>
+                    <td className="px-2 py-1.5 text-right font-mono text-slate-300">{o.totalPrice > 0 ? cur(o.totalPrice) : '—'}</td>
+                    <td className="px-2 py-1.5 text-right font-mono text-red-400">{o.refundAmount > 0 ? cur(o.refundAmount) : '—'}</td>
+                    <td className="px-2 py-1.5 text-center">
+                      <div className="inline-flex gap-1">
+                        {o.refunded  && <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-red-900/40 text-red-300">REF</span>}
+                        {o.reshipped && <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-900/40 text-amber-300">RE-S</span>}
+                        {!o.refunded && !o.reshipped && <span className="text-slate-700">—</span>}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {orders.length > 200 && (
+              <div className="px-2 py-1 text-[10px] text-slate-600 italic bg-gray-950 border-t border-gray-800">
+                Showing 200 of {orders.length} — full list in CSV
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function LogisticsTab({ rawOrders }) {
   const [minOrders, setMinOrders] = useState(5);
   const [sortBy, setSortBy]       = useState('refundRate');
+  const [search, setSearch]       = useState('');
+  const [expanded, setExpanded]   = useState(() => new Set());
 
   const orders = useMemo(() => rawOrders.filter(o => !o.cancelled_at), [rawOrders]);
 
   const metaStats = useMemo(() => {
     let total = 0, refunded = 0, reshipped = 0, refundAmt = 0;
-    let warehouseCount = 0, warehouseOrders = 0;
+    let warehouseOrders = 0;
     for (const o of orders) {
       total++;
       const m = extractOrderMeta(o);
@@ -1032,17 +1295,120 @@ function LogisticsTab({ rawOrders }) {
       .sort((a, b) => (b[sortBy] ?? 0) - (a[sortBy] ?? 0)),
     [orders, sortBy]);
 
-  const exportPincodeCsv = () => {
-    const rows = [['Pincode', 'Cities', 'State', 'Orders', 'Refunds', 'Refund Rate %', 'Reshipped', 'Reshipped Rate %', 'Refund Amount']];
-    for (const r of byPincode) {
-      rows.push([r.key, r.cities.join('|'), r.states.join('|'), r.orders, r.refunds, (r.refundRate * 100).toFixed(1), r.reshipped, (r.reshippedRate * 100).toFixed(1), r.refundAmt.toFixed(2)]);
-    }
-    const csv = '﻿' + rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
-    const a = Object.assign(document.createElement('a'), {
-      href: URL.createObjectURL(new Blob([csv], { type: 'text/csv' })),
-      download: `logistics-pincode-${new Date().toISOString().slice(0, 10)}.csv`,
+  /* Filter pincodes by free-text search (pincode / city / customer name/email/phone). */
+  const filteredPincodes = useMemo(() => {
+    if (!search.trim()) return byPincode;
+    const q = search.trim().toLowerCase();
+    return byPincode.filter(p => {
+      if (String(p.key).includes(q)) return true;
+      if (p.cities.some(c => c.toLowerCase().includes(q))) return true;
+      if (p.states.some(s => s.toLowerCase().includes(q))) return true;
+      if (p.topCustomer && (
+        (p.topCustomer.name || '').toLowerCase().includes(q) ||
+        (p.topCustomer.email || '').toLowerCase().includes(q) ||
+        (p.topCustomer.phone || '').includes(q)
+      )) return true;
+      // Also look deeper into customers for a match
+      return p._customers.some(c =>
+        (c.name || '').toLowerCase().includes(q) ||
+        (c.email || '').toLowerCase().includes(q) ||
+        (c.phone || '').includes(q)
+      );
     });
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  }, [byPincode, search]);
+
+  /* Global customer rollup — spot serial refunders across every pincode.
+     Keyed by customer_id / email / phone fallback order. */
+  const globalCustomers = useMemo(() => {
+    const map = new Map();
+    for (const o of orders) {
+      const m = extractOrderMeta(o);
+      const ckey = m.customerKey || `order:${m.orderId}`;
+      let c = map.get(ckey);
+      if (!c) {
+        c = {
+          key: ckey, name: m.customerName, email: m.customerEmail, phone: m.customerPhone,
+          orders: 0, refunds: 0, reshipped: 0, refundAmt: 0, totalSpend: 0,
+          pincodes: new Set(), orderIds: [],
+        };
+        map.set(ckey, c);
+      }
+      c.orders++;
+      c.totalSpend += m.totalPrice;
+      if (m.hasRefund) { c.refunds++; c.refundAmt += m.refundAmount; }
+      if (m.reshipped) c.reshipped++;
+      if (m.zip) c.pincodes.add(m.zip);
+      if (m.orderId) c.orderIds.push(m.orderId);
+    }
+    return [...map.values()]
+      .map(c => ({ ...c, pincodes: [...c.pincodes], refundRate: c.orders > 0 ? c.refunds / c.orders : 0 }))
+      .filter(c => c.refunds >= 2) // repeat refunders only
+      .sort((a, b) => (b.refunds - a.refunds) || (b.refundAmt - a.refundAmt));
+  }, [orders]);
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  const exportPincodeCsv = () => {
+    const rows = [[
+      'Pincode','Cities','State','Orders','Refunds','Refund Rate %',
+      'Reshipped','Reshipped Rate %','Refund Amount',
+      'Unique Customers','Repeat Refunders',
+      'Top Customer','Top Customer Email','Top Customer Refunds','Top Customer Share %',
+    ]];
+    for (const r of filteredPincodes) {
+      const tc = r.topCustomer || {};
+      rows.push([
+        r.key, r.cities.join('|'), r.states.join('|'),
+        r.orders, r.refunds, (r.refundRate * 100).toFixed(1),
+        r.reshipped, (r.reshippedRate * 100).toFixed(1), r.refundAmt.toFixed(2),
+        r.uniqueCustomers, r.repeatRefunders,
+        tc.name || '', tc.email || '', tc.refunds || 0,
+        (r.topRefundShare * 100).toFixed(1),
+      ]);
+    }
+    downloadCsv(`logistics-pincode-${today}.csv`, rows);
+  };
+
+  const exportAllOrdersCsv = () => {
+    downloadCsv(`logistics-orders-${today}.csv`, flattenOrdersForCsv(filteredPincodes));
+  };
+
+  const exportPincodeOrders = pincode => {
+    downloadCsv(`logistics-orders-${pincode.key}-${today}.csv`, flattenOrdersForCsv([pincode]));
+  };
+
+  const exportPincodeCustomers = pincode => {
+    const rows = [['Customer','Email','Phone','Orders','Refunds','Refund %','Reshipped','Refund ₹','Total Spend ₹']];
+    for (const c of pincode._customers) {
+      rows.push([
+        c.name, c.email, c.phone,
+        c.orders, c.refunds,
+        c.orders > 0 ? ((c.refunds / c.orders) * 100).toFixed(1) : '0.0',
+        c.reshipped, c.refundAmt.toFixed(2), c.totalSpend.toFixed(2),
+      ]);
+    }
+    downloadCsv(`logistics-customers-${pincode.key}-${today}.csv`, rows);
+  };
+
+  const exportRepeatRefundersCsv = () => {
+    const rows = [['Customer','Email','Phone','Orders','Refunds','Refund %','Reshipped','Refund ₹','Total Spend ₹','Pincodes','Order IDs']];
+    for (const c of globalCustomers) {
+      rows.push([
+        c.name, c.email, c.phone,
+        c.orders, c.refunds, (c.refundRate * 100).toFixed(1),
+        c.reshipped, c.refundAmt.toFixed(2), c.totalSpend.toFixed(2),
+        c.pincodes.join('|'), c.orderIds.join('|'),
+      ]);
+    }
+    downloadCsv(`logistics-repeat-refunders-${today}.csv`, rows);
+  };
+
+  const toggleExpanded = key => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
   };
 
   return (
@@ -1106,8 +1472,17 @@ function LogisticsTab({ rawOrders }) {
       <div className="rounded-xl border border-gray-800 bg-gray-900 overflow-hidden">
         <div className="px-4 py-3 border-b border-gray-800/60 flex items-center gap-2 flex-wrap">
           <Globe2 size={14} className="text-slate-400"/>
-          <h3 className="text-xs font-semibold text-white">By pincode · {byPincode.length} shown (min {minOrders}+ orders)</h3>
-          <div className="ml-auto flex items-center gap-2">
+          <h3 className="text-xs font-semibold text-white">By pincode · {filteredPincodes.length} shown (min {minOrders}+ orders)</h3>
+          <div className="ml-auto flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1 bg-gray-800 border border-gray-700 rounded px-2 py-1">
+              <Search size={11} className="text-slate-500"/>
+              <input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Pincode, city, customer…"
+                className="bg-transparent text-[11px] text-slate-200 w-48 outline-none placeholder:text-slate-600"
+              />
+            </div>
             <label className="text-[10px] text-slate-500">Min orders</label>
             <select value={minOrders} onChange={e => setMinOrders(Number(e.target.value))} className="text-[11px] bg-gray-800 border border-gray-700 rounded px-2 py-1 text-slate-200">
               {[1, 3, 5, 10, 20, 50].map(n => <option key={n} value={n}>{n}</option>)}
@@ -1119,16 +1494,22 @@ function LogisticsTab({ rawOrders }) {
               <option value="orders">Order volume</option>
               <option value="refunds">Refund count</option>
               <option value="refundAmt">Refund ₹</option>
+              <option value="topRefundShare">Top customer concentration</option>
+              <option value="repeatRefunders">Repeat refunders</option>
             </select>
-            <button onClick={exportPincodeCsv} className="ml-2 flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-slate-300 border border-gray-700">
-              <Download size={11}/> CSV
+            <button onClick={exportPincodeCsv} className="ml-2 flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-slate-300 border border-gray-700" title="Summary CSV — one row per pincode with customer concentration columns">
+              <Download size={11}/> Pincode CSV
+            </button>
+            <button onClick={exportAllOrdersCsv} className="flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-violet-900/30 hover:bg-violet-900/50 text-violet-200 border border-violet-800/50" title="Flat orders CSV — every order row with pincode, customer, order ID, refund flag">
+              <Download size={11}/> All orders
             </button>
           </div>
         </div>
-        <div className="overflow-auto" style={{ maxHeight: '560px' }}>
+        <div className="overflow-auto" style={{ maxHeight: '640px' }}>
           <table className="w-full text-xs">
-            <thead className="sticky top-0 bg-gray-900 border-b border-gray-800">
+            <thead className="sticky top-0 bg-gray-900 border-b border-gray-800 z-10">
               <tr>
+                <th className="px-2 py-2 w-6"></th>
                 <th className="px-3 py-2 text-left text-slate-400 font-semibold">Pincode</th>
                 <th className="px-3 py-2 text-left text-slate-400 font-semibold">Cities</th>
                 <th className="px-3 py-2 text-left text-slate-400 font-semibold">State</th>
@@ -1138,33 +1519,118 @@ function LogisticsTab({ rawOrders }) {
                 <th className="px-3 py-2 text-right text-slate-400 font-semibold">Reshipped</th>
                 <th className="px-3 py-2 text-right text-slate-400 font-semibold">Reshipped %</th>
                 <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refund ₹</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold" title="Unique customers in this pincode">Customers</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold" title="% of this pincode's refunds driven by its single top-refund customer. >50% = customer issue, not pincode.">Top cust %</th>
+                <th className="px-3 py-2 text-right text-slate-400 font-semibold" title="Customers with 2+ refunds in this pincode">Repeat</th>
               </tr>
             </thead>
             <tbody>
-              {byPincode.length === 0 && (
-                <tr><td colSpan={9} className="py-10 text-center text-slate-600 text-xs italic">No pincodes meet the filter. Try lowering Min orders.</td></tr>
+              {filteredPincodes.length === 0 && (
+                <tr><td colSpan={13} className="py-10 text-center text-slate-600 text-xs italic">No pincodes meet the filter. Try lowering Min orders or clearing the search.</td></tr>
               )}
-              {byPincode.slice(0, 500).map((r, i) => (
-                <tr key={r.key} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
-                  <td className="px-3 py-2 font-mono text-slate-200">{r.key}</td>
-                  <td className="px-3 py-2 text-[11px] text-slate-500 truncate max-w-[160px]">{r.cities.join(', ')}</td>
-                  <td className="px-3 py-2 text-[11px] text-slate-500 truncate max-w-[140px]">{r.states.join(', ')}</td>
-                  <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.orders)}</td>
-                  <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.refunds)}</td>
-                  <td className="px-3 py-2 text-right font-mono font-semibold" style={{ color: r.refundRate > 0.15 ? '#ef4444' : r.refundRate > 0.08 ? '#f59e0b' : '#64748b' }}>
-                    {(r.refundRate * 100).toFixed(1)}%
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.reshipped)}</td>
-                  <td className="px-3 py-2 text-right font-mono font-semibold" style={{ color: r.reshippedRate > 0.10 ? '#f59e0b' : '#64748b' }}>
-                    {(r.reshippedRate * 100).toFixed(1)}%
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono text-red-400">{cur(r.refundAmt)}</td>
-                </tr>
-              ))}
+              {filteredPincodes.slice(0, 500).map((r, i) => {
+                const isOpen = expanded.has(r.key);
+                const concentrationColor = r.topRefundShare >= 0.5 ? '#f59e0b' : r.topRefundShare >= 0.3 ? '#eab308' : '#64748b';
+                return (
+                  <Fragment key={r.key}>
+                    <tr
+                      className={clsx(i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40', 'hover:bg-gray-800/60 cursor-pointer')}
+                      onClick={() => toggleExpanded(r.key)}
+                    >
+                      <td className="px-2 py-2 text-slate-500">
+                        {isOpen ? <ChevronDown size={12}/> : <ChevronRight size={12}/>}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-slate-200">{r.key}</td>
+                      <td className="px-3 py-2 text-[11px] text-slate-500 truncate max-w-[160px]">{r.cities.join(', ')}</td>
+                      <td className="px-3 py-2 text-[11px] text-slate-500 truncate max-w-[140px]">{r.states.join(', ')}</td>
+                      <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.orders)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.refunds)}</td>
+                      <td className="px-3 py-2 text-right font-mono font-semibold" style={{ color: r.refundRate > 0.15 ? '#ef4444' : r.refundRate > 0.08 ? '#f59e0b' : '#64748b' }}>
+                        {(r.refundRate * 100).toFixed(1)}%
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.reshipped)}</td>
+                      <td className="px-3 py-2 text-right font-mono font-semibold" style={{ color: r.reshippedRate > 0.10 ? '#f59e0b' : '#64748b' }}>
+                        {(r.reshippedRate * 100).toFixed(1)}%
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono text-red-400">{cur(r.refundAmt)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-slate-300">{num(r.uniqueCustomers)}</td>
+                      <td className="px-3 py-2 text-right font-mono font-semibold" style={{ color: concentrationColor }}>
+                        {r.refunds > 0 ? `${(r.topRefundShare * 100).toFixed(0)}%` : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono" style={{ color: r.repeatRefunders > 0 ? '#f59e0b' : '#64748b' }}>
+                        {r.repeatRefunders > 0 ? num(r.repeatRefunders) : '—'}
+                      </td>
+                    </tr>
+                    {isOpen && (
+                      <tr className="bg-gray-950">
+                        <td colSpan={13} className="p-0">
+                          <PincodeDetail
+                            pincode={r}
+                            onExportOrders={() => exportPincodeOrders(r)}
+                            onExportCustomers={() => exportPincodeCustomers(r)}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* REPEAT REFUNDERS — global view */}
+      {globalCustomers.length > 0 && (
+        <div className="rounded-xl border border-amber-800/40 bg-amber-900/5 overflow-hidden">
+          <div className="px-4 py-3 border-b border-amber-800/30 flex items-center gap-2 flex-wrap">
+            <AlertTriangle size={14} className="text-amber-400"/>
+            <h3 className="text-xs font-semibold text-amber-200">
+              Repeat refunders · {num(globalCustomers.length)} customers with 2+ refunds across all pincodes
+            </h3>
+            <button onClick={exportRepeatRefundersCsv} className="ml-auto flex items-center gap-1 text-[11px] px-2 py-1 rounded bg-amber-900/40 hover:bg-amber-900/60 text-amber-200 border border-amber-800/60">
+              <Download size={11}/> CSV (incl. order IDs)
+            </button>
+          </div>
+          <div className="overflow-auto" style={{ maxHeight: '360px' }}>
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-900 border-b border-gray-800 z-10">
+                <tr>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Customer</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Contact</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Orders</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refunds</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refund %</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Reshipped</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Refund ₹</th>
+                  <th className="px-3 py-2 text-right text-slate-400 font-semibold">Total spend ₹</th>
+                  <th className="px-3 py-2 text-left text-slate-400 font-semibold">Pincodes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {globalCustomers.slice(0, 200).map((c, i) => (
+                  <tr key={c.key} className={i % 2 === 0 ? 'bg-gray-950/40' : 'bg-gray-900/40'}>
+                    <td className="px-3 py-2 text-slate-200 font-medium">{c.name}</td>
+                    <td className="px-3 py-2 text-[11px] text-slate-500">
+                      {c.email && <div className="truncate max-w-[220px]">{c.email}</div>}
+                      {c.phone && <div className="font-mono">{c.phone}</div>}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{num(c.orders)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-red-400 font-semibold">{num(c.refunds)}</td>
+                    <td className="px-3 py-2 text-right font-mono" style={{ color: c.refundRate > 0.5 ? '#ef4444' : c.refundRate > 0.25 ? '#f59e0b' : '#64748b' }}>
+                      {(c.refundRate * 100).toFixed(0)}%
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{num(c.reshipped)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-red-400">{cur(c.refundAmt)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-slate-300">{cur(c.totalSpend)}</td>
+                    <td className="px-3 py-2 text-[11px] text-slate-500 font-mono truncate max-w-[160px]">{c.pincodes.slice(0, 4).join(', ')}{c.pincodes.length > 4 ? `…+${c.pincodes.length - 4}` : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* BY STATE — broader zoom */}
       {byState.length > 0 && (
