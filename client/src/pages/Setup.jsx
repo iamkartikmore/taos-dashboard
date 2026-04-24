@@ -698,7 +698,17 @@ function BrandCard({ brand, brandInfo }) {
                         )}
                         {socialDiscovery.pages?.length > 0 && socialDiscovery.pages.every(p => !p.ig?.id) && (
                           <span className="block mt-1 text-amber-300">
-                            Page found but <strong>no IG account linked</strong>. Fix in Business Settings → Instagram accounts → connect your IG to the Page, and make sure the IG account is <strong>Business or Creator</strong> type (not Personal).
+                            {socialDiscovery.pages.some(p => p.igPersonalLinked) ? (
+                              <>An IG account <strong>is</strong> linked to the Page but it's a <strong>Personal</strong> account. Meta Graph API only exposes insights for <strong>Business</strong> or <strong>Creator</strong> accounts. Fix in the Instagram app → Settings → <strong>Account type and tools</strong> → switch to Business or Creator, then come back and click Discover again.</>
+                            ) : (
+                              <>Pages found but <strong>no IG Business account linked to either of them</strong>. Two things to check:
+                                <ul className="list-disc ml-4 mt-0.5 space-y-0.5">
+                                  <li>business.facebook.com/settings → <strong>Instagram accounts</strong> → select your IG → <strong>Connected assets</strong> → connect to the right Page.</li>
+                                  <li>business.facebook.com/settings → <strong>System Users</strong> → your user → <strong>Assign Assets</strong> → <strong>Instagram accounts</strong> → grant <em>Manage</em> on your IG.</li>
+                                </ul>
+                                Then regenerate the token (Meta caches IG assignments at token-creation time).
+                              </>
+                            )}
                           </span>
                         )}
                       </span>

@@ -1946,6 +1946,36 @@ app.post('/api/social/verify', async (req, res) => {
       ig:              p.instagram_business_account || null,
     }));
 
+    // Meta quirk: the nested instagram_business_account field in
+    // /me/accounts is unreliable — often null even when the IG account
+    // IS linked to the Page. Fallback: for every page missing ig info,
+    // query the Page directly using its Page access token. This
+    // usually surfaces the IG account + also picks up `connected_instagram_account`
+    // (the consumer-linked IG, less useful for insights but worth logging).
+    await Promise.all(pages.map(async p => {
+      if (p.ig?.id) return;
+      const tokenForPage = p.pageAccessToken || token;
+      try {
+        const direct = await withRetry(() => axios.get(
+          `https://graph.facebook.com/${apiVersion}/${p.pageId}`,
+          {
+            params: {
+              access_token: tokenForPage,
+              fields: 'instagram_business_account{id,username,profile_picture_url,followers_count,media_count},connected_instagram_account{id,username}',
+            },
+            timeout: 15000,
+          },
+        ));
+        if (direct.data?.instagram_business_account?.id) {
+          p.ig = direct.data.instagram_business_account;
+        } else if (direct.data?.connected_instagram_account?.id) {
+          // A consumer IG is linked but not converted to Business/Creator.
+          // Surface this so the UI can tell the user to switch account type.
+          p.igPersonalLinked = direct.data.connected_instagram_account;
+        }
+      } catch (_) { /* best-effort per-page follow-up */ }
+    }));
+
     // Permissions — surface which scopes we have
     let permissions = [];
     try {
