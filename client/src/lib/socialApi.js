@@ -28,8 +28,8 @@ export async function verifySocialToken(token, apiVersion = 'v21.0') {
   return post('/api/social/verify', { token, apiVersion });
 }
 
-export async function pullInstagram({ token, apiVersion = 'v21.0', igUserId, brandId, limit = 200, sinceDays = 90, includeComments = true }) {
-  const { posts = [], stats = null } = await post('/api/social/pull-ig', { token, apiVersion, igUserId, limit, sinceDays, includeComments });
+export async function pullInstagram({ token, pageAccessToken, apiVersion = 'v21.0', igUserId, brandId, limit = 200, sinceDays = 90, includeComments = true }) {
+  const { posts = [], stats = null } = await post('/api/social/pull-ig', { token, pageAccessToken, apiVersion, igUserId, limit, sinceDays, includeComments });
   const normalized = posts.map(raw => normalizePost('instagram', raw, { brandId }));
   normalized._stats = stats;
   return normalized;

@@ -2008,19 +2008,40 @@ app.post('/api/social/verify', async (req, res) => {
 });
 
 // Pull IG posts + per-media insights + top comments for one brand.
-// Body: { token, apiVersion, igUserId, limit, sinceDays, includeComments }
+// Body: { token, pageAccessToken?, apiVersion, igUserId, limit, sinceDays, includeComments }
+//
+// TOKEN PICK: Meta's Instagram Graph API explicitly recommends a Page
+// Access Token for IG Business endpoints. A user/System User token
+// often returns only a subset of the account's media (typically the
+// FEED slice, dropping REELS). The caller should pass both; we prefer
+// the Page token when present.
 app.post('/api/social/pull-ig', async (req, res) => {
-  const { token, apiVersion = 'v21.0', igUserId, limit = 200, sinceDays = 90, includeComments = true } = req.body || {};
+  const { token, pageAccessToken, apiVersion = 'v21.0', igUserId, limit = 200, sinceDays = 90, includeComments = true } = req.body || {};
   if (!token || !igUserId) return res.status(400).json({ error: 'token and igUserId required' });
+  const igToken = pageAccessToken || token;
   await acquireMetaSlot();
   try {
+    // Step 0 — diagnostic: fetch the IG user's own metadata so the
+    // client can sanity-check we're querying the right account, and
+    // cross-reference media_count against how many we actually pull.
+    let igUser = null;
+    try {
+      const ur = await withRetry(() => axios.get(
+        `https://graph.facebook.com/${apiVersion}/${igUserId}`,
+        { params: { access_token: igToken, fields: 'id,username,name,account_type,media_count,followers_count,biography,website' }, timeout: 15000 },
+      ));
+      igUser = ur.data || null;
+    } catch (e) {
+      igUser = { error: e.response?.data?.error?.message || e.message };
+    }
+
     // Step 1 — list media. Raise the page cap so longer windows
     // (365d) don't silently drop reels buried beneath 200+ feed posts.
-    // 20 pages × 50 = 1000 media max per brand.
-    const maxPages = Math.max(4, Math.ceil(limit / 50));
+    // 30 pages × 50 = up to 1500 media per brand.
+    const maxPages = Math.max(4, Math.ceil(limit / 50), 30);
     const media = await pagedGet(
       `https://graph.facebook.com/${apiVersion}/${igUserId}/media`,
-      { access_token: token, fields: IG_MEDIA_FIELDS, limit: 50 },
+      { access_token: igToken, fields: IG_MEDIA_FIELDS, limit: 50 },
       { maxPages },
     );
 
@@ -2032,6 +2053,17 @@ app.post('/api/social/pull-ig', async (req, res) => {
       if (seenIds.has(m.id)) continue;
       seenIds.add(m.id);
       uniq.push(m);
+    }
+
+    // Log first 10 items to server console for debugging — helps us
+    // verify media_product_type is actually being returned.
+    console.log(`[social/pull-ig] IG user ${igUserId} (@${igUser?.username || '?'}): media_count=${igUser?.media_count}, account_type=${igUser?.account_type}, fetched=${uniq.length}`);
+    if (uniq.length) {
+      console.log('[social/pull-ig] first 10 items:',
+        uniq.slice(0, 10).map(m => ({
+          id: m.id, media_type: m.media_type, media_product_type: m.media_product_type, ts: m.timestamp,
+        })),
+      );
     }
 
     // Filter by age
@@ -2056,7 +2088,21 @@ app.post('/api/social/pull-ig', async (req, res) => {
     // silently returning zeroed posts. If the type-specific metric set
     // fails (e.g. a metric got deprecated), retry with the safe subset.
     const enriched = [];
-    const stats = { total: filtered.length, insightsOk: 0, insightsFallback: 0, insightsFailed: 0, sampleErrors: [], byMediaType, byProductType };
+    const stats = {
+      total: filtered.length,
+      insightsOk: 0,
+      insightsFallback: 0,
+      insightsFailed: 0,
+      sampleErrors: [],
+      byMediaType,
+      byProductType,
+      igUser,
+      tokenSource: pageAccessToken ? 'page' : 'user',
+      totalFetched: uniq.length,
+      // Big signal: if Meta says media_count=200 but we only fetched 57,
+      // the endpoint is filtering. Usually fixed by switching token.
+      suspiciousDelta: igUser?.media_count && uniq.length < igUser.media_count * 0.7,
+    };
     const CONCURRENCY = 4;
     for (let i = 0; i < filtered.length; i += CONCURRENCY) {
       const batch = filtered.slice(i, i + CONCURRENCY);
@@ -2070,7 +2116,7 @@ app.post('/api/social/pull-ig', async (req, res) => {
         const fetchInsights = async metric => {
           const ir = await axios.get(
             `https://graph.facebook.com/${apiVersion}/${m.id}/insights`,
-            { params: { access_token: token, metric }, timeout: 25000 },
+            { params: { access_token: igToken, metric }, timeout: 25000 },
           );
           return ir.data?.data || [];
         };
@@ -2101,7 +2147,7 @@ app.post('/api/social/pull-ig', async (req, res) => {
               `https://graph.facebook.com/${apiVersion}/${m.id}/comments`,
               {
                 params: {
-                  access_token: token,
+                  access_token: igToken,
                   fields: 'text,timestamp,username,like_count,replies.summary(true)',
                   limit: 50,
                   order: 'reverse_chronological',

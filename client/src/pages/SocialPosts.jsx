@@ -505,6 +505,20 @@ export default function SocialPosts() {
           const summarise = (platform, arr) => {
             const s = arr._stats;
             if (!s) { appendLog(`[${b.name}] ${platform}: ${arr.length} posts`); return; }
+            // IG user diagnostics — critical for debugging "missing reels"
+            if (s.igUser) {
+              if (s.igUser.error) {
+                appendLog(`[${b.name}] ${platform} account lookup FAILED: ${s.igUser.error}`);
+              } else {
+                appendLog(`[${b.name}] ${platform} account: @${s.igUser.username} · ${s.igUser.account_type || '?'} · media_count=${s.igUser.media_count ?? '?'} · followers=${s.igUser.followers_count ?? '?'}`);
+              }
+            }
+            if (s.tokenSource) {
+              appendLog(`[${b.name}] ${platform} token source: ${s.tokenSource}${s.tokenSource === 'user' ? ' (WARNING: Page token preferred — run Discover to capture it)' : ''}`);
+            }
+            if (s.suspiciousDelta && s.igUser?.media_count) {
+              appendLog(`[${b.name}] ${platform} ⚠︎ Meta reports ${s.igUser.media_count} total media but /media returned only ${s.totalFetched} — token likely doesn't have full IG access. Regenerate with a Page Access Token.`);
+            }
             const mixStr = s.byMediaType
               ? Object.entries(s.byMediaType).map(([k, v]) => `${k}:${v}`).join(', ')
               : '';
@@ -520,8 +534,19 @@ export default function SocialPosts() {
             }
           };
           if (cfg.igBusinessId) {
-            appendLog(`[${b.name}] IG: fetching media + insights…`);
-            const ig = await pullInstagram({ token, apiVersion, igUserId: cfg.igBusinessId, brandId: b.id, sinceDays, limit: 200 });
+            appendLog(`[${b.name}] IG: fetching media + insights… (token=${cfg.pageAccessToken ? 'Page' : 'User'})`);
+            // Pass the Page Access Token for IG calls — Meta docs recommend
+            // this for all IG Business endpoints. User/System-User tokens
+            // often return only a FEED subset, dropping reels.
+            const ig = await pullInstagram({
+              token,
+              pageAccessToken: cfg.pageAccessToken,
+              apiVersion,
+              igUserId: cfg.igBusinessId,
+              brandId: b.id,
+              sinceDays,
+              limit: 500,
+            });
             chunks.push(...ig);
             summarise('IG', ig);
           }
