@@ -94,7 +94,9 @@ function PlatformIcon({ platform, size = 11 }) {
 /* ── Post card (feed grid) ─────────────────────────────────────── */
 function PostCard({ post, onOpen }) {
   const media = post.thumbnailUrl || post.mediaUrl;
-  const hasVideo = ['VIDEO','REEL'].includes(post.mediaType) || post.videoViews > 0;
+  // Trust media type classification, not metric-derived heuristics.
+  // A photo's scroll-past "views" count is not a video signal.
+  const hasVideo = post.isVideoMedia || ['VIDEO','REEL'].includes(post.mediaType);
   return (
     <button
       onClick={() => onOpen(post)}
@@ -204,16 +206,52 @@ function PostDrawer({ post, onClose }) {
           </div>
         )}
 
-        {/* Metrics tile grid */}
+        {/* Metrics tile grid — rendered by media type.
+            Meta's insights API exposes different metric sets per
+            media_type/media_product_type, so the UI has to mirror
+            that. Never show "Video views" on an image, never show
+            "Profile visits" on a video/reel (Meta doesn't return
+            those for video media). */}
         <div className="grid grid-cols-4 gap-2">
+          {/* Core — always shown */}
           <KPI label="Reach"      value={fmtCompact(post.reach)}        Icon={Eye}           color="#06b6d4" />
           <KPI label="Engagement" value={pct(post.engagementRate)}      Icon={Heart}         color="#ec4899" sub={`${fmtCompact(post.totalInteractions)} total`} />
-          <KPI label="Save rate"  value={pct(post.saveRate)}            Icon={Bookmark}      color="#a855f7" sub={`${fmtCompact(post.saves)} saves`} />
-          <KPI label="Share rate" value={pct(post.shareRate)}           Icon={Share2}        color="#22c55e" sub={`${fmtCompact(post.shares)} shares`} />
+          <KPI label={post.platform === 'facebook' ? 'Reactions' : 'Likes'} value={fmtCompact(post.likes)} Icon={Heart} color="#ef4444" />
           <KPI label="Comments"   value={fmtCompact(post.comments)}     Icon={MessageCircle} color="#f59e0b" />
-          <KPI label="Likes"      value={fmtCompact(post.likes)}        Icon={Heart}         color="#ef4444" />
-          {post.videoViews > 0 && <KPI label="Video views" value={fmtCompact(post.videoViews)} Icon={Play} color="#8b5cf6" sub={post.avgWatchSec ? `avg ${post.avgWatchSec.toFixed(1)}s` : null} />}
-          {post.profileVisits > 0 && <KPI label="Profile visits" value={fmtCompact(post.profileVisits)} Icon={Users} color="#3b82f6" sub={post.follows ? `+${post.follows} follows` : null} />}
+          <KPI label="Share rate" value={pct(post.shareRate)}           Icon={Share2}        color="#22c55e" sub={`${fmtCompact(post.shares)} shares`} />
+
+          {/* IG-only on every IG post (FB has no save metric) */}
+          {post.platform === 'instagram' && (
+            <KPI label="Save rate" value={pct(post.saveRate)}           Icon={Bookmark}      color="#a855f7" sub={`${fmtCompact(post.saves)} saves`} />
+          )}
+          {post.platform === 'facebook' && post.clicks > 0 && (
+            <KPI label="Clicks" value={fmtCompact(post.clicks)} Icon={ArrowUpRight} color="#3b82f6" sub={post.clickRate ? pct(post.clickRate) + ' of reach' : null} />
+          )}
+
+          {/* VIDEO / REEL tiles — only rendered for video media */}
+          {post.isVideoMedia && post.videoViews > 0 && (
+            <KPI label={post.mediaType === 'REEL' ? 'Reel plays' : 'Video plays'}
+                 value={fmtCompact(post.videoViews)} Icon={Play} color="#8b5cf6"
+                 sub={post.reach ? `${pct(post.videoViewRate)} play-through` : null} />
+          )}
+          {post.mediaType === 'REEL' && post.avgWatchSec > 0 && (
+            <KPI label="Avg watch time" value={`${post.avgWatchSec.toFixed(1)}s`} Icon={Clock} color="#8b5cf6"
+                 sub={post.totalWatchTimeSec ? `${fmtCompact(post.totalWatchTimeSec)}s total` : null} />
+          )}
+
+          {/* IMAGE / CAROUSEL tiles — only rendered for non-video IG media.
+              `views` here is IG's scroll-past count, NOT a video metric. */}
+          {post.platform === 'instagram' && !post.isVideoMedia && post.views > 0 && (
+            <KPI label="Views" value={fmtCompact(post.views)} Icon={Eye} color="#06b6d4"
+                 sub={`${pct(post.viewRate)} of reach`} />
+          )}
+          {post.platform === 'instagram' && !post.isVideoMedia && post.profileVisits > 0 && (
+            <KPI label="Profile visits" value={fmtCompact(post.profileVisits)} Icon={Users} color="#3b82f6"
+                 sub={post.follows ? `+${post.follows} follows` : null} />
+          )}
+          {post.platform === 'instagram' && !post.isVideoMedia && post.profileActivity > 0 && (
+            <KPI label="Profile activity" value={fmtCompact(post.profileActivity)} Icon={Users} color="#3b82f6" sub="actions on profile" />
+          )}
         </div>
 
         {/* Ads potential breakdown */}

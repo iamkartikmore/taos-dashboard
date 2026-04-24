@@ -51,26 +51,57 @@ function parseMentions(caption = '') {
 }
 
 function normalizeInstagram(raw, ctx) {
-  const rawType = String(raw.media_product_type || raw.media_type || '').toUpperCase();
-  const isReel = raw._isReel || rawType.includes('REEL');
-  const mediaType = isReel ? 'REEL' : String(raw.media_type || 'IMAGE').toUpperCase();
+  // ─── Classify the media type correctly first ───────────────────
+  // Meta's two type fields:
+  //   media_product_type: AD | FEED | STORY | REELS
+  //   media_type:         IMAGE | VIDEO | CAROUSEL_ALBUM
+  // A REELS post is always media_type=VIDEO, but not every VIDEO is a REEL
+  // (VIDEO + media_product_type=FEED = feed video, NOT a reel).
+  const productType = String(raw.media_product_type || '').toUpperCase();
+  const baseType    = String(raw.media_type || 'IMAGE').toUpperCase();
+  const isReel      = raw._isReel || productType === 'REELS';
+  const mediaType   = isReel ? 'REEL' : baseType;
+
+  // Does this media carry video content? Drives which "watch"/"play"
+  // metrics are meaningful. A CAROUSEL with video children counts.
+  const carouselHasVideo = baseType === 'CAROUSEL_ALBUM'
+    && (raw.children?.data || []).some(c => String(c.media_type).toUpperCase() === 'VIDEO');
+  const isVideoMedia = isReel || baseType === 'VIDEO' || carouselHasVideo;
+
   const i = raw._insights || [];
-  // v20+: Meta deprecated `impressions` and `plays` on IG media and
-  // replaced both with `views`. Read whichever Meta returned.
+
+  // ─── Metrics that exist on EVERY media type ────────────────────
   const reach       = extractIgInsight(i, 'reach');
-  const views       = extractIgInsight(i, 'views');
-  const impressions = extractIgInsight(i, 'impressions') || views || reach;
   const saves       = extractIgInsight(i, 'saved');
-  const likes       = extractIgInsight(i, 'likes') || num(raw.like_count);
+  const likes       = extractIgInsight(i, 'likes')    || num(raw.like_count);
   const comments    = extractIgInsight(i, 'comments') || num(raw.comments_count);
   const shares      = extractIgInsight(i, 'shares');
-  const plays       = extractIgInsight(i, 'plays') || views;
-  const videoViews  = extractIgInsight(i, 'video_views') || views || plays;
-  const profileVisits = extractIgInsight(i, 'profile_visits');
-  const follows       = extractIgInsight(i, 'follows');
-  const avgWatchSec   = extractIgInsight(i, 'ig_reels_avg_watch_time') / 1000 || 0; // ms → s
   const totalInteractions = extractIgInsight(i, 'total_interactions')
                         || (likes + comments + shares + saves);
+
+  // ─── `views` is overloaded — it means different things per type. ─
+  // For IMAGE/CAROUSEL: views = scroll-past impressions (how many times
+  //   the media was rendered in someone's feed).
+  // For VIDEO/REEL:     views = plays (user intentionally watched).
+  // We store the raw number on a generic `views` field and separately
+  // expose `videoViews` ONLY for video media so the UI never renders
+  // "Video views" for a photo.
+  const views = extractIgInsight(i, 'views');
+  const videoViews = isVideoMedia
+    ? (views || extractIgInsight(i, 'video_views') || extractIgInsight(i, 'plays'))
+    : 0;
+  // `impressions` was deprecated in v20; keep it as an alias of views
+  // for downstream callers that still reference it.
+  const impressions = views || reach;
+
+  // ─── IMAGE-only metrics (Meta does not return these for video/reel) ─
+  const profileVisits = isVideoMedia ? 0 : extractIgInsight(i, 'profile_visits');
+  const profileActivity = isVideoMedia ? 0 : extractIgInsight(i, 'profile_activity');
+  const follows         = isVideoMedia ? 0 : extractIgInsight(i, 'follows');
+
+  // ─── REEL-only metrics — `ig_reels_avg_watch_time` is ms. ──────
+  const avgWatchSec      = isReel ? (extractIgInsight(i, 'ig_reels_avg_watch_time') / 1000) : 0;
+  const totalWatchTimeSec= isReel ? (extractIgInsight(i, 'ig_reels_video_view_total_time') / 1000) : 0;
 
   const denom = Math.max(1, reach);
   return {
@@ -83,22 +114,38 @@ function normalizeInstagram(raw, ctx) {
     mediaUrl: raw.media_url || raw.thumbnail_url || '',
     thumbnailUrl: raw.thumbnail_url || raw.media_url || '',
     mediaType,
+    productType,                  // FEED / REELS / STORY / AD — useful for UI filters
+    isVideoMedia,                 // drives which KPI tiles render
     timestamp: raw.timestamp || '',
     hashtags: parseHashtags(raw.caption || ''),
     mentions: parseMentions(raw.caption || ''),
 
-    reach, impressions, saves, likes, comments, shares, plays, videoViews,
-    profileVisits, follows, avgWatchSec, totalInteractions,
+    // Core (every type)
+    reach, impressions, views, saves, likes, comments, shares, totalInteractions,
 
-    // Derived
-    engagementRate: totalInteractions / denom,
-    saveRate:       saves / denom,
-    commentRate:    comments / denom,
-    shareRate:      shares / denom,
-    likeRate:       likes / denom,
-    profileVisitRate: profileVisits / denom,
+    // Video-only (zero on images/carousels-without-video)
+    videoViews,
+    avgWatchSec,
+    totalWatchTimeSec,
+    // Legacy `plays` field kept for back-compat; mirrors videoViews
+    plays: videoViews,
 
-    // Comments — raw, gets classified later
+    // Image-only (zero on video/reel)
+    profileVisits,
+    profileActivity,
+    follows,
+
+    // Derived rates — always /reach (unique accounts), never /impressions
+    engagementRate:    totalInteractions / denom,
+    saveRate:          saves / denom,
+    commentRate:       comments / denom,
+    shareRate:         shares / denom,
+    likeRate:          likes / denom,
+    profileVisitRate:  profileVisits / denom,   // always 0 for video
+    viewRate:          views / denom,            // image view-through, video play-through
+    videoViewRate:     videoViews / denom,       // plays/reach for video; 0 otherwise
+
+    // Comments — raw, classified later
     _rawComments: (raw._comments || []).map(c => ({
       text: c.text || '',
       username: c.username || '',
@@ -117,18 +164,35 @@ function normalizeFacebook(raw, ctx) {
   const engaged     = extractIgInsight(i, 'post_engaged_users');
   const reactions   = extractIgInsight(i, 'post_reactions_by_type_total')
                     || num(raw.reactions?.summary?.total_count);
-  const videoViews  = extractIgInsight(i, 'post_video_views');
-  const videoAvgMs  = extractIgInsight(i, 'post_video_avg_time_watched');
   const comments    = num(raw.comments?.summary?.total_count);
   const shares      = num(raw.shares?.count);
 
-  const attachment = raw.attachments?.data?.[0] || null;
-  const mediaType  = attachment
-    ? String(attachment.media_type || raw.status_type || 'STATUS').toUpperCase()
-    : String(raw.status_type || 'STATUS').toUpperCase();
+  // Classify FB media type properly — attachment.media_type values are
+  // things like "photo", "video", "video_inline", "video_autoplay",
+  // "album", "link", "share", "event". status_type is a rougher cut.
+  const attachment   = raw.attachments?.data?.[0] || null;
+  const attachTypeUC = String(attachment?.media_type || '').toUpperCase();
+  const statusTypeUC = String(raw.status_type || '').toUpperCase();
+  const isVideoAttach = attachTypeUC.includes('VIDEO');
+  const isVideoStatus = statusTypeUC.includes('VIDEO') || raw._fromVideoEdge;
+  const isVideoMedia  = isVideoAttach || isVideoStatus;
+
+  // Reels on FB Pages come through the /videos edge → status_type is
+  // just "video" but we flagged them _fromVideoEdge in the pull.
+  // FB doesn't distinguish Reels from regular videos in the public API,
+  // so any Page video is treated as video-type media.
+  const mediaType = isVideoMedia ? 'VIDEO'
+                  : (attachTypeUC === 'PHOTO' || statusTypeUC === 'ADDED_PHOTOS') ? 'PHOTO'
+                  : (attachTypeUC === 'ALBUM') ? 'CAROUSEL'
+                  : (attachTypeUC === 'LINK')  ? 'LINK'
+                  : (statusTypeUC || 'STATUS');
+
+  // Video metrics — only meaningful when isVideoMedia
+  const videoViews = isVideoMedia ? extractIgInsight(i, 'post_video_views') : 0;
+  const videoAvgMs = isVideoMedia ? extractIgInsight(i, 'post_video_avg_time_watched') : 0;
 
   const denom = Math.max(1, reach);
-  const likes = reactions; // treat reactions as engagement signal
+  const likes = reactions;
   const totalInteractions = reactions + comments + shares;
   return {
     platform: 'facebook',
@@ -139,21 +203,37 @@ function normalizeFacebook(raw, ctx) {
     mediaUrl: raw.full_picture || attachment?.media?.image?.src || '',
     thumbnailUrl: raw.full_picture || attachment?.media?.image?.src || '',
     mediaType,
+    productType: isVideoMedia ? 'VIDEO' : 'FEED',
+    isVideoMedia,
     timestamp: raw.created_time || '',
     hashtags: parseHashtags(raw.message || ''),
     mentions: parseMentions(raw.message || ''),
 
-    reach, impressions, saves: 0, likes, comments, shares,
-    plays: videoViews, videoViews, profileVisits: 0, follows: 0,
-    avgWatchSec: videoAvgMs / 1000,
-    totalInteractions, clicks,
+    // Core
+    reach, impressions, views: impressions, saves: 0, likes, comments, shares, totalInteractions,
 
+    // Video-only (zeroed on photos/status)
+    videoViews,
+    avgWatchSec: videoAvgMs / 1000,
+    totalWatchTimeSec: 0,    // not returned at post level on FB
+    plays: videoViews,
+
+    // FB has no saves / profile_visits / follows per-post, keep zeroed
+    profileVisits: 0,
+    profileActivity: 0,
+    follows: 0,
+
+    clicks,
+
+    // Derived
     engagementRate: totalInteractions / denom,
     saveRate: 0,
     commentRate: comments / denom,
     shareRate: shares / denom,
     likeRate: likes / denom,
     clickRate: clicks / denom,
+    viewRate: impressions / denom,
+    videoViewRate: videoViews / denom,
 
     _rawComments: (raw._comments || []).map(c => ({
       text: c.message || '',

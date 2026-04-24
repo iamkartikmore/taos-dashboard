@@ -2014,16 +2014,29 @@ app.post('/api/social/pull-ig', async (req, res) => {
   if (!token || !igUserId) return res.status(400).json({ error: 'token and igUserId required' });
   await acquireMetaSlot();
   try {
-    // Step 1 — list media (paginated)
+    // Step 1 — list media. Raise the page cap so longer windows
+    // (365d) don't silently drop reels buried beneath 200+ feed posts.
+    // 20 pages × 50 = 1000 media max per brand.
+    const maxPages = Math.max(4, Math.ceil(limit / 50));
     const media = await pagedGet(
       `https://graph.facebook.com/${apiVersion}/${igUserId}/media`,
       { access_token: token, fields: IG_MEDIA_FIELDS, limit: 50 },
-      { maxPages: Math.max(1, Math.ceil(limit / 50)) },
+      { maxPages },
     );
+
+    // De-dupe by id (defensive — Meta occasionally returns duplicates
+    // across pages when a post's timestamp moves due to edits).
+    const seenIds = new Set();
+    const uniq = [];
+    for (const m of media) {
+      if (seenIds.has(m.id)) continue;
+      seenIds.add(m.id);
+      uniq.push(m);
+    }
 
     // Filter by age
     const cutoffMs = sinceDays > 0 ? Date.now() - sinceDays * 86400000 : 0;
-    const filtered = media.filter(m => !cutoffMs || new Date(m.timestamp).getTime() >= cutoffMs);
+    const filtered = uniq.filter(m => !cutoffMs || new Date(m.timestamp).getTime() >= cutoffMs);
 
     // Breakdown — so the client can see exactly what the /media
     // endpoint returned per type. If this shows "reels: 0" the issue
