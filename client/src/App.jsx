@@ -44,6 +44,7 @@ const RetentionSheets    = lazy(() => import('./pages/RetentionSheets'));
 const ModelDiagnostics   = lazy(() => import('./pages/ModelDiagnostics'));
 const ClarityInsights    = lazy(() => import('./pages/ClarityInsights'));
 const DailyReports       = lazy(() => import('./pages/DailyReports'));
+const SocialPosts        = lazy(() => import('./pages/SocialPosts'));
 
 function PageFallback() {
   return (
@@ -185,6 +186,7 @@ export default function App() {
             <Route path="/email-campaigns"  element={<EmailCampaigns />} />
             <Route path="/email-engine"     element={<EmailEngine />} />
             <Route path="/segments"         element={<Segments />} />
+            <Route path="/social"           element={<SocialPosts />} />
             <Route path="*"                 element={<Navigate to="/" replace />} />
           </Route>
         </Routes>

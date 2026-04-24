@@ -3,6 +3,7 @@ import {
   LayoutDashboard, ListChecks, TrendingUp, Wrench, Shield,
   Skull, Layers, BarChart3, Trophy, Settings, Zap, Database, Play, Package, BarChart2, ShoppingBag, Activity, Truck, ClipboardList,
   Flame, GitMerge, PauseCircle, CalendarSearch, LineChart, TrendingDown, BookOpen, Search, Mail, Users, Sparkles, Star, Upload, Brain, Send as SendIcon, Target, Table2, Gauge, MousePointerClick, CalendarDays,
+  Instagram,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useStore } from '../store';
@@ -27,6 +28,7 @@ const NAV = [
   { to: '/attribution',  icon: GitMerge,        label: 'Attribution',        group: 'advanced' },
   { to: '/momentum',     icon: TrendingUp,      label: 'Momentum',           group: 'advanced' },
   { to: '/inactive',     icon: PauseCircle,     label: 'Inactive Ads',       group: 'advanced' },
+  { to: '/social',       icon: Instagram,       label: 'Social Posts',       group: 'advanced' },
   { to: '/daily',        icon: CalendarSearch,  label: 'Daily Briefing',     group: 'advanced' },
   { to: '/analysis',     icon: LineChart,       label: 'Order Analysis',     group: 'advanced' },
   { to: '/collection-spend', icon: BarChart3,   label: 'Collection Spend',   group: 'advanced' },

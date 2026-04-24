@@ -1866,6 +1866,246 @@ app.post('/api/retention/webhook/listmonk', (req, res) => {
   }
 });
 
+/* ─── SOCIAL POSTS (Instagram + Facebook organic) ─────────────────
+   Pulls organic posts/reels and their insights via the same Meta Graph
+   API / token shape the Meta Ads integration already uses. Reuses the
+   withRetry + metaSlot queue so we don't exceed Meta's per-app rate
+   limits. Each pull is paginated server-side so the client gets a
+   clean flat array back.
+
+   Required scopes on the token: pages_show_list, pages_read_engagement,
+   instagram_basic, instagram_manage_insights. The /verify endpoint
+   reports which scopes are missing so the UI can tell the user exactly
+   what to regenerate. */
+
+const IG_MEDIA_FIELDS = [
+  'id','caption','media_type','media_product_type','media_url',
+  'thumbnail_url','permalink','timestamp','like_count','comments_count',
+  'is_comment_enabled','username','shortcode',
+  'children{id,media_type,media_url,thumbnail_url}',
+].join(',');
+
+// Video/reel insights — Meta supports different metric sets per media_type
+const IG_INSIGHT_METRICS_REEL  = 'reach,saved,likes,comments,shares,plays,total_interactions,ig_reels_avg_watch_time,ig_reels_video_view_total_time';
+const IG_INSIGHT_METRICS_VIDEO = 'impressions,reach,saved,likes,comments,shares,plays,video_views,total_interactions';
+const IG_INSIGHT_METRICS_IMAGE = 'impressions,reach,saved,likes,comments,shares,total_interactions,profile_activity,profile_visits,follows';
+const IG_INSIGHT_METRICS_CAROUSEL = 'impressions,reach,saved,likes,comments,shares,total_interactions';
+
+function igMetricsForType(t) {
+  const x = String(t || '').toUpperCase();
+  if (x === 'REELS' || x === 'REEL' || x === 'VIDEO_REEL') return IG_INSIGHT_METRICS_REEL;
+  if (x === 'VIDEO')                                       return IG_INSIGHT_METRICS_VIDEO;
+  if (x === 'CAROUSEL_ALBUM')                              return IG_INSIGHT_METRICS_CAROUSEL;
+  return IG_INSIGHT_METRICS_IMAGE;
+}
+
+// Fetch a single URL with paging (Meta returns paging.next) until no next.
+// Caps total pages to keep one brand from pinning the server.
+async function pagedGet(url, params, { maxPages = 30, pageDelayMs = 60 } = {}) {
+  const out = [];
+  let next = url;
+  let page = 0;
+  let currentParams = params;
+  while (next && page < maxPages) {
+    const resp = await withRetry(() => axios.get(next, { params: page === 0 ? currentParams : undefined, timeout: 45000 }));
+    const data = resp.data?.data || [];
+    for (const row of data) out.push(row);
+    next = resp.data?.paging?.next || null;
+    page++;
+    if (next) await new Promise(r => setTimeout(r, pageDelayMs));
+  }
+  return out;
+}
+
+// Discover Pages + IG business accounts reachable with this token.
+// This is the "verify + auto-fill" endpoint: the Setup UI calls it
+// and pre-fills the FB Page / IG Business ID fields so the user never
+// has to hunt for those numeric IDs.
+app.post('/api/social/verify', async (req, res) => {
+  const { token, apiVersion = 'v21.0' } = req.body || {};
+  if (!token) return res.status(400).json({ error: 'token required' });
+  await acquireMetaSlot();
+  try {
+    // /me/accounts returns Pages the user manages; each page lists its
+    // instagram_business_account (if one is linked).
+    const pagesResp = await withRetry(() => axios.get(
+      `https://graph.facebook.com/${apiVersion}/me/accounts`,
+      {
+        params: {
+          access_token: token,
+          fields: 'id,name,access_token,instagram_business_account{id,username,profile_picture_url,followers_count,media_count}',
+          limit: 100,
+        },
+        timeout: 30000,
+      },
+    ));
+    const pages = (pagesResp.data?.data || []).map(p => ({
+      pageId:          p.id,
+      pageName:        p.name,
+      pageAccessToken: p.access_token || null,
+      ig:              p.instagram_business_account || null,
+    }));
+
+    // Permissions — surface which scopes we have
+    let permissions = [];
+    try {
+      const permResp = await withRetry(() => axios.get(
+        `https://graph.facebook.com/${apiVersion}/me/permissions`,
+        { params: { access_token: token }, timeout: 15000 },
+      ));
+      permissions = (permResp.data?.data || [])
+        .filter(p => p.status === 'granted')
+        .map(p => p.permission);
+    } catch (_) { /* best-effort */ }
+
+    const required = ['pages_show_list','pages_read_engagement','instagram_basic','instagram_manage_insights'];
+    const missingScopes = required.filter(r => !permissions.includes(r));
+
+    res.json({ ok: true, pages, permissions, missingScopes });
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: err.response?.data?.error?.message || err.message });
+  } finally {
+    releaseMetaSlot();
+  }
+});
+
+// Pull IG posts + per-media insights + top comments for one brand.
+// Body: { token, apiVersion, igUserId, limit, sinceDays, includeComments }
+app.post('/api/social/pull-ig', async (req, res) => {
+  const { token, apiVersion = 'v21.0', igUserId, limit = 200, sinceDays = 90, includeComments = true } = req.body || {};
+  if (!token || !igUserId) return res.status(400).json({ error: 'token and igUserId required' });
+  await acquireMetaSlot();
+  try {
+    // Step 1 — list media (paginated)
+    const media = await pagedGet(
+      `https://graph.facebook.com/${apiVersion}/${igUserId}/media`,
+      { access_token: token, fields: IG_MEDIA_FIELDS, limit: 50 },
+      { maxPages: Math.max(1, Math.ceil(limit / 50)) },
+    );
+
+    // Filter by age
+    const cutoffMs = sinceDays > 0 ? Date.now() - sinceDays * 86400000 : 0;
+    const filtered = media.filter(m => !cutoffMs || new Date(m.timestamp).getTime() >= cutoffMs);
+
+    // Step 2 — insights + (optionally) top comments, in parallel batches of 4
+    const enriched = [];
+    const CONCURRENCY = 4;
+    for (let i = 0; i < filtered.length; i += CONCURRENCY) {
+      const batch = filtered.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(batch.map(async m => {
+        const isReel = String(m.media_product_type || '').toUpperCase() === 'REELS'
+                    || String(m.media_type || '').toUpperCase().includes('REEL');
+        const metrics = isReel
+          ? IG_INSIGHT_METRICS_REEL
+          : igMetricsForType(m.media_type);
+
+        // Insights (best-effort — older media sometimes errors on certain metrics)
+        let insights = [];
+        try {
+          const ir = await withRetry(() => axios.get(
+            `https://graph.facebook.com/${apiVersion}/${m.id}/insights`,
+            { params: { access_token: token, metric: metrics }, timeout: 25000 },
+          ));
+          insights = ir.data?.data || [];
+        } catch (_) {}
+
+        let comments = [];
+        if (includeComments) {
+          try {
+            const cr = await withRetry(() => axios.get(
+              `https://graph.facebook.com/${apiVersion}/${m.id}/comments`,
+              {
+                params: {
+                  access_token: token,
+                  fields: 'text,timestamp,username,like_count,replies.summary(true)',
+                  limit: 50,
+                  order: 'reverse_chronological',
+                },
+                timeout: 20000,
+              },
+            ));
+            comments = cr.data?.data || [];
+          } catch (_) {}
+        }
+        return { ...m, _insights: insights, _comments: comments, _isReel: isReel };
+      }));
+      enriched.push(...results);
+    }
+    res.json({ ok: true, igUserId, posts: enriched });
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: err.response?.data?.error?.message || err.message });
+  } finally {
+    releaseMetaSlot();
+  }
+});
+
+// Pull FB Page posts + per-post insights + top comments.
+// Body: { pageAccessToken, apiVersion, pageId, limit, sinceDays, includeComments }
+app.post('/api/social/pull-fb', async (req, res) => {
+  const { pageAccessToken, apiVersion = 'v21.0', pageId, limit = 200, sinceDays = 90, includeComments = true } = req.body || {};
+  if (!pageAccessToken || !pageId) return res.status(400).json({ error: 'pageAccessToken and pageId required' });
+  await acquireMetaSlot();
+  try {
+    const cutoff = sinceDays > 0 ? new Date(Date.now() - sinceDays * 86400000).toISOString() : null;
+    const postFields = [
+      'id','message','created_time','permalink_url','full_picture','status_type',
+      'attachments{media_type,media,url,subattachments}',
+      'reactions.summary(total_count).limit(0)',
+      'comments.summary(total_count).limit(0)',
+      'shares',
+    ].join(',');
+    const posts = await pagedGet(
+      `https://graph.facebook.com/${apiVersion}/${pageId}/posts`,
+      {
+        access_token: pageAccessToken,
+        fields: postFields,
+        limit: 50,
+        since: cutoff || undefined,
+      },
+      { maxPages: Math.max(1, Math.ceil(limit / 50)) },
+    );
+
+    const INSIGHT_METRICS = 'post_impressions,post_impressions_unique,post_clicks,post_engaged_users,post_reactions_by_type_total,post_video_views,post_video_avg_time_watched';
+
+    const enriched = [];
+    const CONCURRENCY = 4;
+    for (let i = 0; i < posts.length; i += CONCURRENCY) {
+      const batch = posts.slice(i, i + CONCURRENCY);
+      const results = await Promise.all(batch.map(async p => {
+        let insights = [];
+        try {
+          const ir = await withRetry(() => axios.get(
+            `https://graph.facebook.com/${apiVersion}/${p.id}/insights`,
+            { params: { access_token: pageAccessToken, metric: INSIGHT_METRICS }, timeout: 25000 },
+          ));
+          insights = ir.data?.data || [];
+        } catch (_) {}
+
+        let comments = [];
+        if (includeComments) {
+          try {
+            const cr = await withRetry(() => axios.get(
+              `https://graph.facebook.com/${apiVersion}/${p.id}/comments`,
+              { params: { access_token: pageAccessToken, fields: 'message,created_time,from,like_count', limit: 50, order: 'reverse_chronological' }, timeout: 20000 },
+            ));
+            comments = cr.data?.data || [];
+          } catch (_) {}
+        }
+        return { ...p, _insights: insights, _comments: comments };
+      }));
+      enriched.push(...results);
+    }
+    res.json({ ok: true, pageId, posts: enriched });
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: err.response?.data?.error?.message || err.message });
+  } finally {
+    releaseMetaSlot();
+  }
+});
+
 /* ─── HEALTH CHECK ────────────────────────────────────────────────── */
 
 app.get('/api/health', (_, res) => res.json({ ok: true, ts: Date.now() }));

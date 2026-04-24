@@ -4,9 +4,11 @@ import {
   Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key,
   BookOpen, Upload, ShoppingBag, Zap, ChevronDown, ChevronRight,
   Package, BarChart3, Calendar, Search, Mail, MousePointerClick,
+  Instagram, Facebook,
 } from 'lucide-react';
 import { useStore, BRAND_COLORS } from '../store';
 import { pullAccount, verifyToken, fetchShopifyInventory, fetchShopifyOrders, fetchGaData, fetchGoogleAds, verifyGoogleAds, fetchMerchant, verifyMerchant, pullAccountWithCustomRange, verifyListmonk, fetchListmonkCampaigns, verifyClarity, fetchClarity } from '../lib/api';
+import { verifySocialToken } from '../lib/socialApi';
 import { normalizeClaritySnapshot } from '../lib/clarityAnalytics';
 import { normalizeMerchantResponse } from '../lib/googleMerchantAnalytics';
 import { normalizeGoogleAdsResponse } from '../lib/googleAdsAnalytics';
@@ -113,6 +115,8 @@ function BrandCard({ brand, brandInfo }) {
   const [verifyingClarity, setVerifyingClarity] = useState(false);
   const [verifyClarityOk, setVerifyClarityOk]   = useState(null);
   const [pullingAll, setPullingAll]         = useState(false);
+  const [verifyingSocial, setVerifyingSocial] = useState(false);
+  const [socialDiscovery, setSocialDiscovery] = useState(null); // { pages:[{pageId,pageName,pageAccessToken,ig}], missingScopes }
 
   // Per-brand time windows
   const [ordersDays, setOrdersDays] = useState(7);
@@ -137,6 +141,30 @@ function BrandCard({ brand, brandInfo }) {
   const clarity    = brand.clarity || {};
   const hasClarity = !!clarity.apiToken;
   const anyBusy    = pullingMeta || pullingInv || pullingOrders || pullingGa || pullingGAds || pullingMerchant || pullingLmonk || pullingClarity || pullingAll;
+
+  const handleDiscoverSocial = async () => {
+    if (!hasToken) return;
+    setVerifyingSocial(true); setSocialDiscovery(null);
+    try {
+      const r = await verifySocialToken(brand.meta.token, brand.meta.apiVersion);
+      setSocialDiscovery(r);
+      // Auto-pick the first Page that has a linked IG business account
+      const pick = (r.pages || []).find(p => p.ig?.id) || (r.pages || [])[0];
+      if (pick) {
+        updateBrand(brand.id, {
+          social: {
+            ...(brand.social || {}),
+            fbPageId:        pick.pageId,
+            fbPageName:      pick.pageName,
+            pageAccessToken: pick.pageAccessToken || '',
+            igBusinessId:    pick.ig?.id || (brand.social?.igBusinessId || ''),
+            igUsername:      pick.ig?.username || (brand.social?.igUsername || ''),
+          },
+        });
+      }
+    } catch (e) { setSocialDiscovery({ error: e.message }); }
+    finally { setVerifyingSocial(false); }
+  };
 
   /* ── individual pull handlers ───────────────────────────────────── */
   const handleVerify = async () => {
@@ -622,6 +650,80 @@ function BrandCard({ brand, brandInfo }) {
                       {bd.insights7d.length} ads · Today/7D/14D/30D
                     </span>
                   )}
+                </div>
+
+                {/* ── SOCIAL POSTS (IG + FB organic) ──────────────── */}
+                <div className="pt-3 mt-3 border-t border-gray-800/60 space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-widest">
+                    <Instagram size={11} /><Facebook size={11} /> Social Posts
+                    <span className="ml-auto text-[9px] text-slate-600 font-normal normal-case tracking-normal">Uses the Meta token above</span>
+                  </div>
+                  <div className="text-[10px] text-slate-500 leading-snug">
+                    Scopes needed: <code className="text-slate-400">pages_show_list</code>, <code className="text-slate-400">pages_read_engagement</code>, <code className="text-slate-400">instagram_basic</code>, <code className="text-slate-400">instagram_manage_insights</code>. Click Discover to auto-fill your Page + IG IDs.
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button onClick={handleDiscoverSocial} disabled={verifyingSocial || !hasToken}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 disabled:opacity-40 rounded-lg text-xs text-slate-300 border border-gray-700">
+                      {verifyingSocial ? <Spinner size="sm" /> : <Search size={11} />} Discover pages
+                    </button>
+                    {brand.social?.igUsername && (
+                      <span className="px-2 py-0.5 rounded-full bg-pink-900/30 text-pink-300 text-[10px]">@{brand.social.igUsername}</span>
+                    )}
+                    {brand.social?.fbPageName && (
+                      <span className="px-2 py-0.5 rounded-full bg-blue-900/30 text-blue-300 text-[10px]">{brand.social.fbPageName}</span>
+                    )}
+                  </div>
+                  {socialDiscovery?.error && (
+                    <div className="flex items-center gap-1.5 text-xs px-2 py-1.5 rounded-lg bg-red-900/30 text-red-300">
+                      <AlertCircle size={11} /> {socialDiscovery.error}
+                    </div>
+                  )}
+                  {socialDiscovery?.missingScopes?.length > 0 && (
+                    <div className="flex items-start gap-1.5 text-[10px] px-2 py-1.5 rounded-lg bg-amber-900/20 text-amber-300 border border-amber-800/40">
+                      <AlertCircle size={11} className="mt-0.5 flex-shrink-0" />
+                      <span>Missing scopes: <code className="font-mono">{socialDiscovery.missingScopes.join(', ')}</code> — regenerate the token with these included.</span>
+                    </div>
+                  )}
+                  {socialDiscovery?.pages && socialDiscovery.pages.length > 1 && (
+                    <div>
+                      <label className="text-[10px] text-slate-500 mb-1 block">Page (multiple detected)</label>
+                      <select
+                        value={brand.social?.fbPageId || ''}
+                        onChange={e => {
+                          const p = socialDiscovery.pages.find(x => x.pageId === e.target.value);
+                          if (!p) return;
+                          updateBrand(brand.id, { social: {
+                            ...(brand.social || {}),
+                            fbPageId: p.pageId, fbPageName: p.pageName,
+                            pageAccessToken: p.pageAccessToken || '',
+                            igBusinessId: p.ig?.id || '', igUsername: p.ig?.username || '',
+                          }});
+                        }}
+                        className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100">
+                        {socialDiscovery.pages.map(p => (
+                          <option key={p.pageId} value={p.pageId}>
+                            {p.pageName}{p.ig?.username ? ` · @${p.ig.username}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <div>
+                      <label className="text-[10px] text-slate-500 mb-1 block">IG Business ID</label>
+                      <input type="text" value={brand.social?.igBusinessId || ''}
+                        onChange={e => updateBrand(brand.id, { social: { ...(brand.social || {}), igBusinessId: e.target.value } })}
+                        placeholder="17841…"
+                        className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100 placeholder-gray-600 font-mono" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-slate-500 mb-1 block">FB Page ID</label>
+                      <input type="text" value={brand.social?.fbPageId || ''}
+                        onChange={e => updateBrand(brand.id, { social: { ...(brand.social || {}), fbPageId: e.target.value } })}
+                        placeholder="1012…"
+                        className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100 placeholder-gray-600 font-mono" />
+                    </div>
+                  </div>
                 </div>
               </div>
 

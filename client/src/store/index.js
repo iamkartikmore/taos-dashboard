@@ -41,6 +41,9 @@ export function makeBrand(name = 'New Brand', idx = 0) {
     listmonk: { url: '', username: '', password: '', defaultListId: '', fromEmail: '' },
     clarity: { apiToken: '', projectId: '' },
     drive:   { folderUrl: '' },
+    // Social (IG + FB organic posts). Token reuses meta.token; pageAccessToken
+    // is a Page-scoped token discovered by /api/social/verify.
+    social:  { igBusinessId: '', igUsername: '', fbPageId: '', fbPageName: '', pageAccessToken: '', competitorHandles: [] },
   };
 }
 
@@ -66,6 +69,7 @@ function loadBrands() {
       if (!u.clarity)   u.clarity   = { apiToken: '', projectId: '' };
       if (!u.drive)     u.drive     = { folderUrl: '' };
       else if (u.drive.folderUrl === undefined) u.drive = { ...u.drive, folderUrl: u.drive.folderId ? `https://drive.google.com/drive/folders/${u.drive.folderId}` : '' };
+      if (!u.social)    u.social    = { igBusinessId: '', igUsername: '', fbPageId: '', fbPageName: '', pageAccessToken: '', competitorHandles: [] };
       return u;
     });
   }
@@ -673,6 +677,22 @@ export const useStore = create((set, get) => {
       set({ inactiveInsights, inactiveInsightsStatus: 'success', inactiveInsightsLastAt: Date.now() });
     },
     setInactiveInsightsStatus: status => set({ inactiveInsightsStatus: status }),
+
+    // Social posts (IG/FB organic) — pulled on demand from SocialPosts page.
+    // Structure: { [brandId]: { posts: normalizedPost[], baseline, lastPullAt } }
+    socialPosts:       {},
+    socialPullStatus:  {},  // { [brandId]: 'idle'|'loading'|'success'|'error' }
+    socialPullError:   {},
+    setSocialPosts: (brandId, payload) => {
+      const socialPosts = { ...get().socialPosts, [brandId]: { ...payload, lastPullAt: Date.now() } };
+      set({ socialPosts });
+    },
+    setSocialPullStatus: (brandId, status, error = null) => {
+      set(s => ({
+        socialPullStatus: { ...s.socialPullStatus, [brandId]: status },
+        socialPullError:  { ...s.socialPullError,  [brandId]: error },
+      }));
+    },
 
     rebuildEnriched: () => _rebuild(),
 
