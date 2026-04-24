@@ -2025,12 +2025,25 @@ app.post('/api/social/pull-ig', async (req, res) => {
     const cutoffMs = sinceDays > 0 ? Date.now() - sinceDays * 86400000 : 0;
     const filtered = media.filter(m => !cutoffMs || new Date(m.timestamp).getTime() >= cutoffMs);
 
+    // Breakdown — so the client can see exactly what the /media
+    // endpoint returned per type. If this shows "reels: 0" the issue
+    // is on Meta's side (account genuinely has no reels in the window,
+    // or they're hidden from the Graph API for some account state) —
+    // not something we can fix server-side.
+    const byMediaType = {}, byProductType = {};
+    for (const m of filtered) {
+      const t = String(m.media_type || 'UNKNOWN').toUpperCase();
+      const p = String(m.media_product_type || 'UNKNOWN').toUpperCase();
+      byMediaType[t] = (byMediaType[t] || 0) + 1;
+      byProductType[p] = (byProductType[p] || 0) + 1;
+    }
+
     // Step 2 — insights + (optionally) top comments, in parallel batches of 4.
     // Track failures so we can report them back to the client instead of
     // silently returning zeroed posts. If the type-specific metric set
     // fails (e.g. a metric got deprecated), retry with the safe subset.
     const enriched = [];
-    const stats = { total: filtered.length, insightsOk: 0, insightsFallback: 0, insightsFailed: 0, sampleErrors: [] };
+    const stats = { total: filtered.length, insightsOk: 0, insightsFallback: 0, insightsFailed: 0, sampleErrors: [], byMediaType, byProductType };
     const CONCURRENCY = 4;
     for (let i = 0; i < filtered.length; i += CONCURRENCY) {
       const batch = filtered.slice(i, i + CONCURRENCY);
@@ -2128,6 +2141,42 @@ app.post('/api/social/pull-fb', async (req, res) => {
       { maxPages: Math.max(1, Math.ceil(limit / 50)) },
     );
 
+    // Pages sometimes publish Reels as /videos entries that don't
+    // surface in /posts (no corresponding feed story). Pull /videos
+    // separately and synthesize post-like rows for any video ID we
+    // haven't already seen, so the feed shows the full video content.
+    let videoPosts = [];
+    try {
+      const videos = await pagedGet(
+        `https://graph.facebook.com/${apiVersion}/${pageId}/videos`,
+        {
+          access_token: pageAccessToken,
+          fields: 'id,description,created_time,permalink_url,picture,source,length,title,status',
+          limit: 50,
+        },
+        { maxPages: 4 },
+      );
+      const postIds = new Set(posts.map(p => String(p.id).split('_').pop()));
+      for (const v of videos) {
+        if (postIds.has(String(v.id))) continue;
+        if (cutoff && new Date(v.created_time).getTime() < new Date(cutoff).getTime()) continue;
+        videoPosts.push({
+          id: v.id,
+          message: v.description || v.title || '',
+          created_time: v.created_time,
+          permalink_url: v.permalink_url || '',
+          full_picture: v.picture || '',
+          status_type: 'video',
+          attachments: { data: [{ media_type: 'video_autoplay', media: { source: v.source }, url: v.permalink_url || '' }] },
+          reactions: { summary: { total_count: 0 } },
+          comments:  { summary: { total_count: 0 } },
+          shares:    { count: 0 },
+          _fromVideoEdge: true,
+        });
+      }
+    } catch (_) { /* best-effort — /videos requires same scopes as /posts */ }
+    posts.push(...videoPosts);
+
     // Full set. If Meta rejects (metric name deprecated in this version),
     // fall back to a minimal universal set. post_video_views /
     // post_video_avg_time_watched are video-only and commonly error on
@@ -2135,8 +2184,13 @@ app.post('/api/social/pull-fb', async (req, res) => {
     const FB_METRICS_FULL = 'post_impressions,post_impressions_unique,post_clicks,post_engaged_users,post_reactions_by_type_total,post_video_views,post_video_avg_time_watched';
     const FB_METRICS_SAFE = 'post_impressions,post_impressions_unique,post_clicks,post_engaged_users';
 
+    const byMediaType = {};
+    for (const p of posts) {
+      const mt = String(p.attachments?.data?.[0]?.media_type || p.status_type || 'STATUS').toUpperCase();
+      byMediaType[mt] = (byMediaType[mt] || 0) + 1;
+    }
     const enriched = [];
-    const stats = { total: posts.length, insightsOk: 0, insightsFallback: 0, insightsFailed: 0, sampleErrors: [] };
+    const stats = { total: posts.length, fromVideoEdge: videoPosts.length, insightsOk: 0, insightsFallback: 0, insightsFailed: 0, sampleErrors: [], byMediaType };
     const CONCURRENCY = 4;
     for (let i = 0; i < posts.length; i += CONCURRENCY) {
       const batch = posts.slice(i, i + CONCURRENCY);

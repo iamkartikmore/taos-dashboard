@@ -364,6 +364,18 @@ export default function SocialPosts() {
     };
   }, [stream]);
 
+  /* Media-mix — exact counts by platform × media type so the user
+     can see instantly whether Meta actually returned any videos/reels
+     or whether the account simply hasn't posted any in the window. */
+  const mediaMix = useMemo(() => {
+    const mix = {};
+    for (const p of stream) {
+      const key = `${p.platform}:${p.mediaType}`;
+      mix[key] = (mix[key] || 0) + 1;
+    }
+    return mix;
+  }, [stream]);
+
   /* ── Queues ──────────────────────────────────────────────────── */
   const boostCandidates = useMemo(() => pickBoostCandidates(stream, { limit: 15 }), [stream]);
   const mismatchedBoosts = useMemo(() => pickMismatchedBoosts(stream, { limit: 10 }), [stream]);
@@ -409,7 +421,16 @@ export default function SocialPosts() {
           const summarise = (platform, arr) => {
             const s = arr._stats;
             if (!s) { appendLog(`[${b.name}] ${platform}: ${arr.length} posts`); return; }
+            const mixStr = s.byMediaType
+              ? Object.entries(s.byMediaType).map(([k, v]) => `${k}:${v}`).join(', ')
+              : '';
+            const prodStr = s.byProductType
+              ? Object.entries(s.byProductType).map(([k, v]) => `${k}:${v}`).join(', ')
+              : '';
             appendLog(`[${b.name}] ${platform}: ${arr.length} posts · insights ok ${s.insightsOk}, fallback ${s.insightsFallback}, failed ${s.insightsFailed}`);
+            if (mixStr)  appendLog(`[${b.name}] ${platform} media_type: ${mixStr}`);
+            if (prodStr) appendLog(`[${b.name}] ${platform} media_product_type: ${prodStr}`);
+            if (s.fromVideoEdge) appendLog(`[${b.name}] ${platform} /videos edge added ${s.fromVideoEdge} extra posts`);
             for (const err of (s.sampleErrors || []).slice(0, 3)) {
               appendLog(`[${b.name}] ${platform} err: ${err.firstError || err.fallbackError}`);
             }
@@ -513,6 +534,39 @@ export default function SocialPosts() {
         <KPI label="Boosted"      value={num(kpis.boosted)}    Icon={ArrowUpRight}  color="#22c55e" sub={`${kpis.posts ? pct(kpis.boosted / kpis.posts) : '0.0%'} of posts`} />
         <KPI label="Boost queue"  value={num(boostCandidates.length)} Icon={Flame}  color="#f59e0b" sub={mismatchedBoosts.length ? `${mismatchedBoosts.length} mismatched` : null} />
       </div>
+
+      {/* Media mix — shows exactly what Meta returned by platform × type.
+          If you expected videos/reels and this shows 0, Meta's not
+          returning them (account state / date window / product_type) —
+          not a filter. */}
+      {stream.length > 0 && (
+        <div className="flex items-center flex-wrap gap-2 text-[10px] text-slate-500 px-1">
+          <span className="text-slate-600">Media mix:</span>
+          {Object.entries(mediaMix)
+            .sort((a, b) => b[1] - a[1])
+            .map(([key, n]) => {
+              const [plat, type] = key.split(':');
+              return (
+                <button
+                  key={key}
+                  onClick={() => { setPlatform(plat); setMediaFilter(type); setTab('feed'); }}
+                  className="px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 border border-gray-700 text-slate-300 flex items-center gap-1"
+                  title={`Filter to ${plat} ${type}`}
+                >
+                  <PlatformIcon platform={plat} size={9} />
+                  <span className="font-mono">{type}</span>
+                  <span className="text-slate-500">·</span>
+                  <span className="font-semibold text-white">{n}</span>
+                </button>
+              );
+            })}
+          {!Object.keys(mediaMix).some(k => k.includes(':REEL') || k.includes(':VIDEO')) && (
+            <span className="text-amber-400">
+              No reels/videos in the pulled window — widen the window above to Last 365d and Refresh.
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Priority queues row */}
       {stream.length > 0 && (
