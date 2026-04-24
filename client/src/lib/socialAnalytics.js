@@ -24,6 +24,7 @@
  */
 
 import { kmeans } from './advancedStats';
+import { enrichPostsDeep, extractTopics } from './socialNlp';
 
 /* ══════════════════════════════════════════════════════════════
    NORMALIZATION — turn raw Graph API payload into canonical post
@@ -635,14 +636,15 @@ export function aggregateCadence(posts = [], { bucket = 'week' } = {}) {
    ══════════════════════════════════════════════════════════ */
 
 export function enrichAllPosts(posts = [], enrichedAds = []) {
-  // 1. Comment classification (so intent density feeds the score)
-  let out = enrichWithCommentStats(posts);
+  // 1. Deep comment NLP — intent/issue/UGC with severity + multi-language
+  let out = enrichPostsDeep(posts);
   // 2. Baseline from the brand's own posts
   const baseline = computeBaseline(out, { windowDays: 90 });
-  // 3. Score each post with transparent breakdown
+  // 3. Score each post with transparent breakdown + objective segmentation
   out = out.map(p => ({
     ...p,
     adsPotential: scoreAdsPotential(p, baseline),
+    adObjectives: scoreAdObjectives(p, baseline),
     lateBloomer:  detectLateBloomer(p, baseline),
   }));
   // 4. Ad-creative match
@@ -650,6 +652,249 @@ export function enrichAllPosts(posts = [], enrichedAds = []) {
   out = out.map(p => ({ ...p, adMatch: byPostId[p.id] || null }));
   return { posts: out, baseline, boostedIds: new Set(boosted.map(b => b.id)), unboostedIds: new Set(unboosted.map(b => b.id)) };
 }
+
+/* ══════════════════════════════════════════════════════════════
+   AD OPPORTUNITY BY OBJECTIVE — Andromeda-inspired segmentation
+   ══════════════════════════════════════════════════════════
+
+   Meta's delivery system (Andromeda + Advantage+) optimizes ads
+   differently by objective. An organic post's signal mix tells us
+   which objective it's primed for:
+
+   AWARENESS:    high share rate + comment volume + broad engagement
+   TRAFFIC:      high profile-visit rate + high click-likelihood signals
+   CONVERSION:   high save rate + high-intent comments + purchase-intent hits
+   RETARGETING:  high engagement from existing followers, mid save rate
+   CATALOG DPA:  high save rate + mentions a specific product/SKU
+
+   Each dimension returns {score 0-100, confidence 0-1, signals[]}
+   so the UI can show exactly why we'd recommend that objective.
+   ══════════════════════════════════════════════════════════ */
+
+function clip01(x) { return Math.max(0, Math.min(1, x)); }
+
+function pctFor(baseline, metric, value) {
+  const d = baseline?.metrics?.[metric];
+  if (!d || !d.sorted?.length) return 0.5;
+  let lo = 0, hi = d.sorted.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (d.sorted[m] < value) lo = m + 1; else hi = m; }
+  return lo / d.sorted.length;
+}
+
+export function scoreAdObjectives(post, baseline) {
+  const sharePct  = pctFor(baseline, 'shareRate', post.shareRate);
+  const engPct    = pctFor(baseline, 'engagementRate', post.engagementRate);
+  const savePct   = pctFor(baseline, 'saveRate', post.saveRate);
+  const commentPct= pctFor(baseline, 'commentRate', post.commentRate);
+  const profilePct= pctFor(baseline, 'profileVisitRate', post.profileVisitRate);
+  const reachPct  = pctFor(baseline, 'reach', post.reach);
+  const watchPct  = pctFor(baseline, 'avgWatchSec', post.avgWatchSec);
+
+  const cs = post.commentStats || {};
+  const intentDensity = cs.total ? (cs.intentCount || 0) / cs.total : 0;
+  const purchaseIntentCount = cs.intentByKey?.purchase_intent || 0;
+  const priceIntentCount    = cs.intentByKey?.price || 0;
+  const linkIntentCount     = cs.intentByKey?.link || 0;
+  const totalIntentHits     = (cs.intentCount || 0);
+
+  // 1. AWARENESS — virality / broad reach signals
+  const awarenessSignals = [];
+  let awareness = 0;
+  awareness += sharePct * 35;       awarenessSignals.push({ label: 'Share rate', pctile: sharePct, w: 35 });
+  awareness += reachPct * 25;       awarenessSignals.push({ label: 'Reach', pctile: reachPct, w: 25 });
+  awareness += commentPct * 20;     awarenessSignals.push({ label: 'Comment rate', pctile: commentPct, w: 20 });
+  awareness += engPct * 20;         awarenessSignals.push({ label: 'Engagement rate', pctile: engPct, w: 20 });
+
+  // 2. TRAFFIC — clicks / profile visits / link-intent
+  const trafficSignals = [];
+  let traffic = 0;
+  traffic += profilePct * 35;       trafficSignals.push({ label: 'Profile visit rate', pctile: profilePct, w: 35 });
+  traffic += clip01(linkIntentCount / 3) * 30; trafficSignals.push({ label: 'Link requests in comments', raw: linkIntentCount, w: 30 });
+  traffic += engPct * 20;           trafficSignals.push({ label: 'Engagement rate', pctile: engPct, w: 20 });
+  traffic += reachPct * 15;         trafficSignals.push({ label: 'Reach', pctile: reachPct, w: 15 });
+
+  // 3. CONVERSION — save rate + purchase intent + price queries
+  const conversionSignals = [];
+  let conversion = 0;
+  conversion += savePct * 35;       conversionSignals.push({ label: 'Save rate', pctile: savePct, w: 35 });
+  conversion += clip01(purchaseIntentCount / 2) * 25; conversionSignals.push({ label: 'Purchase-intent comments', raw: purchaseIntentCount, w: 25 });
+  conversion += clip01(priceIntentCount / 3)    * 20; conversionSignals.push({ label: 'Price queries', raw: priceIntentCount, w: 20 });
+  conversion += engPct * 10;        conversionSignals.push({ label: 'Engagement rate', pctile: engPct, w: 10 });
+  conversion += clip01(intentDensity * 3) * 10; conversionSignals.push({ label: 'Comment intent density', raw: intentDensity, w: 10 });
+
+  // 4. RETARGETING — steady engagement + saves but lower reach
+  const retargetingSignals = [];
+  let retargeting = 0;
+  retargeting += savePct * 25;      retargetingSignals.push({ label: 'Save rate', pctile: savePct, w: 25 });
+  retargeting += engPct * 25;       retargetingSignals.push({ label: 'Engagement rate', pctile: engPct, w: 25 });
+  retargeting += clip01(1 - reachPct) * 20; retargetingSignals.push({ label: 'Low reach (not saturated)', pctile: 1 - reachPct, w: 20 });
+  retargeting += watchPct * 15;     retargetingSignals.push({ label: 'Avg watch time', pctile: watchPct, w: 15 });
+  retargeting += commentPct * 15;   retargetingSignals.push({ label: 'Comment rate', pctile: commentPct, w: 15 });
+
+  // 5. CATALOG DPA — high save + product-relevance language
+  const productTerms = /\b(buy|order|link|price|size|variant|in stock|available|kharid|lelo)\b/i;
+  const productMention = productTerms.test(post.caption || '') || priceIntentCount >= 2 || purchaseIntentCount >= 1;
+  const catalogSignals = [];
+  let catalog = 0;
+  catalog += savePct * 40;          catalogSignals.push({ label: 'Save rate', pctile: savePct, w: 40 });
+  catalog += (productMention ? 25 : 0); catalogSignals.push({ label: 'Product-intent language', raw: productMention ? 1 : 0, w: 25 });
+  catalog += clip01(priceIntentCount / 2) * 15; catalogSignals.push({ label: 'Price queries', raw: priceIntentCount, w: 15 });
+  catalog += engPct * 10;           catalogSignals.push({ label: 'Engagement rate', pctile: engPct, w: 10 });
+  catalog += clip01(purchaseIntentCount / 1) * 10; catalogSignals.push({ label: 'Purchase intent', raw: purchaseIntentCount, w: 10 });
+
+  const objectives = {
+    awareness:    { score: Math.round(awareness),    signals: awarenessSignals },
+    traffic:      { score: Math.round(traffic),      signals: trafficSignals },
+    conversion:   { score: Math.round(conversion),   signals: conversionSignals },
+    retargeting:  { score: Math.round(retargeting),  signals: retargetingSignals },
+    catalog:      { score: Math.round(catalog),      signals: catalogSignals },
+  };
+
+  // Recommend the single highest-scoring objective above a bar
+  const ranked = Object.entries(objectives).sort((a, b) => b[1].score - a[1].score);
+  const recommended = ranked[0][1].score >= 40 ? ranked[0][0] : null;
+
+  return { objectives, recommended, top: ranked.slice(0, 3).map(([k, v]) => ({ key: k, score: v.score })) };
+}
+
+/* ══════════════════════════════════════════════════════════════
+   TREND SERIES — per-day aggregate of reach / engagement / saves
+   so the UI can draw proper time-series charts instead of static KPIs.
+   ══════════════════════════════════════════════════════════ */
+
+export function buildTrendSeries(posts = [], { bucket = 'day' } = {}) {
+  const byKey = new Map();
+  for (const p of posts) {
+    const t = new Date(p.timestamp);
+    if (isNaN(t)) continue;
+    let key;
+    if (bucket === 'month')    key = t.toISOString().slice(0, 7);
+    else if (bucket === 'week') {
+      const onejan = new Date(t.getUTCFullYear(), 0, 1);
+      const week = Math.ceil((((t - onejan) / 86400000) + onejan.getUTCDay() + 1) / 7);
+      key = `${t.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+    } else key = t.toISOString().slice(0, 10);
+    const cur = byKey.get(key) || {
+      key, posts: 0, reach: 0, engagement: 0, saves: 0, shares: 0, comments: 0,
+      videoViews: 0, reels: 0, intent: 0, issues: 0, positive: 0, negative: 0,
+    };
+    cur.posts++;
+    cur.reach       += p.reach || 0;
+    cur.engagement  += p.totalInteractions || 0;
+    cur.saves       += p.saves || 0;
+    cur.shares      += p.shares || 0;
+    cur.comments    += p.comments || 0;
+    cur.videoViews  += p.videoViews || 0;
+    if (p.mediaType === 'REEL') cur.reels++;
+    cur.intent      += p.commentStats?.intentCount || 0;
+    cur.issues      += p.commentStats?.issueCount || 0;
+    cur.positive    += p.commentStats?.positive || 0;
+    cur.negative    += p.commentStats?.negative || 0;
+    byKey.set(key, cur);
+  }
+  const series = [...byKey.values()].sort((a, b) => a.key.localeCompare(b.key));
+  // Attach engagement-rate per row
+  for (const row of series) {
+    row.engagementRate = row.reach > 0 ? row.engagement / row.reach : 0;
+    row.saveRate       = row.reach > 0 ? row.saves / row.reach      : 0;
+    row.sentiment      = (row.positive + row.negative) > 0
+      ? (row.positive - row.negative) / (row.positive + row.negative)
+      : 0;
+  }
+  return series;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CROSS-PATTERN HEATMAPS — same shape as adsʼ cross matrix
+   rowKey × colKey × cellMetric
+   ══════════════════════════════════════════════════════════ */
+
+function postDimension(post, key) {
+  switch (key) {
+    case 'platform':       return post.platform;
+    case 'mediaType':      return post.mediaType;
+    case 'dayOfWeek': {
+      const t = new Date(post.timestamp);
+      if (isNaN(t)) return null;
+      return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][t.getUTCDay()];
+    }
+    case 'hourBucket': {
+      const t = new Date(post.timestamp);
+      if (isNaN(t)) return null;
+      const h = t.getUTCHours();
+      if (h < 6)  return '00-06';
+      if (h < 12) return '06-12';
+      if (h < 18) return '12-18';
+      return '18-24';
+    }
+    case 'captionLength': {
+      const n = (post.caption || '').length;
+      if (n < 50)  return '<50';
+      if (n < 150) return '50-150';
+      if (n < 400) return '150-400';
+      return '400+';
+    }
+    case 'hashtagDensity': {
+      const n = post.hashtags?.length || 0;
+      if (n === 0) return 'none';
+      if (n <= 3)  return '1-3';
+      if (n <= 10) return '4-10';
+      return '11+';
+    }
+    case 'hasVideo':       return post.videoViews > 0 || post.mediaType === 'REEL' || post.mediaType === 'VIDEO' ? 'video' : 'static';
+    case 'boostStatus':    return post.adMatch ? 'boosted' : 'organic';
+    case 'sentiment': {
+      const s = post.commentStats?.sentimentScore || 0;
+      if (s > 0.3)  return 'positive';
+      if (s < -0.3) return 'negative';
+      return 'neutral';
+    }
+    default:               return null;
+  }
+}
+
+export function buildSocialCrossMatrix(posts = [], rowKey, colKey, { minPosts = 2 } = {}) {
+  const matrix = {};
+  const rowTotals = new Map(), colTotals = new Map();
+  for (const p of posts) {
+    const r = postDimension(p, rowKey);
+    const c = postDimension(p, colKey);
+    if (!r || !c) continue;
+    const key = `${r}|||${c}`;
+    let cell = matrix[key];
+    if (!cell) {
+      cell = {
+        row: r, col: c, posts: 0,
+        reach: 0, engagement: 0, saves: 0, shares: 0, comments: 0,
+        adsPotentialSum: 0, videoViews: 0, issues: 0, intent: 0,
+      };
+      matrix[key] = cell;
+    }
+    cell.posts++;
+    cell.reach       += p.reach || 0;
+    cell.engagement  += p.totalInteractions || 0;
+    cell.saves       += p.saves || 0;
+    cell.shares      += p.shares || 0;
+    cell.comments    += p.comments || 0;
+    cell.videoViews  += p.videoViews || 0;
+    cell.adsPotentialSum += p.adsPotential?.score || 0;
+    cell.issues      += p.commentStats?.issueCount || 0;
+    cell.intent      += p.commentStats?.intentCount || 0;
+    rowTotals.set(r, (rowTotals.get(r) || 0) + (p.reach || 0));
+    colTotals.set(c, (colTotals.get(c) || 0) + (p.reach || 0));
+  }
+  for (const cell of Object.values(matrix)) {
+    cell.engagementRate = cell.reach > 0 ? cell.engagement / cell.reach : 0;
+    cell.saveRate       = cell.reach > 0 ? cell.saves / cell.reach       : 0;
+    cell.avgAdsPotential = cell.posts > 0 ? cell.adsPotentialSum / cell.posts : 0;
+    cell.belowThreshold = cell.posts < minPosts;
+  }
+  const rowKeys = [...rowTotals.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k);
+  const colKeys = [...colTotals.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k);
+  return { rowKeys, colKeys, matrix };
+}
+
+export { extractTopics };
 
 /* Convenience: pick the top-N boost candidates from enriched posts.
    Scoring + age weight do most of the sorting; we just filter out low-

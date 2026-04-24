@@ -11,6 +11,7 @@ import clsx from 'clsx';
 import {
   enrichAllPosts, pickBoostCandidates, pickMismatchedBoosts,
   pickLateBloomers, clusterContentDna, aggregateCadence,
+  buildTrendSeries, buildSocialCrossMatrix, extractTopics,
 } from '../lib/socialAnalytics';
 import { pullInstagram, pullFacebook } from '../lib/socialApi';
 
@@ -40,12 +41,22 @@ const SCORE_COLOR = s =>
   s >= 25 ? '#f97316' : '#ef4444';
 
 const TABS = [
-  { id: 'feed',     label: 'Feed',         icon: Layers },
-  { id: 'boost',    label: 'Boost queue',  icon: Flame },
-  { id: 'comments', label: 'Comments',     icon: MessageCircle },
-  { id: 'dna',      label: 'Content DNA',  icon: Sparkles },
-  { id: 'cadence',  label: 'Cadence',      icon: Calendar },
+  { id: 'feed',     label: 'Feed',             icon: Layers },
+  { id: 'boost',    label: 'Ad Opportunities', icon: Flame },
+  { id: 'comments', label: 'Comments',         icon: MessageCircle },
+  { id: 'trends',   label: 'Trends',           icon: TrendingUp },
+  { id: 'patterns', label: 'Patterns',         icon: BarChart3 },
+  { id: 'dna',      label: 'Content DNA',      icon: Sparkles },
+  { id: 'cadence',  label: 'Cadence',          icon: Calendar },
 ];
+
+const OBJECTIVE_META = {
+  awareness:   { label: 'Awareness',   color: '#06b6d4', hint: 'Broad reach, shares, engagement volume' },
+  traffic:     { label: 'Traffic',     color: '#3b82f6', hint: 'Profile visits + link-intent comments' },
+  conversion:  { label: 'Conversion',  color: '#22c55e', hint: 'Save rate + purchase/price intent comments' },
+  retargeting: { label: 'Retargeting', color: '#a855f7', hint: 'Deep engagement on lower-reach posts' },
+  catalog:     { label: 'Catalog/DPA', color: '#f59e0b', hint: 'Save rate + product-intent language' },
+};
 
 /* ──────────────────────────────────────────────────────────────── */
 
@@ -243,6 +254,41 @@ function PostDrawer({ post, onClose }) {
             )}
           </div>
         </div>
+
+        {/* Ad objective recommendations */}
+        {post.adObjectives && (
+          <div className="rounded-xl border border-gray-800 bg-gray-900 overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-800/60 flex items-center gap-2">
+              <Flame size={13} className="text-amber-400" />
+              <div className="text-sm font-semibold text-white">Ad opportunity by objective</div>
+              {post.adObjectives.recommended && (
+                <span className="ml-auto px-2 py-0.5 rounded-full text-[10px] font-semibold" style={{ background: `${OBJECTIVE_META[post.adObjectives.recommended].color}33`, color: OBJECTIVE_META[post.adObjectives.recommended].color }}>
+                  Recommended: {OBJECTIVE_META[post.adObjectives.recommended].label}
+                </span>
+              )}
+            </div>
+            <div className="p-3 grid grid-cols-1 md:grid-cols-5 gap-2">
+              {Object.entries(post.adObjectives.objectives).map(([k, obj]) => {
+                const meta = OBJECTIVE_META[k];
+                return (
+                  <div key={k} className="rounded-lg p-3 border" style={{ background: `${meta.color}11`, borderColor: `${meta.color}44` }} title={meta.hint}>
+                    <div className="text-[10px] uppercase tracking-wider font-semibold" style={{ color: meta.color }}>{meta.label}</div>
+                    <div className="text-2xl font-bold text-white">{obj.score}</div>
+                    <div className="text-[9px] text-slate-500 mt-0.5">{meta.hint}</div>
+                    <div className="mt-2 space-y-0.5">
+                      {obj.signals.slice(0, 3).map((s, i) => (
+                        <div key={i} className="flex items-center gap-1 text-[9px] text-slate-500">
+                          <span className="truncate">{s.label}</span>
+                          <span className="ml-auto font-mono text-slate-400">{s.pctile !== undefined ? `p${Math.round(s.pctile * 100)}` : s.raw?.toString?.() || ''}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Ad match card */}
         {post.adMatch && (
@@ -662,7 +708,15 @@ export default function SocialPosts() {
       )}
 
       {tab === 'comments' && (
-        <CommentsTab rows={commentFeed} onOpenPost={setOpenPost} />
+        <CommentsTab rows={commentFeed} posts={stream} onOpenPost={setOpenPost} />
+      )}
+
+      {tab === 'trends' && (
+        <TrendsTab posts={stream} />
+      )}
+
+      {tab === 'patterns' && (
+        <PatternsTab posts={stream} onOpenPost={setOpenPost} />
       )}
 
       {tab === 'dna' && (
@@ -762,20 +816,176 @@ function QueueTable({ title, subtitle, posts, onOpen, showMismatch }) {
   );
 }
 
-function CommentsTab({ rows, onOpenPost }) {
-  const issues = rows.filter(r => r.issue);
-  const intents = rows.filter(r => r.intent && !r.issue);
-  const ugc = rows.filter(r => r.ugcMention && !r.issue && !r.intent);
+const SEVERITY_META = {
+  4: { label: 'Critical', color: '#dc2626', bg: 'bg-red-900/40', text: 'text-red-200' },
+  3: { label: 'High',     color: '#ef4444', bg: 'bg-red-900/25', text: 'text-red-300' },
+  2: { label: 'Medium',   color: '#f59e0b', bg: 'bg-amber-900/25', text: 'text-amber-300' },
+  1: { label: 'Low',      color: '#eab308', bg: 'bg-yellow-900/25', text: 'text-yellow-300' },
+};
+
+const LANG_META = {
+  en:       { label: 'English',  color: '#60a5fa' },
+  hi:       { label: 'Hindi',    color: '#a78bfa' },
+  hinglish: { label: 'Hinglish', color: '#fb923c' },
+  other:    { label: 'Other',    color: '#64748b' },
+};
+
+function CommentsTab({ rows, posts, onOpenPost }) {
+  // Summaries by category
+  const summary = useMemo(() => {
+    const s = {
+      issues: {}, intents: {}, ugc: {}, lang: {}, severity: { 1: 0, 2: 0, 3: 0, 4: 0 },
+      spam: 0, positive: 0, negative: 0, total: 0, critical: 0,
+    };
+    for (const p of posts) {
+      const cs = p.commentStats || {};
+      s.total    += cs.total || 0;
+      s.spam     += cs.spamCount || 0;
+      s.positive += cs.positive || 0;
+      s.negative += cs.negative || 0;
+      for (const sev of [1, 2, 3, 4]) s.severity[sev] += cs.issueBySeverity?.[sev] || 0;
+      s.critical += cs.issueBySeverity?.[4] || 0;
+      for (const [k, v] of Object.entries(cs.issueByKey  || {})) s.issues[k]  = (s.issues[k]  || 0) + v;
+      for (const [k, v] of Object.entries(cs.intentByKey || {})) s.intents[k] = (s.intents[k] || 0) + v;
+      for (const [k, v] of Object.entries(cs.ugcByKey    || {})) s.ugc[k]     = (s.ugc[k]     || 0) + v;
+      for (const [k, v] of Object.entries(cs.langByKey   || {})) s.lang[k]    = (s.lang[k]    || 0) + v;
+    }
+    return s;
+  }, [posts]);
+
+  const topics = useMemo(() => extractTopics(posts, { k: 15, minCount: 2 }), [posts]);
+
+  const critical  = rows.filter(r => r.issueDeep?.severity === 4).sort((a, b) => (b.issueDeep?.confidence || 0) - (a.issueDeep?.confidence || 0));
+  const high      = rows.filter(r => r.issueDeep?.severity === 3);
+  const medium    = rows.filter(r => r.issueDeep?.severity === 2);
+  const lowIssues = rows.filter(r => r.issueDeep?.severity === 1);
+  const purchase  = rows.filter(r => r.intentDeep?.key === 'purchase_intent' && !r.issueDeep);
+  const pricey    = rows.filter(r => r.intentDeep?.key === 'price' && !r.issueDeep);
+  const linkReqs  = rows.filter(r => r.intentDeep?.key === 'link' && !r.issueDeep);
+  const sizeQs    = rows.filter(r => r.intentDeep?.key === 'size' && !r.issueDeep);
+  const availQs   = rows.filter(r => r.intentDeep?.key === 'availability' && !r.issueDeep);
+  const dmQs      = rows.filter(r => r.intentDeep?.key === 'dm' && !r.issueDeep);
+  const ugcTag    = rows.filter(r => r.ugcDeep?.some(u => u.key === 'tag_friend'));
+  const advocacy  = rows.filter(r => r.ugcDeep?.some(u => u.key === 'advocacy'));
+  const competitor= rows.filter(r => r.ugcDeep?.some(u => u.key === 'competitor_mention'));
+
   return (
     <div className="space-y-4">
-      <CommentSection title={`Issues · ${issues.length}`} subtitle="Comments matching refund / damaged / not-delivered / allergy keywords. Escalate to support." rows={issues} onOpenPost={onOpenPost} color="#ef4444" />
-      <CommentSection title={`High-intent · ${intents.length}`} subtitle="Price / size / link / DM / availability questions — these posts are catalog/conversion-ad candidates." rows={intents} onOpenPost={onOpenPost} color="#22c55e" />
-      <CommentSection title={`UGC mentions · ${ugc.length}`} subtitle="Customers tagging friends — potential affiliate/creator prospects." rows={ugc} onOpenPost={onOpenPost} color="#a855f7" />
+      {/* Overview strip */}
+      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-2">
+        <KPI label="Critical"    value={num(summary.severity[4])} color="#dc2626" Icon={AlertTriangle} sub="severity 4" />
+        <KPI label="High issues" value={num(summary.severity[3])} color="#ef4444" sub="severity 3" />
+        <KPI label="Medium"      value={num(summary.severity[2])} color="#f59e0b" sub="severity 2" />
+        <KPI label="Purchase intent" value={num(purchase.length)} color="#22c55e" />
+        <KPI label="Link/DM"     value={num(linkReqs.length + dmQs.length)} color="#06b6d4" />
+        <KPI label="Spam filtered" value={num(summary.spam)} color="#64748b" />
+      </div>
+
+      {/* Issue category breakdown */}
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
+        <CategoryCard title="Issues by category" data={summary.issues} colorBy="#ef4444" />
+        <CategoryCard title="Intent by category" data={summary.intents} colorBy="#22c55e" />
+        <CategoryCard title="UGC by category"    data={summary.ugc}     colorBy="#a855f7" />
+      </div>
+
+      {/* Language + sentiment strip */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="rounded-xl border border-gray-800 bg-gray-900 p-3">
+          <div className="text-[11px] font-semibold text-slate-300 mb-2">Language mix</div>
+          <div className="flex gap-2 flex-wrap">
+            {Object.entries(summary.lang).sort((a, b) => b[1] - a[1]).map(([k, v]) => {
+              const meta = LANG_META[k] || LANG_META.other;
+              return (
+                <div key={k} className="px-2 py-1 rounded" style={{ background: `${meta.color}22`, color: meta.color }}>
+                  <span className="text-[10px] font-semibold">{meta.label}</span>
+                  <span className="text-sm font-bold ml-1">{num(v)}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <div className="rounded-xl border border-gray-800 bg-gray-900 p-3">
+          <div className="text-[11px] font-semibold text-slate-300 mb-2">Sentiment balance</div>
+          <div className="flex items-center gap-3">
+            <div className="flex-1 h-4 bg-gray-800 rounded-full overflow-hidden relative">
+              {(() => {
+                const t = summary.positive + summary.negative;
+                if (t === 0) return <div className="w-full h-full bg-slate-700" />;
+                return (
+                  <>
+                    <div className="h-full" style={{ width: `${(summary.positive / t) * 100}%`, background: '#22c55e' }} />
+                    <div className="h-full" style={{ width: `${(summary.negative / t) * 100}%`, background: '#ef4444', position: 'absolute', right: 0, top: 0 }} />
+                  </>
+                );
+              })()}
+            </div>
+            <span className="text-[10px] text-emerald-400 font-mono">+{num(summary.positive)}</span>
+            <span className="text-[10px] text-red-400 font-mono">-{num(summary.negative)}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Trending topics */}
+      {topics.topics.length > 0 && (
+        <div className="rounded-xl border border-gray-800 bg-gray-900 p-3">
+          <div className="text-[11px] font-semibold text-slate-300 mb-2 flex items-center gap-2">
+            <Hash size={11} /> Trending topics in comments
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {topics.topics.map(t => (
+              <span key={t.phrase} className="text-[10px] px-2 py-1 rounded bg-gray-800 text-slate-300 font-mono">
+                {t.phrase} <span className="text-slate-500">· {t.count}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Issue severity triage */}
+      <CommentSection title={`🚨 Critical · ${critical.length}`} subtitle="Severity 4 — allergy, fraud, not-received with strong negative sentiment. Escalate immediately." rows={critical} onOpenPost={onOpenPost} color="#dc2626" showCategory />
+      <CommentSection title={`High severity · ${high.length}`} subtitle="Severity 3 — damaged, not-received, wrong item, payment issues. Action this week." rows={high} onOpenPost={onOpenPost} color="#ef4444" showCategory />
+      <CommentSection title={`Medium / low · ${medium.length + lowIssues.length}`} subtitle="Quality complaints, size issues, support frustration." rows={[...medium, ...lowIssues]} onOpenPost={onOpenPost} color="#f59e0b" showCategory />
+
+      {/* High-conversion intent triage */}
+      <CommentSection title={`💰 Purchase intent · ${purchase.length}`}   subtitle="'Ordering', 'need this', 'just bought' — warm leads." rows={purchase} onOpenPost={onOpenPost} color="#22c55e" showCategory />
+      <CommentSection title={`💵 Price questions · ${pricey.length}`}     subtitle="Someone asking how much — reply with link + price to close." rows={pricey} onOpenPost={onOpenPost} color="#14b8a6" showCategory />
+      <CommentSection title={`🔗 Link requests · ${linkReqs.length}`}     subtitle="Send the link — these posts are high-conversion-ad candidates." rows={linkReqs} onOpenPost={onOpenPost} color="#06b6d4" showCategory />
+      <CommentSection title={`📐 Size / variant · ${sizeQs.length}`}      subtitle="Answer the spec — closes the loop on consideration." rows={sizeQs} onOpenPost={onOpenPost} color="#3b82f6" showCategory />
+      <CommentSection title={`📦 Availability · ${availQs.length}`}       subtitle="Out-of-stock signals — procurement + reshipment cadence." rows={availQs} onOpenPost={onOpenPost} color="#8b5cf6" showCategory />
+      <CommentSection title={`📮 DM requests · ${dmQs.length}`}           subtitle="Wants a direct message — unified-inbox lead." rows={dmQs} onOpenPost={onOpenPost} color="#ec4899" showCategory />
+
+      {/* UGC */}
+      <CommentSection title={`🤝 Tag-a-friend · ${ugcTag.length}`}     subtitle="Organic amplification — affiliate/creator candidates." rows={ugcTag} onOpenPost={onOpenPost} color="#a855f7" showCategory />
+      <CommentSection title={`⭐ Brand advocacy · ${advocacy.length}`} subtitle="'Best brand', 'repeat customer' — testimonials, case-study fodder." rows={advocacy} onOpenPost={onOpenPost} color="#f472b6" showCategory />
+      <CommentSection title={`🆚 Competitor mentions · ${competitor.length}`} subtitle="People naming competitors — positioning insight." rows={competitor} onOpenPost={onOpenPost} color="#64748b" showCategory />
     </div>
   );
 }
 
-function CommentSection({ title, subtitle, rows, onOpenPost, color }) {
+function CategoryCard({ title, data, colorBy }) {
+  const entries = Object.entries(data || {}).sort((a, b) => b[1] - a[1]);
+  const max = Math.max(1, ...entries.map(x => x[1]));
+  return (
+    <div className="rounded-xl border border-gray-800 bg-gray-900 overflow-hidden">
+      <div className="px-3 py-2 border-b border-gray-800/60 text-[11px] font-semibold text-slate-300">{title}</div>
+      <div className="p-3 space-y-1">
+        {entries.length === 0 && <div className="text-[10px] text-slate-600 italic">None detected.</div>}
+        {entries.map(([k, v]) => (
+          <div key={k} className="flex items-center gap-2 text-[11px]">
+            <div className="w-28 text-slate-400 truncate">{k.replace(/_/g, ' ')}</div>
+            <div className="flex-1 h-3 bg-gray-800 rounded overflow-hidden">
+              <div className="h-full" style={{ width: `${(v / max) * 100}%`, background: colorBy }} />
+            </div>
+            <div className="w-8 text-right font-mono text-slate-300">{v}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CommentSection({ title, subtitle, rows, onOpenPost, color, showCategory }) {
+  if (rows.length === 0) return null;
   return (
     <div className="rounded-xl border border-gray-800 bg-gray-900 overflow-hidden">
       <div className="px-4 py-3 border-b border-gray-800/60">
@@ -785,20 +995,36 @@ function CommentSection({ title, subtitle, rows, onOpenPost, color }) {
         </div>
         {subtitle && <div className="text-[11px] text-slate-500 mt-0.5">{subtitle}</div>}
       </div>
-      {rows.length === 0 ? (
-        <div className="px-4 py-6 text-[12px] text-slate-600 italic text-center">Nothing here.</div>
-      ) : (
-        <div className="divide-y divide-gray-800/60 max-h-[520px] overflow-auto">
-          {rows.slice(0, 200).map((c, i) => (
+      <div className="divide-y divide-gray-800/60 max-h-[420px] overflow-auto">
+        {rows.slice(0, 200).map((c, i) => {
+          const sev = c.issueDeep ? SEVERITY_META[c.issueDeep.severity] : null;
+          const lang = LANG_META[c.lang] || LANG_META.other;
+          return (
             <div key={i} className="px-3 py-2 flex items-start gap-2 hover:bg-gray-800/30 transition-colors">
               <button onClick={() => onOpenPost(c.post)} className="flex-shrink-0">
                 {c.post.thumbnailUrl && <img src={c.post.thumbnailUrl} alt="" referrerPolicy="no-referrer" className="w-10 h-10 object-cover rounded" />}
               </button>
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1.5 text-[10px] text-slate-500">
+                <div className="flex items-center gap-1.5 text-[10px] text-slate-500 flex-wrap">
                   <span className="text-slate-300 font-semibold">{c.username}</span>
                   <span>·</span>
                   <span>{ageLabel(c.timestamp)}</span>
+                  <span className="px-1 py-0 rounded text-[9px] font-mono" style={{ background: `${lang.color}22`, color: lang.color }}>{c.lang}</span>
+                  {showCategory && c.issueDeep && (
+                    <span className={clsx('px-1.5 py-0 rounded text-[9px] font-semibold', sev.bg, sev.text)}>
+                      {c.issueDeep.label} · sev {c.issueDeep.severity}
+                    </span>
+                  )}
+                  {showCategory && c.intentDeep && !c.issueDeep && (
+                    <span className="px-1.5 py-0 rounded text-[9px] font-semibold bg-emerald-900/40 text-emerald-300">
+                      {c.intentDeep.label}
+                    </span>
+                  )}
+                  {showCategory && c.ugcDeep?.[0] && !c.issueDeep && !c.intentDeep && (
+                    <span className="px-1.5 py-0 rounded text-[9px] font-semibold bg-purple-900/40 text-purple-300">
+                      {c.ugcDeep[0].label}
+                    </span>
+                  )}
                   {c.post.permalink && (
                     <a href={c.post.permalink} target="_blank" rel="noopener noreferrer" className="ml-auto text-brand-400 hover:text-brand-300 flex items-center gap-0.5">
                       <ExternalLink size={9} /> open
@@ -806,14 +1032,243 @@ function CommentSection({ title, subtitle, rows, onOpenPost, color }) {
                   )}
                 </div>
                 <div className="text-[12px] text-slate-200 mt-0.5">{c.text}</div>
+                {c.sentiment && c.sentiment.intensity > 0.3 && (
+                  <div className="text-[9px] mt-0.5" style={{ color: c.sentiment.polarity > 0 ? '#22c55e' : '#ef4444' }}>
+                    {c.sentiment.polarity > 0 ? '▲' : '▼'} sentiment {c.sentiment.polarity > 0 ? '+' : ''}{c.sentiment.polarity.toFixed(2)} · intensity {c.sentiment.intensity.toFixed(2)}
+                  </div>
+                )}
                 <button onClick={() => onOpenPost(c.post)} className="text-[10px] text-slate-500 hover:text-slate-300 mt-1 truncate block max-w-full text-left">
                   on: {c.post.caption?.slice(0, 80) || c.post.mediaType}
                 </button>
               </div>
             </div>
-          ))}
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ═════ TRENDS TAB ════════════════════════════════════════════════ */
+function TrendsTab({ posts }) {
+  const [bucket, setBucket] = useState('day');
+  const [metric, setMetric] = useState('reach');
+  const series = useMemo(() => buildTrendSeries(posts, { bucket }), [posts, bucket]);
+
+  const metrics = [
+    { key: 'reach',          label: 'Reach',           color: '#06b6d4' },
+    { key: 'engagement',     label: 'Engagement',      color: '#ec4899' },
+    { key: 'saves',          label: 'Saves',           color: '#a855f7' },
+    { key: 'engagementRate', label: 'Engagement rate', color: '#22c55e', isRate: true },
+    { key: 'saveRate',       label: 'Save rate',       color: '#8b5cf6', isRate: true },
+    { key: 'issues',         label: 'Issues',          color: '#ef4444' },
+    { key: 'intent',         label: 'Intent',          color: '#14b8a6' },
+    { key: 'sentiment',      label: 'Sentiment',       color: '#f59e0b' },
+  ];
+  const active = metrics.find(m => m.key === metric) || metrics[0];
+  const vals = series.map(r => r[metric] || 0);
+  const maxV = Math.max(1, ...vals);
+  const minV = Math.min(0, ...vals);
+  const range = Math.max(Math.abs(maxV), Math.abs(minV));
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="text-[11px] text-slate-500">Bucket</div>
+        {['day', 'week', 'month'].map(b => (
+          <button key={b} onClick={() => setBucket(b)}
+            className={clsx('px-2 py-1 text-[11px] rounded border',
+              bucket === b ? 'bg-brand-600/30 border-brand-600/60 text-brand-200' : 'bg-gray-800 border-gray-700 text-slate-400 hover:text-slate-200')}>
+            {b}
+          </button>
+        ))}
+        <div className="ml-4 text-[11px] text-slate-500">Metric</div>
+        <select value={metric} onChange={e => setMetric(e.target.value)}
+                className="text-[11px] bg-gray-800 border border-gray-700 rounded px-2 py-1 text-slate-200">
+          {metrics.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
+        </select>
+      </div>
+
+      {/* Main time-series chart */}
+      <div className="rounded-xl border border-gray-800 bg-gray-900 p-4">
+        <div className="text-sm font-semibold text-white mb-3">{active.label} over time</div>
+        {series.length === 0 ? (
+          <div className="text-xs text-slate-500 italic">No data in the current window.</div>
+        ) : (
+          <div className="relative">
+            <div className="flex items-end gap-[2px] h-56 overflow-x-auto">
+              {series.map((row, i) => {
+                const v = row[metric] || 0;
+                const h = range > 0 ? Math.abs(v) / range * 100 : 0;
+                const isNeg = v < 0;
+                const rawLabel = active.isRate ? pct(v) : fmtCompact(v);
+                return (
+                  <div key={row.key} className="flex flex-col items-center gap-0.5 min-w-[18px] group"
+                       title={`${row.key}\n${active.label}: ${rawLabel}\nPosts: ${row.posts}`}>
+                    {!isNeg && <div className="flex-1" />}
+                    <div className="w-3 rounded-t transition-all group-hover:opacity-80"
+                         style={{ height: `${h}%`, background: active.color, minHeight: v !== 0 ? '2px' : 0 }} />
+                    {isNeg && <div className="flex-1" />}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex justify-between mt-2 text-[9px] text-slate-600 font-mono">
+              <span>{series[0]?.key}</span>
+              <span>{series[series.length - 1]?.key}</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Mini multi-series */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+        {['reach', 'engagement', 'saves', 'issues'].map(m => {
+          const meta = metrics.find(x => x.key === m);
+          const mvals = series.map(r => r[m] || 0);
+          const mmax = Math.max(1, ...mvals);
+          const total = mvals.reduce((s, v) => s + v, 0);
+          return (
+            <div key={m} className="rounded-xl border border-gray-800 bg-gray-900 p-3">
+              <div className="flex items-center justify-between text-[11px] mb-2">
+                <span className="font-semibold text-slate-300">{meta.label}</span>
+                <span className="text-slate-500 font-mono">Σ {fmtCompact(total)}</span>
+              </div>
+              <div className="flex items-end gap-[1px] h-12">
+                {series.map((row, i) => (
+                  <div key={row.key} className="flex-1 rounded-t" style={{ height: `${((row[m] || 0) / mmax) * 100}%`, background: meta.color, minHeight: row[m] ? '1px' : 0 }} />
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ═════ PATTERNS TAB ══════════════════════════════════════════════ */
+const PATTERN_DIMS = [
+  { key: 'platform',       label: 'Platform' },
+  { key: 'mediaType',      label: 'Media type' },
+  { key: 'dayOfWeek',      label: 'Day of week' },
+  { key: 'hourBucket',     label: 'Hour bucket' },
+  { key: 'captionLength',  label: 'Caption length' },
+  { key: 'hashtagDensity', label: 'Hashtag density' },
+  { key: 'hasVideo',       label: 'Video vs static' },
+  { key: 'boostStatus',    label: 'Boost status' },
+  { key: 'sentiment',      label: 'Comment sentiment' },
+];
+
+const PATTERN_METRICS = [
+  { key: 'engagementRate',   label: 'Engagement rate', format: v => pct(v) },
+  { key: 'saveRate',         label: 'Save rate',       format: v => pct(v) },
+  { key: 'avgAdsPotential',  label: 'Avg ads potential', format: v => Math.round(v) + '' },
+  { key: 'reach',            label: 'Reach (sum)',     format: v => fmtCompact(v) },
+  { key: 'issues',           label: 'Issues (sum)',    format: v => String(v) },
+  { key: 'intent',           label: 'Intent (sum)',    format: v => String(v) },
+];
+
+function PatternsTab({ posts, onOpenPost }) {
+  const [rowKey, setRowKey] = useState('mediaType');
+  const [colKey, setColKey] = useState('dayOfWeek');
+  const [metric, setMetric] = useState('engagementRate');
+  const cross = useMemo(() => buildSocialCrossMatrix(posts, rowKey, colKey, { minPosts: 2 }), [posts, rowKey, colKey]);
+
+  const active = PATTERN_METRICS.find(m => m.key === metric);
+
+  // Build color scale from cell values
+  const values = Object.values(cross.matrix).filter(c => !c.belowThreshold).map(c => c[metric] || 0);
+  const maxV = Math.max(...values, 0.0001);
+  const minV = Math.min(...values, 0);
+  const range = maxV - minV || 1;
+
+  const cellColor = v => {
+    const t = (v - minV) / range;
+    // viridis-ish: blue → cyan → green → yellow
+    const r = Math.round(68 * (1 - t) + 240 * t);
+    const g = Math.round(1 * (1 - t) + 200 * t);
+    const b = Math.round(84 * (1 - t) + 20 * t);
+    return `rgb(${r}, ${g}, ${b})`;
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 flex-wrap text-[11px]">
+        <span className="text-slate-500">Row</span>
+        <select value={rowKey} onChange={e => setRowKey(e.target.value)} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-slate-200">
+          {PATTERN_DIMS.map(d => <option key={d.key} value={d.key} disabled={d.key === colKey}>{d.label}</option>)}
+        </select>
+        <span className="text-slate-500 ml-2">×</span>
+        <span className="text-slate-500 ml-2">Col</span>
+        <select value={colKey} onChange={e => setColKey(e.target.value)} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-slate-200">
+          {PATTERN_DIMS.map(d => <option key={d.key} value={d.key} disabled={d.key === rowKey}>{d.label}</option>)}
+        </select>
+        <span className="text-slate-500 ml-4">Cell metric</span>
+        <select value={metric} onChange={e => setMetric(e.target.value)} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-slate-200">
+          {PATTERN_METRICS.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
+        </select>
+      </div>
+
+      <div className="rounded-xl border border-gray-800 bg-gray-900 overflow-hidden">
+        <div className="px-4 py-3 border-b border-gray-800/60">
+          <div className="text-sm font-semibold text-white">
+            {PATTERN_DIMS.find(d => d.key === rowKey)?.label} × {PATTERN_DIMS.find(d => d.key === colKey)?.label}
+          </div>
+          <div className="text-[11px] text-slate-500 mt-0.5">
+            Cell colour = {active.label}. Darker = lower; brighter = higher. Click any cell to filter the feed to that slice.
+          </div>
         </div>
-      )}
+        <div className="p-3 overflow-auto" style={{ maxHeight: '620px' }}>
+          {cross.rowKeys.length === 0 || cross.colKeys.length === 0 ? (
+            <div className="text-xs text-slate-500 italic">Not enough data for that combo.</div>
+          ) : (
+            <table className="text-xs border-collapse">
+              <thead>
+                <tr>
+                  <th className="sticky left-0 bg-gray-900 z-10 px-2 py-1 text-left text-[10px] text-slate-500 uppercase tracking-wider min-w-[140px]" />
+                  {cross.colKeys.map(c => (
+                    <th key={c} className="px-2 py-1 text-left text-[10px] text-slate-400 font-semibold min-w-[100px]">{c}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cross.rowKeys.map(r => (
+                  <tr key={r}>
+                    <td className="sticky left-0 bg-gray-900 z-10 px-2 py-1 text-slate-300 font-medium">{r}</td>
+                    {cross.colKeys.map(c => {
+                      const cell = cross.matrix[`${r}|||${c}`];
+                      if (!cell) return <td key={c} className="px-2 py-1"><span className="text-slate-700">·</span></td>;
+                      if (cell.belowThreshold) {
+                        return (
+                          <td key={c} className="p-0">
+                            <div className="px-2 py-2 text-center font-mono min-w-[100px] bg-gray-800/40 text-slate-600">
+                              <div className="text-[10px]">{cell.posts} post</div>
+                            </div>
+                          </td>
+                        );
+                      }
+                      const v = cell[metric] || 0;
+                      return (
+                        <td key={c} className="p-0">
+                          <div
+                            style={{ background: cellColor(v), color: v > (minV + range * 0.5) ? '#111' : '#fff' }}
+                            className="px-2 py-2 text-center font-mono min-w-[100px] cursor-default"
+                            title={`${r} × ${c}\n${active.label}: ${active.format(v)}\nPosts: ${cell.posts}\nReach: ${fmtCompact(cell.reach)}\nEngagement: ${fmtCompact(cell.engagement)}\nSaves: ${fmtCompact(cell.saves)}\nAvg potential: ${Math.round(cell.avgAdsPotential)}\nIssues: ${cell.issues} · Intent: ${cell.intent}`}
+                          >
+                            <div className="font-bold text-sm">{active.format(v)}</div>
+                            <div className="text-[10px] opacity-80">{cell.posts} posts</div>
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
