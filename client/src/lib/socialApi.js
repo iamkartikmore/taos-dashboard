@@ -35,6 +35,10 @@ export async function pullInstagram({ token, pageAccessToken, apiVersion = 'v21.
   return normalized;
 }
 
+export async function debugInstagram({ token, pageAccessToken, apiVersion = 'v21.0', igUserId }) {
+  return post('/api/social/debug-ig', { token, pageAccessToken, apiVersion, igUserId });
+}
+
 export async function pullFacebook({ pageAccessToken, apiVersion = 'v21.0', pageId, brandId, limit = 200, sinceDays = 90, includeComments = true }) {
   const { posts = [], stats = null } = await post('/api/social/pull-fb', { pageAccessToken, apiVersion, pageId, limit, sinceDays, includeComments });
   const normalized = posts.map(raw => normalizePost('facebook', raw, { brandId }));

@@ -13,7 +13,7 @@ import {
   pickLateBloomers, clusterContentDna, aggregateCadence,
   buildTrendSeries, buildSocialCrossMatrix, extractTopics,
 } from '../lib/socialAnalytics';
-import { pullInstagram, pullFacebook } from '../lib/socialApi';
+import { pullInstagram, pullFacebook, debugInstagram } from '../lib/socialApi';
 
 const num = v => (Number(v) || 0).toLocaleString('en-IN');
 const pct = v => `${((Number(v) || 0) * 100).toFixed(1)}%`;
@@ -402,6 +402,8 @@ export default function SocialPosts() {
   const [mediaFilter, setMediaFilter] = useState('all'); // all | REEL | IMAGE | VIDEO | CAROUSEL_ALBUM | STATUS
   const [search, setSearch] = useState('');
   const [openPost, setOpenPost] = useState(null);
+  const [debugResult, setDebugResult] = useState(null);
+  const [debugging, setDebugging] = useState(false);
   const [sinceDays, setSinceDays] = useState(90);
   const [pulling, setPulling] = useState(false);
 
@@ -488,6 +490,30 @@ export default function SocialPosts() {
   }, [stream]);
 
   /* ── Pull handler ────────────────────────────────────────────── */
+  const handleDebug = async () => {
+    setDebugging(true);
+    setDebugResult(null);
+    try {
+      const results = {};
+      for (const b of active) {
+        const cfg = b.social || {};
+        if (!cfg.igBusinessId || !b.meta?.token) continue;
+        try {
+          const r = await debugInstagram({
+            token: b.meta.token,
+            pageAccessToken: cfg.pageAccessToken,
+            apiVersion: b.meta.apiVersion,
+            igUserId: cfg.igBusinessId,
+          });
+          results[b.name] = r;
+        } catch (e) {
+          results[b.name] = { error: e.message };
+        }
+      }
+      setDebugResult(results);
+    } finally { setDebugging(false); }
+  };
+
   const handlePull = async () => {
     if (pulling) return;
     setPulling(true);
@@ -617,6 +643,14 @@ export default function SocialPosts() {
                   className="text-[11px] bg-gray-800 border border-gray-700 rounded px-2 py-1 text-slate-200">
             {[30, 60, 90, 180, 365].map(d => <option key={d} value={d}>Last {d}d</option>)}
           </select>
+          <button
+            onClick={handleDebug}
+            disabled={debugging || !configured}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-900/30 hover:bg-amber-900/50 disabled:opacity-30 text-amber-200 border border-amber-700/40"
+            title="Show raw Meta Graph API response — use when a pull is missing data to see exactly what Meta is returning."
+          >
+            <AlertTriangle size={11} className={debugging ? 'animate-pulse' : ''} /> {debugging ? 'Debugging…' : 'Debug IG'}
+          </button>
           <button
             onClick={handlePull}
             disabled={pulling || !configured}
@@ -791,6 +825,7 @@ export default function SocialPosts() {
       )}
 
       <PostDrawer post={openPost} onClose={() => setOpenPost(null)} />
+      <DebugModal result={debugResult} onClose={() => setDebugResult(null)} />
     </div>
   );
 }
@@ -1433,6 +1468,119 @@ function CadenceTab({ cadence }) {
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═════ DEBUG MODAL — raw Meta /media response ═══════════════════ */
+function DebugModal({ result, onClose }) {
+  if (!result) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex" onClick={onClose}>
+      <div className="flex-1 bg-black/70 backdrop-blur-sm" />
+      <div
+        onClick={e => e.stopPropagation()}
+        className="w-full max-w-4xl h-screen overflow-y-auto bg-gray-950 border-l border-gray-800 p-5 space-y-4"
+      >
+        <div className="flex items-center gap-2 sticky top-0 bg-gray-950 py-2 z-10">
+          <AlertTriangle size={14} className="text-amber-400" />
+          <div className="text-sm font-bold text-white">Meta Graph API raw response</div>
+          <button onClick={() => navigator.clipboard.writeText(JSON.stringify(result, null, 2))}
+                  className="ml-auto text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-slate-300 border border-gray-700">
+            Copy JSON
+          </button>
+          <button onClick={onClose} className="p-1.5 rounded hover:bg-gray-800 text-slate-500">
+            <X size={14} />
+          </button>
+        </div>
+        {Object.entries(result).map(([brandName, r]) => (
+          <div key={brandName} className="rounded-xl border border-gray-800 bg-gray-900 overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-800/60 text-sm font-semibold text-white">
+              {brandName}
+            </div>
+            <div className="p-3 space-y-3 text-[11px]">
+              {r.account && (
+                <div>
+                  <div className="text-amber-400 font-semibold mb-1">Account</div>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 font-mono">
+                    <div><span className="text-slate-500">username:</span> <span className="text-slate-200">@{r.account.username}</span></div>
+                    <div><span className="text-slate-500">account_type:</span> <span className={r.account.account_type === 'BUSINESS' || r.account.account_type === 'CREATOR' ? 'text-emerald-400' : 'text-red-400'}>{r.account.account_type}</span></div>
+                    <div><span className="text-slate-500">media_count:</span> <span className="text-slate-200">{r.account.media_count}</span></div>
+                    <div><span className="text-slate-500">followers_count:</span> <span className="text-slate-200">{r.account.followers_count}</span></div>
+                    <div><span className="text-slate-500">id:</span> <span className="text-slate-300">{r.account.id}</span></div>
+                    <div><span className="text-slate-500">ig_id:</span> <span className="text-slate-300">{r.account.ig_id}</span></div>
+                  </div>
+                </div>
+              )}
+              {r.accountError && (
+                <div className="text-red-400 bg-red-950/30 p-2 rounded">
+                  Account error: <pre className="font-mono text-[10px] whitespace-pre-wrap">{JSON.stringify(r.accountError, null, 2)}</pre>
+                </div>
+              )}
+              {r.allMediaBreakdown && (
+                <div>
+                  <div className="text-amber-400 font-semibold mb-1">All-pages /media breakdown</div>
+                  <div className="font-mono text-[10px] space-y-0.5">
+                    <div>total fetched: <span className="text-slate-200">{r.allMediaBreakdown.total}</span></div>
+                    <div>by media_type: {Object.entries(r.allMediaBreakdown.byMediaType).map(([k, v]) => <span key={k} className="mx-1"><span className="text-slate-500">{k}</span>:<span className="text-slate-200">{v}</span></span>)}</div>
+                    <div>by media_product_type: {Object.entries(r.allMediaBreakdown.byProductType).map(([k, v]) => <span key={k} className="mx-1"><span className="text-slate-500">{k}</span>:<span className={k === 'REELS' ? (v > 0 ? 'text-emerald-400 font-bold' : 'text-red-400') : 'text-slate-200'}>{v}</span></span>)}</div>
+                    <div>oldest: <span className="text-slate-400">{r.allMediaBreakdown.oldest}</span></div>
+                    <div>newest: <span className="text-slate-400">{r.allMediaBreakdown.newest}</span></div>
+                  </div>
+                </div>
+              )}
+              {r.mediaPage1 && (
+                <div>
+                  <div className="text-amber-400 font-semibold mb-1">First page — raw items ({r.mediaPage1.count})</div>
+                  <div className="max-h-80 overflow-auto bg-gray-950 rounded border border-gray-800">
+                    <table className="w-full text-[10px]">
+                      <thead className="bg-gray-900 sticky top-0">
+                        <tr>
+                          <th className="px-2 py-1 text-left text-slate-500 font-semibold">media_type</th>
+                          <th className="px-2 py-1 text-left text-slate-500 font-semibold">media_product_type</th>
+                          <th className="px-2 py-1 text-left text-slate-500 font-semibold">timestamp</th>
+                          <th className="px-2 py-1 text-left text-slate-500 font-semibold">id</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {r.mediaPage1.items.map((m, i) => (
+                          <tr key={i} className={i % 2 === 0 ? 'bg-gray-950' : 'bg-gray-900/40'}>
+                            <td className="px-2 py-0.5 font-mono text-slate-300">{m.media_type}</td>
+                            <td className={clsx('px-2 py-0.5 font-mono', String(m.media_product_type).toUpperCase() === 'REELS' ? 'text-emerald-400 font-bold' : 'text-slate-400')}>{m.media_product_type || '—'}</td>
+                            <td className="px-2 py-0.5 font-mono text-slate-500">{(m.timestamp || '').slice(0, 19)}</td>
+                            <td className="px-2 py-0.5 font-mono text-slate-600 truncate">{m.id}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+              {r.mediaError && (
+                <div className="text-red-400 bg-red-950/30 p-2 rounded">
+                  Media error: <pre className="font-mono text-[10px] whitespace-pre-wrap">{JSON.stringify(r.mediaError, null, 2)}</pre>
+                </div>
+              )}
+              {r.sampleReelInsights && (
+                <div>
+                  <div className="text-amber-400 font-semibold mb-1">Sample reel insights test</div>
+                  <pre className="font-mono text-[10px] text-slate-400 bg-gray-950 p-2 rounded border border-gray-800 whitespace-pre-wrap max-h-40 overflow-auto">{JSON.stringify(r.sampleReelInsights, null, 2)}</pre>
+                </div>
+              )}
+              {r.businessDiscovery && (
+                <div>
+                  <div className="text-amber-400 font-semibold mb-1">business_discovery fallback</div>
+                  <pre className="font-mono text-[10px] text-slate-400 bg-gray-950 p-2 rounded border border-gray-800 whitespace-pre-wrap max-h-40 overflow-auto">{JSON.stringify(r.businessDiscovery, null, 2)}</pre>
+                </div>
+              )}
+              <details>
+                <summary className="text-[10px] text-slate-500 cursor-pointer">Raw full response (click to expand)</summary>
+                <pre className="font-mono text-[9px] text-slate-500 bg-gray-950 p-2 rounded border border-gray-800 whitespace-pre-wrap max-h-96 overflow-auto mt-1">{JSON.stringify(r, null, 2)}</pre>
+              </details>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

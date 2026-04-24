@@ -2304,6 +2304,131 @@ app.post('/api/social/pull-fb', async (req, res) => {
   }
 });
 
+/* ─── SOCIAL DEBUG — raw Meta response inspector ──────────────────
+   When reels don't appear we need to see exactly what Meta is
+   returning. This endpoint calls every IG endpoint we care about
+   with full fields and returns the raw JSON straight to the client
+   so we can screenshot the truth. Tries multiple angles to isolate
+   whether Meta is filtering reels or our pipeline is dropping them.
+*/
+app.post('/api/social/debug-ig', async (req, res) => {
+  const { token, pageAccessToken, apiVersion = 'v21.0', igUserId } = req.body || {};
+  if (!token || !igUserId) return res.status(400).json({ error: 'token and igUserId required' });
+  const igToken = pageAccessToken || token;
+  const result = {
+    igUserId,
+    tokenSource: pageAccessToken ? 'page' : 'user',
+    apiVersion,
+    ts: new Date().toISOString(),
+  };
+
+  // 1. Who does the token belong to
+  try {
+    const r = await axios.get(
+      `https://graph.facebook.com/${apiVersion}/me`,
+      { params: { access_token: igToken, fields: 'id,name' }, timeout: 10000 },
+    );
+    result.tokenHolder = r.data;
+  } catch (e) { result.tokenHolderError = e.response?.data?.error || e.message; }
+
+  // 2. Account metadata — confirms BUSINESS/CREATOR + media_count
+  try {
+    const r = await axios.get(
+      `https://graph.facebook.com/${apiVersion}/${igUserId}`,
+      {
+        params: {
+          access_token: igToken,
+          fields: 'id,ig_id,username,name,account_type,media_count,followers_count,follows_count,biography,website,profile_picture_url',
+        },
+        timeout: 15000,
+      },
+    );
+    result.account = r.data;
+  } catch (e) { result.accountError = e.response?.data?.error || e.message; }
+
+  // 3. Raw /media first page — all fields we request in production
+  try {
+    const r = await axios.get(
+      `https://graph.facebook.com/${apiVersion}/${igUserId}/media`,
+      {
+        params: { access_token: igToken, fields: IG_MEDIA_FIELDS, limit: 50 },
+        timeout: 30000,
+      },
+    );
+    result.mediaPage1 = {
+      count: r.data?.data?.length || 0,
+      hasNext: !!r.data?.paging?.next,
+      items: r.data?.data || [],
+      byMediaType: {},
+      byProductType: {},
+    };
+    for (const m of result.mediaPage1.items) {
+      const t = String(m.media_type || 'UNKNOWN').toUpperCase();
+      const p = String(m.media_product_type || 'UNKNOWN').toUpperCase();
+      result.mediaPage1.byMediaType[t]   = (result.mediaPage1.byMediaType[t] || 0) + 1;
+      result.mediaPage1.byProductType[p] = (result.mediaPage1.byProductType[p] || 0) + 1;
+    }
+  } catch (e) { result.mediaError = e.response?.data?.error || e.message; }
+
+  // 4. Paginate all media (up to 20 pages) — breakdown across all
+  try {
+    const all = await pagedGet(
+      `https://graph.facebook.com/${apiVersion}/${igUserId}/media`,
+      { access_token: igToken, fields: 'id,media_type,media_product_type,timestamp', limit: 50 },
+      { maxPages: 20 },
+    );
+    const byMediaType = {}, byProductType = {};
+    for (const m of all) {
+      const t = String(m.media_type || 'UNKNOWN').toUpperCase();
+      const p = String(m.media_product_type || 'UNKNOWN').toUpperCase();
+      byMediaType[t] = (byMediaType[t] || 0) + 1;
+      byProductType[p] = (byProductType[p] || 0) + 1;
+    }
+    result.allMediaBreakdown = {
+      total: all.length,
+      byMediaType,
+      byProductType,
+      oldest: all.length ? all[all.length - 1].timestamp : null,
+      newest: all.length ? all[0].timestamp : null,
+    };
+  } catch (e) { result.allMediaError = e.response?.data?.error || e.message; }
+
+  // 5. Try business_discovery fallback — sometimes exposes data /media won't
+  try {
+    const r = await axios.get(
+      `https://graph.facebook.com/${apiVersion}/${igUserId}`,
+      {
+        params: {
+          access_token: igToken,
+          fields: `business_discovery.username(${result.account?.username || ''}){id,media_count,followers_count,media.limit(10){id,media_type,media_product_type,timestamp,caption}}`,
+        },
+        timeout: 15000,
+      },
+    );
+    result.businessDiscovery = r.data?.business_discovery || null;
+  } catch (e) { result.businessDiscoveryError = e.response?.data?.error || e.message; }
+
+  // 6. Insights test — try fetching insights on the FIRST reel we find
+  const firstReel = result.mediaPage1?.items?.find(m =>
+    String(m.media_product_type || '').toUpperCase() === 'REELS'
+  );
+  if (firstReel) {
+    try {
+      const r = await axios.get(
+        `https://graph.facebook.com/${apiVersion}/${firstReel.id}/insights`,
+        { params: { access_token: igToken, metric: 'reach,saved,likes,comments,shares,views,total_interactions,ig_reels_avg_watch_time' }, timeout: 15000 },
+      );
+      result.sampleReelInsights = { id: firstReel.id, insights: r.data?.data || [] };
+    } catch (e) {
+      result.sampleReelInsights = { id: firstReel.id, error: e.response?.data?.error || e.message };
+    }
+  } else {
+    result.sampleReelInsights = { note: 'No REELS in first page to test insights on.' };
+  }
+
+  res.json(result);
+});
+
 /* ─── HEALTH CHECK ────────────────────────────────────────────────── */
 
 app.get('/api/health', (_, res) => res.json({ ok: true, ts: Date.now() }));
