@@ -782,12 +782,19 @@ function BrandCard({ brand, brandInfo }) {
                       </div>
                     );
                   })()}
-                  <div className="grid grid-cols-2 gap-1.5">
+                  <div className="grid grid-cols-3 gap-1.5">
                     <div>
                       <label className="text-[10px] text-slate-500 mb-1 block">IG Business ID</label>
                       <input type="text" value={brand.social?.igBusinessId || ''}
                         onChange={e => updateBrand(brand.id, { social: { ...(brand.social || {}), igBusinessId: e.target.value } })}
                         placeholder="17841…"
+                        className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100 placeholder-gray-600 font-mono" />
+                    </div>
+                    <div>
+                      <label className="text-[10px] text-slate-500 mb-1 block">IG Username</label>
+                      <input type="text" value={brand.social?.igUsername || ''}
+                        onChange={e => updateBrand(brand.id, { social: { ...(brand.social || {}), igUsername: e.target.value.replace(/^@/, '').trim() } })}
+                        placeholder="handle (no @)"
                         className="w-full px-2 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-gray-100 placeholder-gray-600 font-mono" />
                     </div>
                     <div>
