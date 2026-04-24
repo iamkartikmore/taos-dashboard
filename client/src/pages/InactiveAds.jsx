@@ -6,7 +6,7 @@ import {
   ChevronDown, ChevronRight, Download, TrendingDown,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { safeNum, fmt, normalizeInsight } from '../lib/analytics';
+import { safeNum, fmt, normalizeInsight, isAdFullyActive } from '../lib/analytics';
 import { fetchInsightsCustom } from '../lib/api';
 
 /* ─── STATUS META ────────────────────────────────────────────────── */
@@ -227,7 +227,7 @@ function PullLog({ lines }) {
 export default function InactiveAds() {
   const navigate = useNavigate();
   const {
-    brandData, activeBrandIds, brands, adMap, campaignMap, manualMap,
+    brandData, activeBrandIds, brands, adMap, adsetMap, campaignMap, manualMap,
     inactiveInsights, inactiveInsightsStatus, inactiveInsightsLastAt,
     setInactiveInsights, setInactiveInsightsStatus,
     startPullJob, updatePullJob, finishPullJob,
@@ -326,19 +326,35 @@ export default function InactiveAds() {
   const has90d   = Object.keys(inactiveInsights).length > 0;
   const hasAdMap = Object.keys(adMap).length > 0;
 
-  // Build full inactive list from adMap (all ads) filtered to non-ACTIVE
+  // An ad is "inactive" if ad, adset, OR campaign is not ACTIVE at pull-time.
+  // This matches the triple-active rule used everywhere else: anything the
+  // rest of the dashboard won't show has to land here.
   const inactiveRows = useMemo(() => {
     if (!hasAdMap) return [];
 
     return Object.entries(adMap)
-      .filter(([, ad]) => ad.effective_status !== 'ACTIVE')
+      .filter(([adId, ad]) => !isAdFullyActive(adId, adMap, adsetMap, campaignMap))
       .map(([adId, ad]) => {
         const insights = insight90Index[adId] || insight30Index[adId];
         const manual   = manualMap?.[adId] || {};
+        const adsetRec    = adsetMap[ad.adset_id] || null;
+        const campaignRec = campaignMap[ad.campaign_id] || null;
+        const adStatus     = ad.effective_status       || ad.status       || 'UNKNOWN';
+        const adsetStatus  = adsetRec?.effective_status || adsetRec?.status || '';
+        const camStatus    = campaignRec?.effective_status || campaignRec?.status || '';
+        // Root cause — which level pushed this ad into Inactive
+        const inactiveBlocker =
+          adStatus !== 'ACTIVE'                        ? 'ad'
+          : (adsetStatus && adsetStatus !== 'ACTIVE')  ? 'adset'
+          : (camStatus   && camStatus   !== 'ACTIVE')  ? 'campaign'
+          : 'ad';
         return {
           adId,
           adName:          ad.name || insights?.adName || adId,
-          effectiveStatus: ad.effective_status || ad.status || 'UNKNOWN',
+          effectiveStatus: adStatus,
+          adsetStatus,
+          campaignStatus:  camStatus,
+          inactiveBlocker,
           campaignId:      ad.campaign_id     || insights?.campaignId     || '',
           campaignName:    insights?.campaignName || campaignMap[ad.campaign_id]?.name || '',
           adSetId:         ad.adset_id        || insights?.adSetId        || '',
@@ -368,7 +384,7 @@ export default function InactiveAds() {
         safeNum(b.metaRoas) - safeNum(a.metaRoas) ||
         safeNum(b.spend)    - safeNum(a.spend)
       );
-  }, [adMap, insight90Index, insight30Index, manualMap, campaignMap, hasAdMap]);
+  }, [adMap, adsetMap, insight90Index, insight30Index, manualMap, campaignMap, hasAdMap]);
 
   /* ── Segmented views ─────────────────────────────────────────────── */
   const highPotential = useMemo(() =>
@@ -562,9 +578,17 @@ export default function InactiveAds() {
                             <div className="text-[10px] text-slate-500 truncate">{r.campaignName || r.campaignId}</div>
                           </td>
                           <td className="py-2.5 px-3">
-                            <span className={clsx('px-2 py-0.5 rounded-full text-[10px] font-semibold', meta.bg, meta.color)}>
-                              {meta.label}
-                            </span>
+                            <div className="flex flex-col gap-0.5">
+                              <span className={clsx('px-2 py-0.5 rounded-full text-[10px] font-semibold w-fit', meta.bg, meta.color)}
+                                    title={`Ad: ${r.effectiveStatus}${r.adsetStatus ? ` · Adset: ${r.adsetStatus}` : ''}${r.campaignStatus ? ` · Campaign: ${r.campaignStatus}` : ''}`}>
+                                {meta.label}
+                              </span>
+                              {r.inactiveBlocker !== 'ad' && (
+                                <span className="text-[9px] text-slate-500 italic" title="Ad itself is ACTIVE but a parent is paused — still hidden from active modules">
+                                  via {r.inactiveBlocker}
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="py-2.5 px-3 text-slate-400">{r.collection || '—'}</td>
                           <td className={clsx('py-2.5 px-3 text-right font-bold',

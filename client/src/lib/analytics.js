@@ -320,13 +320,58 @@ import {
   predictRoas7d, calcDaysUntilFatigue,
 } from './metaIntelligence.js';
 
+/* Hierarchy-aware active check.
+   Returns true only when the ad, its adset, AND its campaign are
+   ALL reporting effective_status === 'ACTIVE' at the time the maps
+   were pulled. If any link in the chain is paused, archived, deleted,
+   in review, disapproved, etc. — the ad is considered inactive and
+   should be filtered out of every ads analytics module.
+   Meta's own effective_status usually rolls up (an ad under a paused
+   campaign shows CAMPAIGN_PAUSED), but that rollup is not guaranteed
+   on every sync. Checking all three explicitly is the safe default.
+   When a parent record is missing from its map (partial fetch), we
+   fall back to the ad's own effective_status instead of punishing it. */
+export function isAdFullyActive(adIdOrInsight, adMap = {}, adsetMap = {}, campaignMap = {}) {
+  if (!adIdOrInsight) return false;
+  const hasMap = Object.keys(adMap).length > 0;
+  if (!hasMap) return true; // maps not loaded yet — don't filter, keep UI populated
+
+  // Accept either an ad id string, an ad record, or an insight row
+  const adId = typeof adIdOrInsight === 'string'
+    ? adIdOrInsight
+    : (adIdOrInsight.adId || adIdOrInsight.id);
+  const ad = adMap[adId];
+  if (!ad) return false;
+  if ((ad.effective_status || ad.status) !== 'ACTIVE') return false;
+
+  const adsetId = ad.adset_id || (typeof adIdOrInsight === 'object' ? adIdOrInsight.adSetId : null);
+  const adset = adsetId ? adsetMap[adsetId] : null;
+  if (adset) {
+    const s = adset.effective_status || adset.status;
+    if (s && s !== 'ACTIVE') return false;
+  }
+
+  const campaignId = ad.campaign_id || (typeof adIdOrInsight === 'object' ? adIdOrInsight.campaignId : null);
+  const campaign = campaignId ? campaignMap[campaignId] : null;
+  if (campaign) {
+    const s = campaign.effective_status || campaign.status;
+    if (s && s !== 'ACTIVE') return false;
+  }
+
+  return true;
+}
+
 export function buildEnrichedRows(insights7d, insights30d, manualMap, adsetMap = {}, campaignMap = {}, adMap = {}) {
-  // Only include rows where the ad (and its adset + campaign) are fully ACTIVE.
-  // Meta's effective_status already rolls up the hierarchy — if it's ACTIVE the whole chain is active.
-  // When adMap is empty (data not yet fetched) we pass everything through so the UI stays populated.
+  // Strict: ad + adset + campaign must ALL be ACTIVE at the time of the pull.
+  // Anything else (paused adset, archived campaign, disapproved ad, etc.)
+  // is excluded from enrichedRows and therefore from every downstream
+  // analytics module — those ads live in the Inactive Ads view instead.
+  // When adMap is empty (data not yet fetched) we pass everything through
+  // so the UI stays populated while the first pull is in flight.
   const hasAdMap = Object.keys(adMap).length > 0;
-  const activeInsights7d  = hasAdMap ? insights7d.filter(r  => adMap[r.adId]?.effective_status === 'ACTIVE') : insights7d;
-  const activeInsights30d = hasAdMap ? insights30d.filter(r => adMap[r.adId]?.effective_status === 'ACTIVE') : insights30d;
+  const keepRow = r => !hasAdMap || isAdFullyActive(r, adMap, adsetMap, campaignMap);
+  const activeInsights7d  = hasAdMap ? insights7d.filter(keepRow)  : insights7d;
+  const activeInsights30d = hasAdMap ? insights30d.filter(keepRow) : insights30d;
 
   const rows30 = {};
   activeInsights30d.forEach(r => { rows30[r.adId] = r; });

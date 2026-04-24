@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { useStore } from '../store';
 import { fetchInsights } from '../lib/api';
-import { normalizeInsight } from '../lib/analytics';
+import { normalizeInsight, isAdFullyActive } from '../lib/analytics';
 
 /* ─── PERIODS ─────────────────────────────────────────────────────── */
 const PERIODS = [
@@ -86,16 +86,18 @@ function fmtBudget(db, lb) {
 /* ─── BUILD COLLECTION GROUPS ────────────────────────────────────── */
 function buildGroups(periodRows, enrichedRows, manualMap, campaignMap, adsetMap, adMap, periodDays) {
   const hasAdMap = Object.keys(adMap).length > 0;
-  const isActive = id => !hasAdMap || !adMap[id] || adMap[id].effective_status === 'ACTIVE';
+  // Triple-active: ad + adset + campaign all ACTIVE at pull-time.
+  // Anything else is hidden here and surfaced in Inactive Ads instead.
+  const isActive = id => !hasAdMap || isAdFullyActive(id, adMap, adsetMap, campaignMap);
 
-  /* ── 1. Period metrics per entity — ACTIVE ads only ── */
+  /* ── 1. Period metrics per entity — triple-ACTIVE ads only ── */
   const byAd  = {};
   const byAs  = {};
   const byCam = {};
 
   for (const r of periodRows) {
-    // Skip paused/deleted/inactive ads when we have adMap data
-    if (hasAdMap && adMap[r.adId] && adMap[r.adId].effective_status !== 'ACTIVE') continue;
+    // Skip rows whose ad, adset, OR campaign is not fully ACTIVE
+    if (hasAdMap && !isAdFullyActive(r, adMap, adsetMap, campaignMap)) continue;
     const acc = (map, id) => {
       if (!id) return;
       if (!map[id]) map[id] = {
