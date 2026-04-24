@@ -35,8 +35,8 @@ export async function pullInstagram({ token, pageAccessToken, apiVersion = 'v21.
   return normalized;
 }
 
-export async function debugInstagram({ token, pageAccessToken, apiVersion = 'v21.0', igUserId }) {
-  return post('/api/social/debug-ig', { token, pageAccessToken, apiVersion, igUserId });
+export async function debugInstagram({ token, pageAccessToken, apiVersion = 'v21.0', igUserId, fallbackIgUserId, fallbackUsername }) {
+  return post('/api/social/debug-ig', { token, pageAccessToken, apiVersion, igUserId, fallbackIgUserId, fallbackUsername });
 }
 
 export async function pullFacebook({ pageAccessToken, apiVersion = 'v21.0', pageId, brandId, limit = 200, sinceDays = 90, includeComments = true }) {

@@ -494,16 +494,25 @@ export default function SocialPosts() {
     setDebugging(true);
     setDebugResult(null);
     try {
+      // Pick any brand with a working IG as the fallback-discovery source.
+      // If the target brand errors on direct lookup, we'll run
+      // business_discovery through this known-good IG.
+      const fallback = active.find(b => b.social?.igBusinessId && b.social?.igUsername);
       const results = {};
       for (const b of active) {
         const cfg = b.social || {};
         if (!cfg.igBusinessId || !b.meta?.token) continue;
+        // Don't use the brand itself as its own fallback
+        const fbIgId = fallback && fallback.id !== b.id ? fallback.social.igBusinessId : null;
+        const fbUsername = cfg.igUsername || null;
         try {
           const r = await debugInstagram({
             token: b.meta.token,
             pageAccessToken: cfg.pageAccessToken,
             apiVersion: b.meta.apiVersion,
             igUserId: cfg.igBusinessId,
+            fallbackIgUserId: fbIgId,
+            fallbackUsername: fbUsername,
           });
           results[b.name] = r;
         } catch (e) {

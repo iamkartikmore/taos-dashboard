@@ -2312,7 +2312,11 @@ app.post('/api/social/pull-fb', async (req, res) => {
    whether Meta is filtering reels or our pipeline is dropping them.
 */
 app.post('/api/social/debug-ig', async (req, res) => {
-  const { token, pageAccessToken, apiVersion = 'v21.0', igUserId } = req.body || {};
+  // fallbackIgUserId + fallbackUsername let us use a known-working IG
+  // (e.g. Dawbu) to run business_discovery against the target username
+  // when the target itself won't load — crucial for diagnosing banned
+  // or restricted accounts.
+  const { token, pageAccessToken, apiVersion = 'v21.0', igUserId, fallbackIgUserId, fallbackUsername } = req.body || {};
   if (!token || !igUserId) return res.status(400).json({ error: 'token and igUserId required' });
   const igToken = pageAccessToken || token;
   const result = {
@@ -2393,20 +2397,38 @@ app.post('/api/social/debug-ig', async (req, res) => {
     };
   } catch (e) { result.allMediaError = e.response?.data?.error || e.message; }
 
-  // 5. Try business_discovery fallback — sometimes exposes data /media won't
-  try {
-    const r = await axios.get(
-      `https://graph.facebook.com/${apiVersion}/${igUserId}`,
-      {
-        params: {
-          access_token: igToken,
-          fields: `business_discovery.username(${result.account?.username || ''}){id,media_count,followers_count,media.limit(10){id,media_type,media_product_type,timestamp,caption}}`,
+  // 5. business_discovery — use a KNOWN-WORKING IG (the fallback one,
+  // usually Dawbu) to query the target's public data. This is the
+  // definitive "is this account reachable by Meta's API at all" test.
+  // If this succeeds while the direct /{igUserId} call fails, we've
+  // confirmed: account is public + business, just not in this token's
+  // asset set. If this fails too, account is banned / deleted /
+  // not a business account at Meta's platform level.
+  if (fallbackIgUserId && fallbackUsername && fallbackUsername !== result.account?.username) {
+    try {
+      const r = await axios.get(
+        `https://graph.facebook.com/${apiVersion}/${fallbackIgUserId}`,
+        {
+          params: {
+            access_token: igToken,
+            fields: `business_discovery.username(${fallbackUsername}){id,username,name,biography,website,followers_count,follows_count,media_count,profile_picture_url,media.limit(10){id,media_type,media_product_type,timestamp,caption,like_count,comments_count}}`,
+          },
+          timeout: 15000,
         },
-        timeout: 15000,
-      },
-    );
-    result.businessDiscovery = r.data?.business_discovery || null;
-  } catch (e) { result.businessDiscoveryError = e.response?.data?.error || e.message; }
+      );
+      result.businessDiscovery = {
+        viaIgUserId: fallbackIgUserId,
+        ofUsername: fallbackUsername,
+        data: r.data?.business_discovery || null,
+      };
+    } catch (e) {
+      result.businessDiscovery = {
+        viaIgUserId: fallbackIgUserId,
+        ofUsername: fallbackUsername,
+        error: e.response?.data?.error || e.message,
+      };
+    }
+  }
 
   // 6. Insights test — try fetching insights on the FIRST reel we find
   const firstReel = result.mediaPage1?.items?.find(m =>
