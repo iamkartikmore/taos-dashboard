@@ -22,11 +22,13 @@ import { parseCsv } from './csvImport';
 const COLUMN_PATTERNS = {
   // Dimensions — order matters: more specific first
   date:         ['reportdate', 'reportday', 'day', 'date'],
-  utmSource:    ['utmsource', 'marketingsource'],
-  utmMedium:    ['utmmedium', 'marketingmedium'],
-  utmCampaign:  ['utmcampaign', 'marketingcampaign'],
-  utmContent:   ['utmcontent'],
-  utmTerm:      ['utmterm'],
+  // utmsourceval added 2026-04 — Shopify's newer scheduled reports
+  // export `utm_source_val` (the raw param value) instead of `utm_source`.
+  utmSource:    ['utmsourceval', 'utmsource', 'marketingsource'],
+  utmMedium:    ['utmmediumval', 'utmmedium', 'marketingmedium'],
+  utmCampaign:  ['utmcampaignval', 'utmcampaign', 'marketingcampaign'],
+  utmContent:   ['utmcontentval', 'utmcontent'],
+  utmTerm:      ['utmtermval', 'utmterm'],
   channel:      ['marketingchannel', 'channelgroup', 'defaultchannelgroup', 'channelgrouping', 'channel'],
   source:       ['source'],            // fallback when utm_source not explicit
   medium:       ['medium'],            // fallback when utm_medium not explicit
@@ -39,7 +41,13 @@ const COLUMN_PATTERNS = {
   sessions:        ['onlinestoresessions', 'sessions', 'visits', 'sessioncount'],
   users:           ['uniquevisitors', 'uniquesvisitors', 'users', 'uniqueusers'],
   orders:          ['orderplaced', 'orderscompleted', 'orderstotal', 'totalorders', 'ordercount', 'purchases', 'transactions', 'orders'],
-  revenue:         ['totalsales', 'netsales', 'grosssales', 'purchasevalue', 'revenue', 'sales', 'totalrevenue'],
+  // estimatedgmv (Shopify newer reports) is the revenue/sales total.
+  revenue:         ['estimatedgmv', 'totalsales', 'netsales', 'grosssales', 'purchasevalue', 'revenue', 'sales', 'totalrevenue', 'gmv'],
+  // AOV explicitly reported in some Shopify exports — read it as a
+  // first-class metric so we use Shopify's own per-row value rather
+  // than recomputing from rounded revenue/orders. Falls back to
+  // computed when not present.
+  aov:             ['aov', 'averageordervalue', 'avgordervalue', 'avgorder'],
   checkoutInitiated: ['checkoutinitiated', 'initiatecheckout', 'checkoutstarted', 'addtocart', 'atc', 'addedtocart'],
   conversionRate:  ['conversionrate', 'cvr', 'conversion', 'conversions', 'totalconversions'],
   clicks:          ['clicks', 'totalclicks'],
@@ -154,6 +162,23 @@ export function parseUtmReport(text, { filename = '', fallbackDate = null } = {}
     if (cols.clicks)            out.clicks            = num(row[cols.clicks]);
     if (cols.impressions)       out.impressions       = num(row[cols.impressions]);
     if (cols.cost)              out.cost              = num(row[cols.cost]);
+    if (cols.aov)               out.aovReported       = num(row[cols.aov]);
+    // Compute AOV: prefer Shopify's own AOV column (carries their
+    // rounding/refund logic); fall back to revenue/orders.
+    out.aov = out.aovReported && out.aovReported > 0
+      ? out.aovReported
+      : (out.orders > 0 && out.revenue > 0 ? out.revenue / out.orders : 0);
+    // Funnel signals available only when both stages are present
+    if (out.checkoutInitiated > 0 && out.orders >= 0) {
+      out.checkoutToOrderRate = out.checkoutInitiated > 0 ? out.orders / out.checkoutInitiated : 0;
+    }
+    // Estimated revenue when only AOV+orders present (Shopify reports
+    // sometimes ship estimated_gmv but it's clearly the AOV*orders
+    // product — when missing, we synthesise the same way for parity).
+    if (!cols.revenue && out.orders > 0 && out.aov > 0) {
+      out.revenue = out.aov * out.orders;
+      out.revenueEstimated = true;
+    }
     return out;
   }).filter(r => {
     // Keep rows with ANY signal — dimension OR metric.
