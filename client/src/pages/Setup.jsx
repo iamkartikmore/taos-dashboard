@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus, Trash2, CheckCircle, AlertCircle, RefreshCw, Key,
@@ -164,7 +164,7 @@ function BrandCard({ brand, brandInfo }) {
     setVerifyingSocial(true); setSocialDiscovery(null);
     try {
       const r = await verifySocialToken(brand.meta.token, brand.meta.apiVersion);
-      setSocialDiscovery(r);
+      setSocialDiscovery({ ...r, _forToken: brand.meta.token });
       // Auto-pick the first Page that has a linked IG business account
       const pick = (r.pages || []).find(p => p.ig?.id) || (r.pages || [])[0];
       if (pick) {
@@ -190,9 +190,30 @@ function BrandCard({ brand, brandInfo }) {
     try {
       const me = await verifyToken(brand.meta.token, brand.meta.apiVersion);
       setVerifyOk({ ok: true, name: me.name });
+      // Auto-run Discover after a successful Verify so users don't
+      // have to click two buttons. If Discover fails (missing scopes,
+      // banned IG, etc.), the existing socialDiscovery banner explains.
+      handleDiscoverSocial();
     } catch (e) { setVerifyOk({ ok: false, msg: e.message }); }
     finally { setVerifying(false); }
   };
+
+  // Auto-discover whenever the Meta token changes (debounced) — saves
+  // the user from having to manually re-run Discover after switching
+  // accounts. Only fires when token has at least 50 chars (looks like
+  // a real token).
+  const tokenForEffect = brand.meta.token || '';
+  useEffect(() => {
+    if (tokenForEffect.length < 50) return;
+    if (verifyingSocial) return;
+    // Skip if we already have a fresh discovery for this exact token
+    const existing = socialDiscovery;
+    if (existing && existing._forToken === tokenForEffect) return;
+    const t = setTimeout(() => {
+      handleDiscoverSocial();
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [tokenForEffect]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const doPullMeta = async () => {
     const accounts = brand.meta.accounts.filter(a => a.key && a.id);

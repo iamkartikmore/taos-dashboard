@@ -20,8 +20,61 @@ const LS_SOCIAL  = 'taos_social_posts_v1';    // { [brandId]: { posts, baseline,
 function lsGet(key, fallback) {
   try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; } catch { return fallback; }
 }
+
+// Eviction order — when a critical key (LS_BRANDS, LS_MANUAL) fails to
+// save because LS quota is full, we drop these big-but-rebuildable
+// caches in this order and retry. Brand config + manual labels MUST
+// survive — everything else is rebuildable from a server pull.
+const EVICTABLE_KEYS = [
+  'taos_social_posts_v1',          // can re-pull
+  'taos_clarity_history_v1',       // can re-pull
+  'taos_utm_snapshots_v1',         // can re-pull
+  'taos_inventory_v2',             // can re-pull
+  'taos_customers',                // big — rebuilt on next orders pull
+];
+
+function _evictAndRetry(key, valStr) {
+  // Try to free space by dropping the largest evictable bucket first
+  const sizes = EVICTABLE_KEYS.map(k => {
+    try { return [k, (localStorage.getItem(k) || '').length]; } catch { return [k, 0]; }
+  }).filter(([, s]) => s > 0).sort((a, b) => b[1] - a[1]);
+  for (const [evictKey] of sizes) {
+    try {
+      localStorage.removeItem(evictKey);
+      console.warn(`[storage] LS quota exceeded saving ${key}; evicted ${evictKey}`);
+      localStorage.setItem(key, valStr);
+      return true;
+    } catch (_) { /* still full, try next */ }
+  }
+  return false;
+}
+
 function lsSet(key, val) {
-  try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+  let serialized;
+  try { serialized = JSON.stringify(val); }
+  catch (e) { console.error(`[storage] failed to stringify ${key}:`, e); return false; }
+  try {
+    localStorage.setItem(key, serialized);
+    return true;
+  } catch (err) {
+    // QuotaExceededError on every browser — code 22 (DOMException) on
+    // most, code 1014 on Firefox, name 'QuotaExceededError' everywhere.
+    const isQuota = err?.name === 'QuotaExceededError' || err?.code === 22 || err?.code === 1014
+                 || /quota/i.test(err?.message || '');
+    if (isQuota && _evictAndRetry(key, serialized)) {
+      return true;
+    }
+    console.error(`[storage] failed to save ${key}:`, err);
+    // Surface to the user via a global notice if it's a critical key
+    if (key === 'taos_brands_v2' || key === 'taos_manual') {
+      try {
+        window.dispatchEvent(new CustomEvent('taos-storage-error', {
+          detail: { key, error: err?.message || String(err), isQuota },
+        }));
+      } catch (_) {}
+    }
+    return false;
+  }
 }
 
 /* ─── BRAND FACTORY ─────────────────────────────────────────────── */

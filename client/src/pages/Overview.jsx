@@ -118,22 +118,31 @@ function PeriodBadge({ period }) {
 
 function KpiCard({ label, value, sub, delta, icon: Icon, iconColor = 'text-brand-400', onClick, deltaSuffix }) {
   const DIcon = deltaIcon(delta ?? 0);
+  const v = value ?? '—';
+  // Auto-shrink the value text when the rendered value is long (8-col
+  // grids cards can be ~140px wide; "₹12,34,56,789" is 14 chars).
+  const valLen = String(v).length;
+  const valSize = valLen > 14 ? 'text-base'
+               : valLen > 11 ? 'text-lg'
+               : valLen > 8  ? 'text-xl'
+               : 'text-2xl';
   return (
     <div
-      className={clsx('bg-gray-900 border border-gray-800/60 rounded-xl p-4 flex flex-col gap-2', onClick && 'cursor-pointer hover:border-gray-700 transition-colors')}
+      className={clsx('bg-gray-900 border border-gray-800/60 rounded-xl p-3 flex flex-col gap-1.5 min-w-0 overflow-hidden', onClick && 'cursor-pointer hover:border-gray-700 transition-colors')}
       onClick={onClick}
+      title={sub ? `${label} — ${v} · ${sub}` : `${label} — ${v}`}
     >
-      <div className="flex items-center justify-between">
-        <span className="text-[11px] text-slate-500 uppercase tracking-wider">{label}</span>
-        <Icon size={15} className={iconColor} />
+      <div className="flex items-center justify-between gap-2 min-w-0">
+        <span className="text-[10px] text-slate-500 uppercase tracking-wider truncate flex-1">{label}</span>
+        <Icon size={13} className={clsx(iconColor, 'flex-shrink-0')} />
       </div>
-      <div className="text-2xl font-bold text-white">{value ?? '—'}</div>
-      {(sub || delta !== undefined) && (
-        <div className="flex items-center gap-2 text-[11px]">
-          {sub && <span className="text-slate-500">{sub}</span>}
+      <div className={clsx(valSize, 'font-bold text-white tabular-nums leading-tight truncate')}>{v}</div>
+      {(sub || (delta !== undefined && delta !== null)) && (
+        <div className="flex items-center gap-2 text-[10px] min-w-0">
+          {sub && <span className="text-slate-500 truncate flex-1 min-w-0">{sub}</span>}
           {delta !== undefined && delta !== null && (
-            <span className={clsx('flex items-center gap-0.5 font-medium', deltaColor(delta))}>
-              <DIcon size={11} />
+            <span className={clsx('flex items-center gap-0.5 font-medium flex-shrink-0', deltaColor(delta))}>
+              <DIcon size={10} />
               {Math.abs(delta).toFixed(1)}%{deltaSuffix ? ` ${deltaSuffix}` : ' vs 30D'}
             </span>
           )}
